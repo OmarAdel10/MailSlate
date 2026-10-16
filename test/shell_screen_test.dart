@@ -114,4 +114,21 @@ void main() {
     expect(find.text('Sync paused — daemon unavailable'), findsOneWidget);
     expect(find.text('Retry'), findsOneWidget);
   });
+
+  testWidgets('re-checks the daemon when the refresh button is tapped', (
+    tester,
+  ) async {
+    final client = FakeFfiClient(status: _running);
+    configureDependencies(client: client);
+
+    await tester.pumpWidget(shell());
+    await tester.pumpAndSettle();
+
+    expect(client.statusCalls, 1);
+
+    await tester.tap(find.byTooltip('Check daemon'));
+    await tester.pumpAndSettle();
+
+    expect(client.statusCalls, 2);
+  });
 }

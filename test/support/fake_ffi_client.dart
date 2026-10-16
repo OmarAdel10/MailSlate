@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/core/failures/failures.dart';
 
@@ -32,11 +34,22 @@ class FakeFfiClient extends FfiClient {
   /// How often [startDaemon] was called.
   int startCalls = 0;
 
+  /// How often [daemonStatus] was called.
+  int statusCalls = 0;
+
+  /// When set, [daemonStatus] parks until the gate completes.
+  Completer<void>? statusGate;
+
   @override
   Future<void> initApp() async {}
 
   @override
   Future<DaemonStatus> daemonStatus() async {
+    statusCalls += 1;
+    final gate = statusGate;
+    if (gate != null) {
+      await gate.future;
+    }
     final thrown = statusThrow;
     if (thrown != null) {
       throw thrown;

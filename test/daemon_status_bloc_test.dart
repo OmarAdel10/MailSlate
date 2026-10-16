@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mailslate/core/failures/failures.dart';
 import 'package:mailslate/core/ffi/client.dart';
@@ -104,6 +106,10 @@ void main() {
   test('states compare by value', () {
     expect(const DaemonConnecting(), const DaemonConnecting());
     expect(
+      const DaemonConnecting().hashCode,
+      const DaemonConnecting().hashCode,
+    );
+    expect(
       const DaemonConnected(daemonVersion: '1.2.3', protocolVersion: 1),
       const DaemonConnected(daemonVersion: '1.2.3', protocolVersion: 1),
     );
@@ -130,5 +136,25 @@ void main() {
       const DaemonUnavailable(failure: StorageFailure()),
       isNot(const DaemonUnavailable()),
     );
+  });
+
+  test('drops the result when the bloc closes mid-flight', () async {
+    final gate = Completer<void>();
+    final client = FakeFfiClient()..statusGate = gate;
+    final bloc = DaemonStatusBloc(client);
+
+    final expectation = expectLater(
+      bloc.stream,
+      emitsInOrder([isA<DaemonConnecting>(), emitsDone]),
+    );
+    bloc.add(const DaemonStatusRequested());
+    await Future<void>.delayed(Duration.zero);
+
+    final closed = bloc.close();
+    gate.complete();
+    await closed;
+    await expectation;
+
+    expect(client.statusCalls, 1);
   });
 }
