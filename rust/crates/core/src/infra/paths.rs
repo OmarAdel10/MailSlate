@@ -4,7 +4,7 @@
 //! overrides (scratch profiles, tests). Resolution never creates directories;
 //! the daemon creates what it needs at startup.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Environment variable that overrides the data directory.
 pub const DATA_DIR_ENV: &str = "MAILSLATE_DATA_DIR";
@@ -64,11 +64,21 @@ pub fn pid_file() -> PathBuf {
 /// IPC endpoint the daemon listens on (unix sockets; ARCHITECTURE §5).
 #[cfg(unix)]
 pub fn socket_path() -> PathBuf {
-    socket_path_from(|key| std::env::var(key).ok())
+    socket_path_for(&data_dir())
+}
+
+/// IPC endpoint for an explicit data directory.
+///
+/// Mirrors [`socket_path`] but resolves the fallback from `data_dir` instead
+/// of the environment, so the GUI and a daemon spawned with an explicit
+/// profile always agree on the socket.
+#[cfg(unix)]
+pub fn socket_path_for(data_dir: &Path) -> PathBuf {
+    socket_path_from_env(|key| std::env::var(key).ok(), data_dir)
 }
 
 #[cfg(unix)]
-fn socket_path_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
+fn socket_path_from_env(env: impl Fn(&str) -> Option<String>, data_dir: &Path) -> PathBuf {
     #[cfg(target_os = "linux")]
     if let Some(runtime) = env("XDG_RUNTIME_DIR") {
         let trimmed = runtime.trim();
@@ -76,7 +86,7 @@ fn socket_path_from(env: impl Fn(&str) -> Option<String>) -> PathBuf {
             return PathBuf::from(trimmed).join("mailslate").join("daemon.sock");
         }
     }
-    data_dir_from(env).join("daemon.sock")
+    data_dir.join("daemon.sock")
 }
 
 /// Named pipe the daemon listens on (Windows; ARCHITECTURE §5).
@@ -111,9 +121,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn socket_prefers_xdg_runtime_dir() {
-        let path = socket_path_from(|key| {
-            (key == "XDG_RUNTIME_DIR").then(|| "/run/user/1000".to_string())
-        });
+        let path = socket_path_from_env(
+            |key| (key == "XDG_RUNTIME_DIR").then(|| "/run/user/1000".to_string()),
+            Path::new("/data"),
+        );
         assert_eq!(
             path,
             PathBuf::from("/run/user/1000")
@@ -125,7 +136,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn socket_falls_back_to_data_dir() {
-        let path = socket_path_from(|key| (key == DATA_DIR_ENV).then(|| "/data".to_string()));
+        let path = socket_path_from_env(|_| None, Path::new("/data"));
         assert_eq!(path, PathBuf::from("/data").join("daemon.sock"));
     }
 

@@ -5,5 +5,7 @@
 //! `db` and `keyring` touch the outside world.
 
 pub mod db;
+#[cfg(unix)]
+pub mod ipc;
 pub mod keyring;
 pub mod paths;

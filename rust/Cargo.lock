@@ -727,9 +727,12 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "keyring",
+ "mailslate-protocol",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
