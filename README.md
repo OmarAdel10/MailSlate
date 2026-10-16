@@ -4,8 +4,9 @@ A high-performance, local-first desktop email client — Flutter GUI, Rust sync 
 SQLite + FTS5 local store. Direct IMAP/SMTP with OAuth2 for Gmail, Outlook, and any
 generic IMAP provider.
 
-> **Status: pre-alpha.** The v1 specification suite is complete (`specs/`); implementation
-> starts with milestone M1 (see [Roadmap](#roadmap)). No packages are published yet.
+> **Status: pre-alpha.** Milestone M1 is implemented: the daemon boots, owns SQLite schema
+> v1 with FTS5, and answers IPC pings; the GUI shell renders the 3-pane layout with design
+> tokens and live daemon status. No packages are published yet.
 
 ## Highlights (v1 scope)
 
@@ -54,10 +55,14 @@ cd MailSlate
 
 flutter pub get
 cargo fetch --manifest-path rust/Cargo.toml
-flutter_rust_bridge_codegen generate
+cargo build --manifest-path rust/Cargo.toml -p mailslate-daemon
 
 flutter run -d linux        # or -d windows / -d macos
 ```
+
+The GUI finds a running daemon or spawns one automatically. Run
+`flutter_rust_bridge_codegen generate` only after changing the Rust API in
+`rust/crates/bridge/`.
 
 Scratch profile (keeps your real mail data untouched):
 
@@ -106,6 +111,8 @@ tool/       Helper scripts (icons, test fixtures, GreenMail fetcher)
 - Commits follow the emoji + Conventional Commits convention; every commit passes the FAST
   gate (`dart format`, `flutter analyze`, `cargo fmt`, `cargo clippy`).
 - CI runs on every branch and every PR. CD runs only on `master` `v*` tags.
+- CI also enforces supply-chain hygiene (`cargo deny`) and fails on stale
+  flutter_rust_bridge codegen.
 - No Docker anywhere in the toolchain — integration fixtures use a standalone GreenMail JAR.
 
 Read [AGENTS.md](./AGENTS.md) before opening your first PR.

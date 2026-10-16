@@ -12,8 +12,6 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-9 — M1: `.github/workflows/ci.yml` build-matrix is Linux-only and the
   windows/macos legs of `.github/workflows/cd.yml` auto-skip until the Windows/macOS
   Flutter scaffolds are committed (`flutter create` on each OS); restore the legs then.
-- MAILSLATE-10 — M1: CI does not yet fail on stale flutter_rust_bridge codegen
-  (`AGENTS.md` §5); add a freshness check once the FRB 2.13.0 toolchain is wired.
 - MAILSLATE-11 — M2: the CI rust job smoke-fetches the GreenMail JAR
   (`.github/workflows/ci.yml`) but cannot run `--features greenmail` integration
   tests until setup-java is wired (`specs/DEVELOPMENT_ENVIRONMENT.md` §8).
@@ -26,3 +24,17 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-14 — Docs: `specs/DEVELOPMENT_ENVIRONMENT.md` §10 does not yet match the
   shipped `cd.yml` (appdmg 0.6.6, deb `installed_size`/`license` fields, Inno Setup
   6.7.1 pin, actionlint v1.7.12 pin); sync the spec text.
+- MAILSLATE-15 — M1: the shell renders the platform font stack; DESIGN.md §4
+  specifies Inter (UI) and JetBrains Mono (code) — bundle both and set the
+  TextTheme families (`lib/core/theme/theme.dart`).
+- MAILSLATE-16 — M1: minimum window size 1024x640 (USER_FLOW.md §2) is not yet
+  enforced; wire the desktop runners once the scaffolds land (MAILSLATE-9;
+  `lib/main.dart`, `linux/`, `windows/`, `macos/`).
+- MAILSLATE-17 — M1: the daemon-unavailable card ships Retry only; add the
+  `View log` action (USER_FLOW.md §9) alongside the M5 Settings daemon section
+  (`lib/features/shell/shell_screen.dart`).
+
+## Closed
+
+- MAILSLATE-10 — closed by `7a2e7be`: CI now regenerates the FRB bindings and
+  fails on stale output, and `rust/deny.toml` runs cargo-deny in the rust job.
