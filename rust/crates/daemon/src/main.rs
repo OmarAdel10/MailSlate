@@ -57,7 +57,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_short_version_flag() {
+        assert_eq!(parse_args(&args(&["-V"])), Command::Version);
+    }
+
+    #[test]
+    fn parses_help_flags() {
+        assert_eq!(parse_args(&args(&["--help"])), Command::Help);
+        assert_eq!(parse_args(&args(&["-h"])), Command::Help);
+    }
+
+    #[test]
     fn defaults_to_run() {
         assert_eq!(parse_args(&args(&[])), Command::Run);
+    }
+
+    #[test]
+    fn unknown_first_arg_runs() {
+        assert_eq!(parse_args(&args(&["--nope"])), Command::Run);
+    }
+
+    #[test]
+    fn extra_args_are_ignored_after_first() {
+        assert_eq!(
+            parse_args(&args(&["--version", "--help"])),
+            Command::Version
+        );
+        assert_eq!(parse_args(&args(&["--help", "--version"])), Command::Help);
+    }
+
+    #[test]
+    fn flag_after_positional_is_ignored() {
+        assert_eq!(parse_args(&args(&["sync", "--version"])), Command::Run);
     }
 }

@@ -21,7 +21,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hello_mentions_crate_version() {
-        assert!(bridge_hello().contains(env!("CARGO_PKG_VERSION")));
+    fn hello_mentions_crate_name_and_version() {
+        let greeting = bridge_hello();
+        assert!(greeting.starts_with("hello from mailslate-bridge "));
+        assert!(greeting.contains(env!("CARGO_PKG_VERSION")));
     }
 }

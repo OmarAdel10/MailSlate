@@ -22,10 +22,7 @@ mod tests {
     fn crate_version_is_semver_like() {
         let version = crate_version();
         assert!(!version.is_empty());
-        assert_eq!(
-            version.split('.').count(),
-            3,
-            "expected semver, got {version}"
-        );
+        let core = version.split(['-', '+']).next().unwrap_or(version);
+        assert_eq!(core.split('.').count(), 3, "expected semver, got {version}");
     }
 }

@@ -47,5 +47,7 @@ mod tests {
     #[test]
     fn other_versions_are_rejected() {
         assert!(!is_compatible(PROTOCOL_VERSION + 1));
+        assert!(!is_compatible(0));
+        assert!(!is_compatible(u32::MAX));
     }
 }
