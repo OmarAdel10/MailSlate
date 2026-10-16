@@ -21,9 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out base configuration
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # Pinned to commit SHAs: tags are mutable. PRs from forks receive a
+      # read-only GITHUB_TOKEN under the pull_request trigger, so labeling
+      # is skipped for fork PRs (accepted limitation).
       - name: Label pull request
-        uses: actions/labeler@v5
+        uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
