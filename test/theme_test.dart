@@ -46,4 +46,15 @@ void main() {
     expect(dark.colorScheme.surface, AppTokens.dark.canvas);
     expect(dark.scaffoldBackgroundColor, AppTokens.dark.canvas);
   });
+
+  test('copyWith replaces only the named tokens', () {
+    final custom = AppTokens.dark.copyWith(primary: const Color(0xFF123456));
+    expect(custom.primary, const Color(0xFF123456));
+    expect(custom.canvas, AppTokens.dark.canvas);
+    expect(custom.error, AppTokens.dark.error);
+
+    final unchanged = AppTokens.light.copyWith();
+    expect(unchanged.canvas, AppTokens.light.canvas);
+    expect(unchanged.badgeEmerald, AppTokens.light.badgeEmerald);
+  });
 }

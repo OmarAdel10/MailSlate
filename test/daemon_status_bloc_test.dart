@@ -15,7 +15,6 @@ void main() {
       ),
     );
     final bloc = DaemonStatusBloc(client);
-    addTearDown(bloc.close);
 
     final expectation = expectLater(
       bloc.stream,
@@ -24,9 +23,11 @@ void main() {
         isA<DaemonConnected>()
             .having((state) => state.daemonVersion, 'daemonVersion', '0.1.0')
             .having((state) => state.protocolVersion, 'protocolVersion', 1),
+        emitsDone,
       ]),
     );
     bloc.add(const DaemonStatusRequested());
+    await bloc.close();
     await expectation;
 
     expect(client.startCalls, 0);
@@ -34,16 +35,23 @@ void main() {
 
   test('spawns the daemon when the status check finds it down', () async {
     final client = FakeFfiClient(
+      status: const DaemonStatus(state: DaemonState.unavailable),
       pingResult: const PingInfo(protocolVersion: 1, daemonVersion: '0.1.0'),
     );
     final bloc = DaemonStatusBloc(client);
-    addTearDown(bloc.close);
 
     final expectation = expectLater(
       bloc.stream,
-      emitsInOrder([isA<DaemonConnecting>(), isA<DaemonConnected>()]),
+      emitsInOrder([
+        isA<DaemonConnecting>(),
+        isA<DaemonConnected>()
+            .having((state) => state.daemonVersion, 'daemonVersion', '0.1.0')
+            .having((state) => state.protocolVersion, 'protocolVersion', 1),
+        emitsDone,
+      ]),
     );
     bloc.add(const DaemonStatusRequested());
+    await bloc.close();
     await expectation;
 
     expect(client.startCalls, 1);
@@ -54,7 +62,6 @@ void main() {
       startFailure: const DaemonUnavailableFailure(),
     );
     final bloc = DaemonStatusBloc(client);
-    addTearDown(bloc.close);
 
     final expectation = expectLater(
       bloc.stream,
@@ -65,9 +72,63 @@ void main() {
           'failure',
           isA<DaemonUnavailableFailure>(),
         ),
+        emitsDone,
       ]),
     );
     bloc.add(const DaemonStatusRequested());
+    await bloc.close();
     await expectation;
+  });
+
+  test('maps unexpected errors to unavailable without detail', () async {
+    final client = FakeFfiClient(statusThrow: StateError('kaboom'));
+    final bloc = DaemonStatusBloc(client);
+
+    final expectation = expectLater(
+      bloc.stream,
+      emitsInOrder([
+        isA<DaemonConnecting>(),
+        isA<DaemonUnavailable>().having(
+          (state) => state.failure,
+          'failure',
+          isNull,
+        ),
+        emitsDone,
+      ]),
+    );
+    bloc.add(const DaemonStatusRequested());
+    await bloc.close();
+    await expectation;
+  });
+
+  test('states compare by value', () {
+    expect(const DaemonConnecting(), const DaemonConnecting());
+    expect(
+      const DaemonConnected(daemonVersion: '1.2.3', protocolVersion: 1),
+      const DaemonConnected(daemonVersion: '1.2.3', protocolVersion: 1),
+    );
+    expect(
+      const DaemonConnected(
+        daemonVersion: '1.2.3',
+        protocolVersion: 1,
+      ).hashCode,
+      const DaemonConnected(
+        daemonVersion: '1.2.3',
+        protocolVersion: 1,
+      ).hashCode,
+    );
+    expect(const DaemonUnavailable(), const DaemonUnavailable());
+    expect(
+      const DaemonUnavailable().hashCode,
+      const DaemonUnavailable().hashCode,
+    );
+    expect(
+      const DaemonConnected(daemonVersion: '1.2.3', protocolVersion: 1),
+      isNot(const DaemonConnected(daemonVersion: '9.9.9', protocolVersion: 1)),
+    );
+    expect(
+      const DaemonUnavailable(failure: StorageFailure()),
+      isNot(const DaemonUnavailable()),
+    );
   });
 }

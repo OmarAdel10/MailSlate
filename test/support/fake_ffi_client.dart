@@ -11,6 +11,7 @@ class FakeFfiClient extends FfiClient {
     ),
     this.startFailure,
     this.statusFailure,
+    this.statusThrow,
   });
 
   /// Returned by [daemonStatus] when [statusFailure] is null.
@@ -25,6 +26,9 @@ class FakeFfiClient extends FfiClient {
   /// When set, [daemonStatus] throws it.
   AppFailure? statusFailure;
 
+  /// When set, [daemonStatus] throws it (any object, for generic catches).
+  Object? statusThrow;
+
   /// How often [startDaemon] was called.
   int startCalls = 0;
 
@@ -33,6 +37,10 @@ class FakeFfiClient extends FfiClient {
 
   @override
   Future<DaemonStatus> daemonStatus() async {
+    final thrown = statusThrow;
+    if (thrown != null) {
+      throw thrown;
+    }
     final failure = statusFailure;
     if (failure != null) {
       throw failure;

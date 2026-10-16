@@ -52,5 +52,42 @@ void main() {
     test('failures are throwable exceptions', () {
       expect(const DaemonUnavailableFailure(), isA<Exception>());
     });
+
+    test('subclasses carry friendly defaults without a daemon message', () {
+      const cases = <(AppFailure, String, bool)>[
+        (DaemonUnavailableFailure(), 'Sync paused — daemon unavailable', true),
+        (NetworkFailure(), 'Connection problem — check your network', true),
+        (
+          AuthExpiredFailure(),
+          'Sign-in expired — reconnect this account',
+          false,
+        ),
+        (AuthFailedFailure(), 'Sign-in failed — check your credentials', false),
+        (
+          ServerRejectedFailure(),
+          'The mail server rejected the request',
+          false,
+        ),
+        (NotFoundFailure(), 'That item no longer exists', false),
+        (ValidationFailure(), 'That input is not valid', false),
+        (StorageFailure(), 'A local storage error occurred', false),
+        (
+          ProtocolMismatchFailure(),
+          'App and daemon versions do not match — update MailSlate',
+          false,
+        ),
+        (UnexpectedFailure(), 'Something went wrong', false),
+      ];
+
+      for (final (failure, message, retryable) in cases) {
+        expect(failure.message, message, reason: failure.kind);
+        expect(failure.retryable, retryable, reason: failure.kind);
+        expect(
+          failure.kind,
+          isNotEmpty,
+          reason: failure.runtimeType.toString(),
+        );
+      }
+    });
   });
 }

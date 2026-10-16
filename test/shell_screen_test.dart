@@ -85,4 +85,33 @@ void main() {
     expect(find.text('Retry'), findsNothing);
     expect(find.text('Daemon v0.9.0'), findsOneWidget);
   });
+
+  testWidgets('labels a connected daemon without a version', (tester) async {
+    configureDependencies(
+      client: FakeFfiClient(
+        status: const DaemonStatus(
+          state: DaemonState.running,
+          protocolVersion: 1,
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(shell());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Daemon connected'), findsOneWidget);
+    expect(find.textContaining('Daemon v'), findsNothing);
+  });
+
+  testWidgets('shows the paused banner for unexpected status errors', (
+    tester,
+  ) async {
+    configureDependencies(client: FakeFfiClient(statusThrow: StateError('x')));
+
+    await tester.pumpWidget(shell());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sync paused — daemon unavailable'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
+  });
 }
