@@ -60,3 +60,7 @@ app.*.map.json
 
 # fastforge packaging output
 /dist/
+
+# Flutter tooling artifacts created on CI runners (macOS platform scaffold
+# pending; the scaffold's own .gitignore supersedes this line once it lands)
+macos/Flutter/

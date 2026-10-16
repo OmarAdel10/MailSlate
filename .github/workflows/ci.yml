@@ -108,10 +108,13 @@ jobs:
         run: flutter_rust_bridge_codegen generate
       - name: Fail on stale generated code
         run: |
-          if [ -n "$(git status --porcelain)" ]; then
+          # Scope to the FRB-generated artifacts only; unrelated tooling
+          # dirs created by generation (e.g. macos/Flutter) must not trip
+          # this gate. Narrow this list if the generation targets change.
+          if [ -n "$(git status --porcelain -- lib/src/rust rust/crates/bridge rust_builder)" ]; then
             echo 'Generated bindings are stale; run flutter_rust_bridge_codegen generate and commit the result.'
-            git status --porcelain
-            git diff
+            git status --porcelain -- lib/src/rust rust/crates/bridge rust_builder
+            git diff -- lib/src/rust rust/crates/bridge rust_builder
             exit 1
           fi
 
