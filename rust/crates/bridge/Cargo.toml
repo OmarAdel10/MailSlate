@@ -2,7 +2,11 @@
 name = "mailslate-bridge"
 description = "flutter_rust_bridge v2 surface: the FFI API between the Flutter GUI and Rust."
 version.workspace = true
-edition.workspace = true
+# Pinned to 2021: FRB codegen formats the generated file with rustfmt
+# --edition 2018 and the style edition follows the crate edition, so this
+# keeps cargo fmt and the codegen staleness gate in agreement. Revisit
+# when FRB supports edition-2024 rustfmt output.
+edition = "2021"
 rust-version.workspace = true
 repository.workspace = true
 publish = false

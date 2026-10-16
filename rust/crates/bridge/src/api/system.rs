@@ -122,7 +122,7 @@ mod tests {
     use super::*;
     use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
     use mailslate_protocol::message::{Request, Response};
-    use mailslate_protocol::{PROTOCOL_VERSION, methods};
+    use mailslate_protocol::{methods, PROTOCOL_VERSION};
     use serde_json::json;
     use tokio::net::UnixListener;
 
