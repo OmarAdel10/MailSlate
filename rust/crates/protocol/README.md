@@ -5,20 +5,24 @@ IPC types and framing shared by the daemon and the GUI bridge
 
 ## Structure
 
-- `src/lib.rs` — version handshake; the request/response/event envelope
-  lands with M2.
+- `src/message.rs` — request/response/event envelopes and `PingResult`.
+- `src/error.rs` — `BridgeError` / `ErrorKind` taxonomy.
+- `src/framing.rs` — length-prefixed JSON codec (u32 LE + JSON, 64 MiB cap).
+- `src/methods.rs` — method-name constants for the implemented v1 surface.
+- `src/lib.rs` — `PROTOCOL_VERSION`, `is_compatible`, re-exports.
 
 ## Key files
 
-- `src/lib.rs` — `PROTOCOL_VERSION`, `Hello`.
+- `src/lib.rs` — `PROTOCOL_VERSION`, `is_compatible`.
+- `src/framing.rs` — `write_json_frame`, `read_frame`, `read_json_frame`.
 
 ## Consumes / produces
 
-- Consumes: nothing (leaf crate).
+- Consumes: nothing (leaf crate; serde + serde_json only).
 - Produces: typed contract consumed by both `mailslate-daemon` and
   `mailslate-bridge`.
 
 ## Tests
 
-- `cargo test -p mailslate-protocol` — compatibility tests for the
-  handshake contract.
+- `cargo test -p mailslate-protocol` — envelope roundtrips, error taxonomy,
+  framing caps and malformed-input behavior.

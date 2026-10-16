@@ -1,34 +1,29 @@
-//! IPC protocol shared between the MailSlate daemon and the GUI bridge.
+//! IPC protocol shared by the MailSlate daemon and the GUI bridge.
 //!
-//! The wire format is a 32-bit little-endian length prefix followed by a
+//! Wire format: a 32-bit little-endian length prefix followed by a UTF-8
 //! JSON payload, carried over a Unix domain socket (Linux/macOS) or a named
-//! pipe (Windows). Both sides are our own crates, so the types here are the
-//! single source of truth (ARCHITECTURE.md §5).
+//! pipe (Windows). Both ends are our own crates, so this crate is the single
+//! source of truth for the typed contract (ARCHITECTURE.md §5).
 //!
-//! The full request/response/event envelope lands with the M2 daemon work;
-//! this skeleton pins the versioned handshake contract.
+//! - [`message`] — request/response/event envelopes.
+//! - [`error`] — the `BridgeError` taxonomy crossing the boundary.
+//! - [`framing`] — the length-prefixed JSON codec with a hard frame cap.
+//! - [`methods`] — method-name constants for the v1 surface.
 
-/// Current IPC protocol version.
+pub mod error;
+pub mod framing;
+pub mod message;
+pub mod methods;
+
+pub use error::{BridgeError, ErrorKind};
+pub use framing::{FrameError, MAX_FRAME_BYTES, read_frame, read_json_frame, write_json_frame};
+pub use message::{Event, PingResult, Request, Response};
+
+/// Current IPC protocol version (ARCHITECTURE.md §5.2).
 ///
-/// The daemon and GUI perform a handshake on connect; a mismatch surfaces as
-/// `protocol_mismatch` instead of undefined behavior.
+/// The GUI's first request on every connection is `ping`; a mismatch is
+/// surfaced as [`ErrorKind::ProtocolMismatch`] rather than undefined behavior.
 pub const PROTOCOL_VERSION: u32 = 1;
-
-/// First message exchanged on every IPC connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Hello {
-    /// Protocol version the sender speaks.
-    pub protocol_version: u32,
-}
-
-impl Hello {
-    /// Builds a hello for the current protocol version.
-    pub fn current() -> Self {
-        Self {
-            protocol_version: PROTOCOL_VERSION,
-        }
-    }
-}
 
 /// Returns `true` when both sides speak a compatible protocol version.
 pub fn is_compatible(peer: u32) -> bool {
@@ -40,8 +35,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_hello_is_compatible() {
-        assert!(is_compatible(Hello::current().protocol_version));
+    fn current_version_is_compatible() {
+        assert!(is_compatible(PROTOCOL_VERSION));
     }
 
     #[test]
