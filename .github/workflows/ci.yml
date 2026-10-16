@@ -1,0 +1,132 @@
+name: CI
+
+# Runs on every branch push (including development and master) and every PR
+# (DEVELOPMENT_ENVIRONMENT.md §9). The flutter and rust jobs are merge
+# blockers; the build matrix is restricted to PRs and development/master
+# pushes for cost control. Windows and macOS legs return with the M1 platform
+# scaffolds (see docs/followups.md).
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.47.6
+
+jobs:
+  flutter:
+    name: Flutter (format, analyze, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Format check
+        run: dart format --set-exit-if-changed lib test
+      - name: Analyze
+        run: flutter analyze
+      - name: Test
+        run: flutter test
+
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: rust
+      - name: Fetch GreenMail JAR (tooling smoke test)
+        working-directory: ${{ github.workspace }}
+        run: bash tool/fetch_greenmail.sh
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  tooling:
+    name: Tooling (shellcheck, actionlint, script tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Shellcheck
+        run: shellcheck tool/*.sh tool/tests/*.sh
+      - name: Bash syntax check
+        run: bash -n tool/*.sh tool/tests/*.sh
+      - name: Install actionlint
+        run: |
+          curl -fsSL --proto '=https' --proto-redir '=https' \
+            -o /tmp/actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  /tmp/actionlint.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo mv /tmp/actionlint /usr/local/bin/actionlint
+      - name: Actionlint
+        run: actionlint
+      - name: Tool script tests
+        run: |
+          bash tool/tests/fetch_greenmail.test.sh
+          bash tool/tests/generate_icons.test.sh
+
+  build-matrix:
+    name: Build (${{ matrix.name }})
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/development' || github.ref == 'refs/heads/master'
+    needs: [flutter, rust]
+    strategy:
+      fail-fast: false
+      # Windows and macOS legs return with the M1 platform scaffolds.
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            build: flutter build linux --debug
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Build
+        run: ${{ matrix.build }}

@@ -1,0 +1,275 @@
+name: CD
+
+# Master-only release pipeline (DEVELOPMENT_ENVIRONMENT.md §10): releases are
+# cut by tagging the current master tip (vX.Y.Z). The guard job verifies the
+# tag points at the master tip and that pubspec.yaml's version matches the
+# tag, then packaging jobs build installers and the GitHub Release publishes
+# them. workflow_dispatch runs the pipeline from master without publishing a
+# release (dry run). Windows and macOS packaging activate automatically once
+# their Flutter scaffolds are committed (they are generated per OS and land
+# with M1 - see docs/followups.md).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: 3.47.6
+
+jobs:
+  guard:
+    name: Release guard
+    runs-on: ubuntu-latest
+    outputs:
+      windows: ${{ steps.scaffolds.outputs.windows }}
+      macos: ${{ steps.scaffolds.outputs.macos }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Verify release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ "${GITHUB_REF}" != "refs/heads/master" ]; then
+              echo "Manual release runs must be dispatched from master (got ${GITHUB_REF})."
+              exit 1
+            fi
+          else
+            if ! [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Tag ${GITHUB_REF_NAME} is not a vX.Y.Z release tag. Aborting."
+              exit 1
+            fi
+            if [ "$(git rev-parse origin/master)" != "${GITHUB_SHA}" ]; then
+              echo "Tag ${GITHUB_REF_NAME} does not point at the current master tip. Aborting."
+              exit 1
+            fi
+          fi
+      - name: Verify pubspec version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg="$(sed -n 's/^version:[[:space:]]*//p' pubspec.yaml | head -n1 | cut -d+ -f1)"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "pubspec=${pkg} tag=${tag}"
+          if [ "${pkg}" != "${tag}" ]; then
+            echo "pubspec version (${pkg}) must equal the tag (${tag}) - see DEVELOPMENT_ENVIRONMENT.md 10.2."
+            exit 1
+          fi
+      - name: Detect platform scaffolds
+        id: scaffolds
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f windows/CMakeLists.txt ]; then
+            echo "windows=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "windows=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Windows packaging skipped::windows/ scaffold missing - it lands with M1 (docs/followups.md)."
+          fi
+          if [ -d macos/Runner.xcodeproj ]; then
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "macos=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=macOS packaging skipped::macos/ scaffold missing - it lands with M1 (docs/followups.md)."
+          fi
+
+  linux:
+    name: 'Package (Linux: deb, rpm, AppImage)'
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev rpm patchelf locate
+      - name: Install appimagetool
+        run: |
+          curl -fsSL --proto '=https' --proto-redir '=https' \
+            -o /tmp/appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  /tmp/appimagetool-x86_64.AppImage' | sha256sum -c -
+          chmod +x /tmp/appimagetool-x86_64.AppImage
+          (cd /tmp && ./appimagetool-x86_64.AppImage --appimage-extract >/dev/null)
+          sudo ln -sf /tmp/squashfs-root/AppRun /usr/local/bin/appimagetool
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Install fastforge
+        run: |
+          dart pub global activate fastforge 0.6.12
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+      - name: Package
+        run: fastforge package --platform linux --targets deb,rpm,appimage
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: packages-linux
+          path: dist/**
+
+  windows:
+    name: 'Package (Windows: EXE installer)'
+    if: needs.guard.outputs.windows == 'true'
+    needs: guard
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install Inno Setup
+        run: choco install innosetup --version=6.7.1 --no-progress -y
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Install fastforge
+        shell: pwsh
+        run: |
+          dart pub global activate fastforge 0.6.12
+          echo "$env:LOCALAPPDATA\Pub\Cache\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Package
+        run: fastforge package --platform windows --targets exe
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: packages-windows
+          path: dist/**
+
+  macos:
+    name: 'Package (macOS: DMG)'
+    if: needs.guard.outputs.macos == 'true'
+    needs: guard
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Install appdmg
+        run: npm install -g appdmg@0.6.6
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Install fastforge
+        run: |
+          dart pub global activate fastforge 0.6.12
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
+      - name: Package
+        run: fastforge package --platform macos --targets dmg
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: packages-macos
+          path: dist/**
+
+  github-release:
+    name: GitHub Release
+    # Status checks keep this job alive when the windows/macos legs are
+    # skipped (their scaffolds land with M1); a failed packaging leg still
+    # blocks publication.
+    if: >-
+      !cancelled()
+      && startsWith(github.ref, 'refs/tags/v')
+      && needs.linux.result == 'success'
+      && (needs.windows.result == 'success' || needs.windows.result == 'skipped')
+      && (needs.macos.result == 'success' || needs.macos.result == 'skipped')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+      - name: List artifacts
+        run: find artifacts -type f | sort
+      - name: Publish release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: artifacts/**
+          generate_release_notes: true
+
+  shorebird:
+    name: Shorebird release (${{ matrix.platform }})
+    # The tag check stays at job level (github context is allowed there); the
+    # per-platform gate (matrix context) is evaluated in the first step, since
+    # matrix is NOT available in a job-level if.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: guard
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: windows
+          - os: macos-latest
+            platform: macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check prerequisites
+        id: check
+        env:
+          MATRIX_PLATFORM: ${{ matrix.platform }}
+          WINDOWS_SCAFFOLD: ${{ needs.guard.outputs.windows }}
+          MACOS_SCAFFOLD: ${{ needs.guard.outputs.macos }}
+        run: |
+          set -euo pipefail
+          enabled=true
+          if [ ! -f shorebird.yaml ]; then
+            enabled=false
+            echo "::warning title=Shorebird skipped::shorebird.yaml missing - run 'shorebird init' once (DEVELOPMENT_ENVIRONMENT.md 10)."
+          fi
+          if [ "${MATRIX_PLATFORM}" = "windows" ] && [ "${WINDOWS_SCAFFOLD}" != "true" ]; then
+            enabled=false
+            echo "::warning title=Shorebird skipped (windows)::windows/ scaffold missing - it lands with M1 (docs/followups.md)."
+          fi
+          if [ "${MATRIX_PLATFORM}" = "macos" ] && [ "${MACOS_SCAFFOLD}" != "true" ]; then
+            enabled=false
+            echo "::warning title=Shorebird skipped (macos)::macos/ scaffold missing - it lands with M1 (docs/followups.md)."
+          fi
+          echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
+      - name: Set up Shorebird
+        if: steps.check.outputs.enabled == 'true'
+        uses: shorebirdtech/setup-shorebird@a4a382caff29352d974d06d64086f3a9bf92a0e7 # v1
+        with:
+          cache: true
+      - name: Release
+        if: steps.check.outputs.enabled == 'true'
+        env:
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+        run: shorebird release ${{ matrix.platform }} --flutter-version ${{ env.FLUTTER_VERSION }}

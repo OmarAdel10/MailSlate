@@ -1,0 +1,12 @@
+[package]
+name = "mailslate-bridge"
+description = "flutter_rust_bridge v2 surface: the FFI API between the Flutter GUI and Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]

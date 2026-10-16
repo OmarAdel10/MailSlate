@@ -1,0 +1,52 @@
+# PR label rules (actions/labeler v7) - labels mirror the Plane taxonomy
+# (AGENTS.md §9). Rules match branch names (type/*) and changed files
+# (area/*). All referenced labels must exist in the repository.
+type/feature:
+  - head-branch: ['^feature/']
+type/fix:
+  - head-branch: ['^fix/']
+type/refactor:
+  - head-branch: ['^refactor/']
+type/perf:
+  - head-branch: ['^perf/']
+type/chore:
+  - head-branch: ['^chore/']
+type/docs:
+  - head-branch: ['^docs/']
+
+area/flutter:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'lib/**'
+          - 'test/**'
+area/rust-core:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'rust/crates/core/**'
+          - 'rust/crates/protocol/**'
+area/daemon:
+  - changed-files:
+      - any-glob-to-any-file: 'rust/crates/daemon/**'
+area/bridge:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'rust/crates/bridge/**'
+          - 'rust/rust_builder/**'
+area/ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'tool/**'
+area/specs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'specs/**'
+          - 'AGENTS.md'
+          - 'README.md'
+area/deps:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/Cargo.toml'
+          - '**/Cargo.lock'
+          - 'pubspec.yaml'
+          - 'pubspec.lock'

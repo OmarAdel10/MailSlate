@@ -1,0 +1,9 @@
+[package]
+name = "mailslate-core"
+description = "MailSlate domain and infrastructure engines: sync, mailbox, threading, search, storage."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]

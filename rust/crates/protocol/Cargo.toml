@@ -1,0 +1,9 @@
+[package]
+name = "mailslate-protocol"
+description = "IPC protocol types and framing shared by the MailSlate daemon and GUI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]

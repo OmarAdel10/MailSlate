@@ -1,0 +1,5 @@
+# fastforge configuration (DEVELOPMENT_ENVIRONMENT.md §10).
+# Release packaging runs per-OS from .github/workflows/cd.yml via
+# `fastforge package --platform <os> --targets <targets>`; this file pins the
+# artifact output directory for both manual and CI runs.
+output: dist/

@@ -1,0 +1,44 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit review configuration (DEVELOPMENT_ENVIRONMENT.md §9.1).
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: 'specs/**'
+      instructions: >-
+        The specs/ directory is the normative source of truth for MailSlate
+        (AGENTS.md §7). Flag any code change that contradicts a spec, and any
+        spec edit that is not accompanied by a related implementation change
+        or an explicit rationale in the PR description.
+    - path: 'rust/crates/daemon/**'
+      instructions: >-
+        The daemon is the single SQLite writer and owns all mail state
+        (ARCHITECTURE.md §1). Flag any code path that would let the GUI write
+        to the database or bypass the IPC layers.
+    - path: 'rust/**'
+      instructions: >-
+        Rust must follow PERFORMANCE_GUIDELINES.md: rusqlite work through
+        spawn_blocking, bounded channels, no unbounded buffering, /// doc
+        comments on every public API, and no print! debugging left behind.
+    - path: 'lib/**'
+      instructions: >-
+        Flutter code follows DESIGN.md and USER_FLOW.md. BLoCs depend on
+        repository interfaces only, never on generated FRB bindings; no IO,
+        parsing, or date formatting inside build(); prefer const constructors.
+    - path: '.github/workflows/**'
+      instructions: >-
+        CI runs on every branch and PR; CD is guarded to master and v* tags
+        (DEVELOPMENT_ENVIRONMENT.md §9-§10). Flag any trigger or permission
+        widening that would run release steps outside master.
+
+chat:
+  auto_reply: true
