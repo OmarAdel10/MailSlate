@@ -221,11 +221,11 @@ class _DaemonStatusCluster extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 SizedBox(
-                  width: 14,
-                  height: 14,
+                  width: 12,
+                  height: 12,
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
-                    color: tokens.accent,
+                    color: tokens.muted,
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -286,8 +286,8 @@ class _UnavailableBanner extends StatelessWidget {
           return const SizedBox.shrink();
         }
         final tokens = context.tokens;
-        final message =
-            state.failure?.message ?? 'Sync paused — daemon unavailable';
+        // Fixed copy per USER_FLOW §9; the failure detail stays in logs.
+        const message = 'Sync paused — daemon unavailable';
         return Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
           child: Container(

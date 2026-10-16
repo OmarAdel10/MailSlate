@@ -18,6 +18,7 @@ class DaemonStatusBloc extends Bloc<DaemonStatusEvent, DaemonStatusState> {
     emit(const DaemonConnecting());
     try {
       final status = await _client.daemonStatus();
+      if (emit.isDone) return;
       if (status.state == DaemonState.running) {
         emit(
           DaemonConnected(
@@ -30,6 +31,7 @@ class DaemonStatusBloc extends Bloc<DaemonStatusEvent, DaemonStatusState> {
       // The daemon is down: spawn it, as the GUI owns its lifecycle
       // (USER_FLOW §9).
       final ping = await _client.startDaemon();
+      if (emit.isDone) return;
       emit(
         DaemonConnected(
           daemonVersion: ping.daemonVersion,
@@ -37,9 +39,11 @@ class DaemonStatusBloc extends Bloc<DaemonStatusEvent, DaemonStatusState> {
         ),
       );
     } on AppFailure catch (failure) {
+      if (emit.isDone) return;
       logWarning('daemon_unavailable', error: failure);
       emit(DaemonUnavailable(failure: failure));
     } catch (error, stackTrace) {
+      if (emit.isDone) return;
       logError('daemon_status_failed', error: error, stackTrace: stackTrace);
       emit(const DaemonUnavailable());
     }
