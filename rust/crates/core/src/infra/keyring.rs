@@ -168,4 +168,45 @@ mod tests {
         store.store("k", "v").unwrap();
         assert_eq!(store.get("k").unwrap().as_deref(), Some("v"));
     }
+
+    #[test]
+    fn store_init_errors_map_to_unavailable() {
+        let mapped = map_store_init_error(keyring::Error::NoDefaultStore);
+        assert!(matches!(
+            mapped,
+            KeyStoreError::Unavailable(ref message)
+                if message.as_str() == "no default keyring store"
+        ));
+    }
+
+    #[test]
+    fn storage_access_errors_map_to_unavailable_with_detail() {
+        let platform: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::other("secret service is locked"));
+        let mapped = map_operation_error(keyring::Error::NoStorageAccess(platform));
+        assert!(matches!(
+            mapped,
+            KeyStoreError::Unavailable(ref message)
+                if message.contains("secret service is locked")
+        ));
+    }
+
+    #[test]
+    fn operation_errors_map_no_default_store_and_platform() {
+        let missing = map_operation_error(keyring::Error::NoDefaultStore);
+        assert!(matches!(
+            missing,
+            KeyStoreError::Unavailable(ref message)
+                if message.as_str() == "no default keyring store"
+        ));
+
+        let platform = map_operation_error(keyring::Error::BadEncoding(vec![0xff, 0xfe]));
+        assert!(matches!(platform, KeyStoreError::Platform(_)));
+    }
+
+    #[test]
+    fn os_key_store_availability_smoke() {
+        // The boolean is environment-dependent; the call must never panic.
+        let _ = OsKeyStore::is_available();
+    }
 }

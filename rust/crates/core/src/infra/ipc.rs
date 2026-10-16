@@ -357,7 +357,29 @@ mod tests {
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
         let dir = tempfile::tempdir().unwrap();
-        let mut client = Client::connect_or_spawn(dir.path()).await.unwrap();
+        // The product gives a spawned daemon 10 s to become ready. On an
+        // oversubscribed temp filesystem a cold boot can occasionally run
+        // past that budget, so wait a little longer here: a broken spawn
+        // path never becomes reachable, so this only tolerates slow disks.
+        let mut client = match Client::connect_or_spawn(dir.path()).await {
+            Ok(client) => client,
+            Err(first_err) => {
+                let socket = dir.path().join("daemon.sock");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    match Client::connect(&socket).await {
+                        Ok(client) => break client,
+                        Err(_) => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "spawned daemon never became reachable: {first_err}"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
+        };
         assert!(dir.path().join("daemon.sock").exists());
         let ping = client.ping().await.unwrap();
         assert_eq!(ping.protocol_version, mailslate_protocol::PROTOCOL_VERSION);

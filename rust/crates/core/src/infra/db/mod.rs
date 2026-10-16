@@ -107,4 +107,10 @@ mod tests {
     fn fts5_is_available() {
         assert_fts5().expect("bundled SQLite must ship FTS5");
     }
+
+    #[test]
+    fn open_readonly_rejects_a_missing_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(open_readonly(&dir.path().join("absent.db")).is_err());
+    }
 }

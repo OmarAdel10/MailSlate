@@ -83,6 +83,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn truncated_body_is_unexpected_eof() {
+        // A frame whose declared length exceeds the bytes actually written
+        // must fail with UnexpectedEof, mirroring the sync codec's test.
+        let value = json!({"hello": "world"});
+        let mut frame = Vec::new();
+        crate::write_json_frame(&mut frame, &value).unwrap();
+        frame.pop();
+
+        let (mut a, mut b) = tokio::io::duplex(64);
+        a.write_all(&frame).await.unwrap();
+        drop(a);
+        match read_json_frame_async::<_, Value>(&mut b).await {
+            Err(FrameError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
+            other => panic!("expected Io(UnexpectedEof), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_json_payload_is_a_json_error() {
         let payload = b"not json";
         let (mut a, mut b) = tokio::io::duplex(64);

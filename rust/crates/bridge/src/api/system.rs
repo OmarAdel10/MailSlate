@@ -194,4 +194,61 @@ mod tests {
         assert!(error.retryable);
         assert!(!error.message.is_empty());
     }
+
+    /// The daemon binary built next to this test binary
+    /// (`rust/target/{debug,release}/mailslate-daemon`).
+    fn daemon_binary_for_tests() -> std::path::PathBuf {
+        let exe = std::env::current_exe().expect("test binary path");
+        exe.parent()
+            .and_then(std::path::Path::parent)
+            .expect("target directory")
+            .join("mailslate-daemon")
+    }
+
+    #[tokio::test]
+    async fn start_daemon_spawns_the_binary_and_reports_running() {
+        let daemon = daemon_binary_for_tests();
+        assert!(
+            daemon.is_file(),
+            "daemon binary not built at {}; run cargo test --workspace",
+            daemon.display()
+        );
+
+        let saved_data = std::env::var_os("MAILSLATE_DATA_DIR");
+        let saved_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+        let data = tempfile::tempdir().expect("data dir");
+        std::env::set_var("MAILSLATE_DATA_DIR", data.path());
+        std::env::set_var("MAILSLATE_DAEMON_PATH", &daemon);
+        std::env::remove_var("XDG_RUNTIME_DIR");
+
+        // No daemon yet: status must be unavailable and ping must fail.
+        assert_eq!(daemon_status().await.state, DaemonState::Unavailable);
+        assert!(ping().await.is_err());
+
+        // start_daemon spawns the binary and pings it.
+        let info = start_daemon().await.expect("spawn and ping");
+        assert_eq!(info.protocol_version, PROTOCOL_VERSION);
+        assert!(!info.daemon_version.is_empty());
+
+        let status = daemon_status().await;
+        assert_eq!(status.state, DaemonState::Running);
+        assert_eq!(status.protocol_version, Some(PROTOCOL_VERSION));
+
+        // Shut the spawned daemon down and restore the environment.
+        let socket = data.path().join("daemon.sock");
+        let mut client = mailslate_core::infra::ipc::Client::connect(&socket)
+            .await
+            .expect("connect for shutdown");
+        let _ = client.request(methods::SHUTDOWN, json!(null)).await;
+
+        match saved_data {
+            Some(value) => std::env::set_var("MAILSLATE_DATA_DIR", value),
+            None => std::env::remove_var("MAILSLATE_DATA_DIR"),
+        }
+        std::env::remove_var("MAILSLATE_DAEMON_PATH");
+        match saved_xdg {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+    }
 }
