@@ -17,9 +17,10 @@
 # them (APP_ICON.md §7). Requires ImageMagick >= 7 ('magick').
 # macOS icons ship via AppIcon.appiconset - Xcode compiles the .icns at build
 # time; no standalone .icns is produced.
+# Env: MAILSLATE_REPO_ROOT overrides the repo root (test hook).
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="${MAILSLATE_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SRC="$REPO_ROOT/assets/branding/icon/source"
 MASTER="$SRC/mailslate-icon-master.png"
 GLYPH="$SRC/mailslate-glyph-mono.svg"
@@ -33,6 +34,7 @@ LINUX_ICONS="$REPO_ROOT/linux/runner/resources/icons/hicolor"
 WIN_RES="$REPO_ROOT/windows/runner/resources"
 APPICON="$REPO_ROOT/macos/Runner/Assets.xcassets/AppIcon.appiconset"
 MAC_RES="$REPO_ROOT/macos/Runner/Resources"
+tray_generated=0
 
 # --- Linux hicolor PNG set (single-resize from the 1024 master) ----------
 for size in 16 24 32 48 64 128 256 512; do
@@ -80,6 +82,7 @@ JSON
 
 # --- Tray icons (monochrome glyph; macOS template naming inverts itself) --
 if [ -f "$GLYPH" ]; then
+  tray_generated=1
   mkdir -p "$REPO_ROOT/linux/runner/resources/tray" "$MAC_RES"
   magick -background none "$GLYPH" -filter Lanczos -resize 22x22 "PNG32:$REPO_ROOT/linux/runner/resources/tray/tray.png"
   magick -background none "$GLYPH" -filter Lanczos -resize 44x44 "PNG32:$REPO_ROOT/linux/runner/resources/tray/tray@2x.png"
@@ -90,7 +93,7 @@ else
   echo "warn: $GLYPH missing - skipping tray icons (specs/APP_ICON.md §3)" >&2
 fi
 
-# --- Verification ---------------------------------------------------------
+# --- Verification (fails unless every generated output exists) -----------
 echo "--- Icon verification ---"
 missing=0
 check() {
@@ -101,11 +104,27 @@ check() {
     missing=1
   fi
 }
+
 check "$WIN_RES/app_icon.ico"
 for size in 16 24 32 48 64 128 256 512; do
   check "$LINUX_ICONS/${size}x${size}/apps/mailslate.png"
 done
 check "$APPICON/Contents.json"
-check "$APPICON/icon_512x512@2x.png"
+for name in icon_16x16.png icon_16x16@2x.png icon_32x32.png icon_32x32@2x.png \
+            icon_128x128.png icon_128x128@2x.png icon_256x256.png \
+            icon_256x256@2x.png icon_512x512.png icon_512x512@2x.png; do
+  check "$APPICON/$name"
+done
+
+if [ "$tray_generated" -eq 1 ]; then
+  check "$REPO_ROOT/linux/runner/resources/tray/tray.png"
+  check "$REPO_ROOT/linux/runner/resources/tray/tray@2x.png"
+  check "$WIN_RES/tray.ico"
+  check "$MAC_RES/TrayIconTemplate.png"
+  check "$MAC_RES/TrayIconTemplate@2x.png"
+else
+  echo "skip tray icons (glyph source missing - specs/APP_ICON.md §3)"
+fi
+
 [ "$missing" -eq 0 ] || fail "one or more icon outputs are missing"
 echo "Done. Commit the generated outputs together with the masters (specs/APP_ICON.md §7)."
