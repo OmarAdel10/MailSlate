@@ -1,0 +1,14 @@
+# fastforge EXE packaging config via Inno Setup 6
+# (DEVELOPMENT_ENVIRONMENT.md §10; cd.yml installs Inno Setup via Chocolatey).
+# app_id must stay stable across releases - it identifies the application for
+# upgrades/uninstall (docs: 'Do not use the same AppId value in installers
+# for other applications').
+app_id: 7F2D5B4E-9C1A-4A8E-B6E3-1F4D9C7A2B31
+publisher: Omar Adel
+publisher_url: https://github.com/OmarAdel10/MailSlate
+display_name: MailSlate
+create_desktop_icon: true
+# Icon lands with tool/generate_icons.sh (specs/APP_ICON.md §5).
+setup_icon_file: windows/runner/resources/app_icon.ico
+locales:
+  - en
