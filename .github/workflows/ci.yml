@@ -72,6 +72,48 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
+        with:
+          tool: cargo-deny
+      - name: Deny advisories, licenses, sources
+        run: cargo deny check
+
+  codegen:
+    name: FRB codegen staleness
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: rust
+      - name: Install flutter_rust_bridge_codegen
+        run: cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Generate bindings
+        run: flutter_rust_bridge_codegen generate
+      - name: Fail on stale generated code
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo 'Generated bindings are stale; run flutter_rust_bridge_codegen generate and commit the result.'
+            git status --porcelain
+            git diff
+            exit 1
+          fi
 
   tooling:
     name: Tooling (shellcheck, actionlint, script tests)
@@ -122,6 +164,15 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+      # The platform build compiles the Rust bridge via rust_builder.
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: rust
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
