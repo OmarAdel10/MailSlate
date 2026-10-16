@@ -22,11 +22,16 @@ const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Delay between connection attempts after a spawn.
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
+/// How long [`Client::request`] waits for the daemon's reply before giving
+/// up; keeps the GUI from hanging on a wedged daemon.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// A request/response channel to the daemon.
 #[derive(Debug)]
 pub struct Client {
     stream: tokio::net::UnixStream,
     next_id: u64,
+    request_timeout: Duration,
 }
 
 impl Client {
@@ -37,7 +42,11 @@ impl Client {
             .map_err(|err| {
                 daemon_unavailable(format!("could not connect to {}: {err}", socket.display()))
             })?;
-        Ok(Self { stream, next_id: 0 })
+        Ok(Self {
+            stream,
+            next_id: 0,
+            request_timeout: REQUEST_TIMEOUT,
+        })
     }
 
     /// Connects to the daemon for `data_dir`, spawning it when needed and
@@ -55,6 +64,9 @@ impl Client {
     }
 
     /// Sends one request and awaits its matching response.
+    ///
+    /// Fails with [`ErrorKind::DaemonUnavailable`] when no reply arrives
+    /// within the request timeout.
     pub async fn request(&mut self, method: &str, params: Value) -> Result<Value, BridgeError> {
         self.next_id += 1;
         let request = Request {
@@ -62,12 +74,17 @@ impl Client {
             method: method.to_string(),
             params,
         };
-        write_json_frame_async(&mut self.stream, &request)
-            .await
-            .map_err(frame_error)?;
-        let response: Response = read_json_frame_async(&mut self.stream)
-            .await
-            .map_err(frame_error)?;
+        let timeout = self.request_timeout;
+        let stream = &mut self.stream;
+        let response: Response = tokio::time::timeout(timeout, async {
+            write_json_frame_async(stream, &request)
+                .await
+                .map_err(frame_error)?;
+            let response: Response = read_json_frame_async(stream).await.map_err(frame_error)?;
+            Ok::<Response, BridgeError>(response)
+        })
+        .await
+        .map_err(|_| daemon_unavailable(format!("daemon did not answer within {timeout:?}")))??;
         if response.id != request.id {
             return Err(BridgeError::new(
                 ErrorKind::Internal,
@@ -86,6 +103,13 @@ impl Client {
         serde_json::from_value(value).map_err(|err| {
             BridgeError::new(ErrorKind::Internal, format!("invalid ping payload: {err}"))
         })
+    }
+
+    /// Overrides the per-request timeout; tests use short values.
+    #[cfg(test)]
+    pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 }
 
@@ -179,6 +203,27 @@ mod tests {
                     BridgeError::new(ErrorKind::Storage, "disk busy"),
                 ),
                 "bad-id" => Response::ok(request.id + 1, Value::Null),
+                "echo-id" => Response::ok(request.id, json!({"seen": request.id})),
+                "stall" => {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    return;
+                }
+                "garbage" => {
+                    use tokio::io::AsyncWriteExt;
+                    let payload = b"not json";
+                    stream
+                        .write_all(&(payload.len() as u32).to_le_bytes())
+                        .await
+                        .expect("garbage length");
+                    stream.write_all(payload).await.expect("garbage payload");
+                    return;
+                }
+                "huge" => {
+                    use tokio::io::AsyncWriteExt;
+                    let header = ((mailslate_protocol::MAX_FRAME_BYTES as u32) + 1).to_le_bytes();
+                    stream.write_all(&header).await.expect("huge header");
+                    return;
+                }
                 _ => Response::ok(request.id, Value::Null),
             };
             write_json_frame_async(&mut stream, &response)
@@ -232,5 +277,98 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+    }
+
+    #[tokio::test]
+    async fn stalled_daemon_request_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket)
+            .await
+            .unwrap()
+            .with_request_timeout(Duration::from_millis(50));
+        let err = client.request("stall", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+        assert!(err.message.contains("did not answer"));
+    }
+
+    #[tokio::test]
+    async fn invalid_frame_from_daemon_is_internal() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("garbage", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("invalid frame"));
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_header_from_daemon_is_internal() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("huge", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("invalid frame"));
+    }
+
+    #[tokio::test]
+    async fn request_ids_increase_monotonically() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let first = client.request("echo-id", Value::Null).await.unwrap();
+        let second = client.request("echo-id", Value::Null).await.unwrap();
+        assert_eq!(first["seen"], json!(1));
+        assert_eq!(second["seen"], json!(2));
+    }
+
+    /// The daemon binary built next to this test binary
+    /// (`rust/target/{debug,release}/mailslate-daemon`).
+    fn daemon_binary_for_tests() -> PathBuf {
+        let exe = std::env::current_exe().expect("test binary path");
+        exe.parent()
+            .and_then(Path::parent)
+            .map(|dir| dir.join("mailslate-daemon"))
+            .expect("target directory")
+    }
+
+    /// Covers the `MAILSLATE_DAEMON_PATH` override and the spawn-on-demand
+    /// path. Kept as one test because both mutate process-wide env vars.
+    #[tokio::test]
+    async fn spawn_path_uses_env_overrides() {
+        let tools = tempfile::tempdir().unwrap();
+        let fake = tools.path().join("fake-daemon");
+        std::fs::write(&fake, b"").unwrap();
+        unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &fake) };
+        assert_eq!(daemon_binary(), fake);
+
+        let daemon = daemon_binary_for_tests();
+        assert!(
+            daemon.is_file(),
+            "daemon binary not built at {}; run cargo test --workspace",
+            daemon.display()
+        );
+        // Keep the socket inside the test's temp data dir even on desktops
+        // that set XDG_RUNTIME_DIR.
+        let saved_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe {
+            std::env::set_var("MAILSLATE_DAEMON_PATH", &daemon);
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut client = Client::connect_or_spawn(dir.path()).await.unwrap();
+        assert!(dir.path().join("daemon.sock").exists());
+        let ping = client.ping().await.unwrap();
+        assert_eq!(ping.protocol_version, mailslate_protocol::PROTOCOL_VERSION);
+        assert!(!ping.daemon_version.is_empty());
+        let _ = client.request(methods::SHUTDOWN, Value::Null).await;
+        unsafe {
+            std::env::remove_var("MAILSLATE_DAEMON_PATH");
+            match saved_xdg {
+                Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
     }
 }

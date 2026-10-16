@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use mailslate_protocol::FrameError;
 use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
@@ -13,6 +14,12 @@ use mailslate_protocol::message::{Request, Response};
 
 use crate::dispatch::{self, Dispatched};
 use crate::logging::LoggingError;
+
+/// Pause after a failed `accept()` before retrying.
+///
+/// Accept errors on a bound listener are transient (e.g. file-descriptor
+/// exhaustion); the server logs them and keeps serving.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Fatal daemon errors: startup failures and server lifecycle problems.
 #[derive(Debug, thiserror::Error)]
@@ -132,13 +139,20 @@ async fn accept_loop(
                 break;
             }
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let shutdown = Arc::clone(&shutdown);
-                tokio::spawn(async move {
-                    if let Err(err) = handle_connection(stream, shutdown).await {
-                        tracing::debug!(error = %err, "connection closed with error");
+                match accepted {
+                    Ok((stream, _)) => {
+                        let shutdown = Arc::clone(&shutdown);
+                        tokio::spawn(async move {
+                            if let Err(err) = handle_connection(stream, shutdown).await {
+                                tracing::debug!(error = %err, "connection closed with error");
+                            }
+                        });
                     }
-                });
+                    Err(err) => {
+                        tracing::warn!(error = %err, "accept failed; retrying");
+                        tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                    }
+                }
             }
         }
     }
