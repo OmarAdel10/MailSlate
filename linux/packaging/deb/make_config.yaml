@@ -19,4 +19,7 @@ generic_name: Email Client
 categories:
   - Network
   - Email
+# Installed-Size in KB for the .deb control file; refine after the first
+# release dry-run measures the real bundle size.
+installed_size: 150000
 startup_notify: true
