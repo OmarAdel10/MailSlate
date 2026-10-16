@@ -168,4 +168,18 @@ mod tests {
             Err(FrameError::TooLarge { .. })
         ));
     }
+
+    #[test]
+    fn oversized_payload_is_too_large_on_write() {
+        let payload = "x".repeat(MAX_FRAME_BYTES + 1);
+        let mut buf = Vec::new();
+        assert!(matches!(
+            write_json_frame(&mut buf, &payload),
+            Err(FrameError::TooLarge { .. })
+        ));
+        assert!(
+            buf.is_empty(),
+            "nothing may be written for an oversized frame"
+        );
+    }
 }

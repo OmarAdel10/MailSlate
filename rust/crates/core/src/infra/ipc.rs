@@ -224,6 +224,7 @@ mod tests {
                     stream.write_all(&header).await.expect("huge header");
                     return;
                 }
+                "drop" => return,
                 _ => Response::ok(request.id, Value::Null),
             };
             write_json_frame_async(&mut stream, &response)
@@ -313,6 +314,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_ping_payload_is_internal() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request: Request = read_json_frame_async(&mut stream).await.expect("request");
+            let response = Response::ok(request.id, json!("not-an-object"));
+            write_json_frame_async(&mut stream, &response)
+                .await
+                .expect("write");
+        });
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.ping().await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("invalid ping payload"));
+    }
+
+    #[tokio::test]
+    async fn dropped_connection_maps_to_daemon_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("drop", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+        assert!(err.message.contains("connection to the daemon failed"));
+    }
+
+    #[tokio::test]
     async fn request_ids_increase_monotonically() {
         let dir = tempfile::tempdir().unwrap();
         let socket = start_fake_server(&dir);
@@ -343,19 +373,27 @@ mod tests {
         unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &fake) };
         assert_eq!(daemon_binary(), fake);
 
+        // Keep sockets inside test temp dirs even on desktops that set
+        // XDG_RUNTIME_DIR (it redirects socket_path_for elsewhere).
+        let saved_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+
+        // Fast path: a daemon that already answers must win over spawning.
+        // MAILSLATE_DAEMON_PATH still points at the empty fake file, so a
+        // spawn attempt would fail this test.
+        let live = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&live);
+        assert_eq!(socket, paths::socket_path_for(live.path()));
+        let mut client = Client::connect_or_spawn(live.path()).await.unwrap();
+        assert_eq!(client.ping().await.unwrap().daemon_version, "9.9.9");
+
         let daemon = daemon_binary_for_tests();
         assert!(
             daemon.is_file(),
             "daemon binary not built at {}; run cargo test --workspace",
             daemon.display()
         );
-        // Keep the socket inside the test's temp data dir even on desktops
-        // that set XDG_RUNTIME_DIR.
-        let saved_xdg = std::env::var_os("XDG_RUNTIME_DIR");
-        unsafe {
-            std::env::set_var("MAILSLATE_DAEMON_PATH", &daemon);
-            std::env::remove_var("XDG_RUNTIME_DIR");
-        }
+        unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &daemon) };
         let dir = tempfile::tempdir().unwrap();
         // The product gives a spawned daemon 10 s to become ready. On an
         // oversubscribed temp filesystem a cold boot can occasionally run

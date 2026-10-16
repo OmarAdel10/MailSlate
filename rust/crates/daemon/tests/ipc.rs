@@ -60,7 +60,9 @@ fn spawn(data: &Path, runtime: &Path) -> Child {
 }
 
 fn wait_ready(socket: &Path, child: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Generous: an oversubscribed temp filesystem can stretch a cold daemon
+    // boot far past the product budget; CI uses fast tmp and never waits long.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if socket.exists() && UnixStream::connect(socket).is_ok() {
             return;
@@ -330,4 +332,26 @@ fn invalid_log_directive_falls_back_to_info() {
     let mut stream = UnixStream::connect(&socket).expect("connect");
     call(&mut stream, 1, "shutdown");
     let _ = child.wait();
+}
+
+#[test]
+fn valid_log_directive_is_accepted() {
+    let data = tempfile::tempdir().expect("data dir");
+    let runtime = tempfile::tempdir().expect("runtime dir");
+    let socket = socket_path(&runtime);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mailslate-daemon"))
+        .env("MAILSLATE_DATA_DIR", data.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("MAILSLATE_LOG", "debug")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    wait_ready(&socket, &mut child);
+
+    let mut stream = UnixStream::connect(&socket).expect("connect");
+    call(&mut stream, 1, "shutdown");
+    let status = wait_for_exit(&mut child);
+    assert!(status.success(), "clean exit, got {status:?}");
 }

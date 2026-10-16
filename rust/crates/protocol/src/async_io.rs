@@ -112,4 +112,14 @@ mod tests {
             other => panic!("expected Json error, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn oversized_payload_is_too_large_on_write() {
+        let payload = "x".repeat(MAX_FRAME_BYTES + 1);
+        let (mut a, _b) = tokio::io::duplex(64);
+        assert!(matches!(
+            write_json_frame_async(&mut a, &payload).await,
+            Err(FrameError::TooLarge { .. })
+        ));
+    }
 }

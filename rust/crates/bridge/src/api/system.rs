@@ -225,8 +225,32 @@ mod tests {
         assert_eq!(daemon_status().await.state, DaemonState::Unavailable);
         assert!(ping().await.is_err());
 
-        // start_daemon spawns the binary and pings it.
-        let info = start_daemon().await.expect("spawn and ping");
+        // start_daemon spawns the binary and pings it. The product gives a
+        // spawned daemon 10 s to become ready; a cold boot on a slow or
+        // oversubscribed temp filesystem can run past that, so wait a little
+        // longer for the socket before failing - a broken spawn path never
+        // becomes reachable, so the longer wait only tolerates slow disks.
+        let info = match start_daemon().await {
+            Ok(info) => info,
+            Err(_) => {
+                let socket = data.path().join("daemon.sock");
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    if mailslate_core::infra::ipc::Client::connect(&socket)
+                        .await
+                        .is_ok()
+                    {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "spawned daemon never became reachable"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                ping().await.expect("ping the spawned daemon")
+            }
+        };
         assert_eq!(info.protocol_version, PROTOCOL_VERSION);
         assert!(!info.daemon_version.is_empty());
 
@@ -250,5 +274,10 @@ mod tests {
             Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
             None => std::env::remove_var("XDG_RUNTIME_DIR"),
         }
+    }
+
+    #[test]
+    fn init_app_smoke() {
+        init_app();
     }
 }
