@@ -1,0 +1,9 @@
+[package]
+name = "mailslate-daemon"
+description = "Headless MailSlate sync daemon: single SQLite writer, IMAP/SMTP, notifications."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
