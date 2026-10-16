@@ -1,29 +1,8 @@
-//! Flutter bridge surface for the MailSlate GUI.
+//! MailSlate FFI bridge (flutter_rust_bridge v2).
 //!
-//! This is the crate `flutter_rust_bridge` v2 generates its Dart bindings
-//! from (lockstep version rule: AGENTS.md §5). The GUI's Dart code only ever
-//! calls these functions; they are a thin client that talks to the daemon
-//! over IPC and reads the local database read-only (ARCHITECTURE.md §1).
-//!
-//! The FRB codegen integration (`lib/src/rust/`, `rust/rust_builder/`)
-//! lands with M1. Until then this crate pins the shape: small, documented,
-//! side-effect-free helpers only.
+//! The GUI talks to the Rust core only through this crate; see
+//! [`api::system`] for the callable surface. Codegen lockstep and
+//! generated-file rules live in AGENTS.md §5.
 
-/// Returns a greeting from the Rust side of the bridge.
-///
-/// The M1 smoke path uses this to prove the FFI link end to end.
-pub fn bridge_hello() -> String {
-    format!("hello from mailslate-bridge {}", env!("CARGO_PKG_VERSION"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hello_mentions_crate_name_and_version() {
-        let greeting = bridge_hello();
-        assert!(greeting.starts_with("hello from mailslate-bridge "));
-        assert!(greeting.contains(env!("CARGO_PKG_VERSION")));
-    }
-}
+mod api;
+mod frb_generated; /* AUTO INJECTED BY flutter_rust_bridge. This line may not be accurate, and you can change it according to your needs. */
