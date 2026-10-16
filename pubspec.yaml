@@ -37,6 +37,9 @@ dependencies:
   mailslate_bridge:
     path: rust_builder
   flutter_rust_bridge: 2.13.0
+  flutter_bloc: ^9.1.1
+  get_it: ^9.3.0
+  material_symbols_icons: ^4.2960.0
 
 dev_dependencies:
   flutter_test:
