@@ -7,3 +7,10 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+dirs = "7.0.0"
+keyring = { version = "4.2.0", default-features = false, features = ["v1", "zbus-secret-service-keyring-store", "apple-native-keyring-store", "windows-native-keyring-store"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"
