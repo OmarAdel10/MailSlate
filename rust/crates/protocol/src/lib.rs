@@ -15,6 +15,9 @@ pub mod framing;
 pub mod message;
 pub mod methods;
 
+#[cfg(feature = "tokio")]
+pub mod async_io;
+
 pub use error::{BridgeError, ErrorKind};
 pub use framing::{FrameError, MAX_FRAME_BYTES, read_frame, read_json_frame, write_json_frame};
 pub use message::{Event, PingResult, Request, Response};

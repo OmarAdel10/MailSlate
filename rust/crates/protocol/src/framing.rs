@@ -63,7 +63,7 @@ impl From<serde_json::Error> for FrameError {
     }
 }
 
-fn check_len(len: u64) -> Result<usize, FrameError> {
+pub(crate) fn check_len(len: u64) -> Result<usize, FrameError> {
     if len > MAX_FRAME_BYTES as u64 {
         return Err(FrameError::TooLarge { len });
     }

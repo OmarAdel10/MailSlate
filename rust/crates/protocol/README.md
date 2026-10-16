@@ -9,6 +9,8 @@ IPC types and framing shared by the daemon and the GUI bridge
 - `src/error.rs` — `BridgeError` / `ErrorKind` taxonomy.
 - `src/framing.rs` — length-prefixed JSON codec (u32 LE + JSON, 64 MiB cap).
 - `src/methods.rs` — method-name constants for the implemented v1 surface.
+- `src/async_io.rs` — async frame codec (`tokio` feature); same wire format
+  and caps as `framing.rs`, used by the daemon and the IPC client.
 - `src/lib.rs` — `PROTOCOL_VERSION`, `is_compatible`, re-exports.
 
 ## Key files
