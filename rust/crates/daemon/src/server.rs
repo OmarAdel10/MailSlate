@@ -65,6 +65,12 @@ enum ConnError {
 /// answers on the socket; a stale socket file is removed and rebound.
 #[cfg(unix)]
 pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerError> {
+    // Register SIGTERM before the socket exists: an external observer treats
+    // the socket as readiness, so a signal arriving right after startup must
+    // already be handled (graceful exit + artifact cleanup) instead of
+    // killing the process with the default disposition.
+    let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
     prepare_socket(&socket_path)?;
 
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
@@ -78,7 +84,7 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
     );
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
-    let result = accept_loop(listener, shutdown).await;
+    let result = accept_loop(listener, shutdown, sigterm).await;
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&pid_file);
@@ -122,8 +128,8 @@ use std::os::unix::fs::PermissionsExt;
 async fn accept_loop(
     listener: tokio::net::UnixListener,
     shutdown: Arc<tokio::sync::Notify>,
+    mut sigterm: tokio::signal::unix::Signal,
 ) -> Result<(), ServerError> {
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
