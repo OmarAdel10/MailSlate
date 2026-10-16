@@ -1,22 +1,29 @@
-name: Labels
+name: Label Pull Request
 
-# pull_request_target is required so the labeler has write access to PRs
-# (DEVELOPMENT_ENVIRONMENT.md §9). The job only applies labels based on
-# .github/labeler.yml from the base branch; it never checks out or executes
-# PR code.
 on:
-  pull_request_target:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: read
   pull-requests: write
 
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
-  labeler:
-    name: Apply PR labels
+  label:
+    name: Apply path labels
     runs-on: ubuntu-latest
     steps:
-      - name: Run labeler
-        uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7
+      - name: Check out base configuration
+        uses: actions/checkout@v4
+
+      - name: Label pull request
+        uses: actions/labeler@v5
         with:
-          sync-labels: false
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
