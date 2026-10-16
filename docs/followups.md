@@ -12,6 +12,10 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-9 — M1: `.github/workflows/ci.yml` build-matrix is Linux-only and the
   windows/macos legs of `.github/workflows/cd.yml` auto-skip until the Windows/macOS
   Flutter scaffolds are committed (`flutter create` on each OS); restore the legs then.
+- MAILSLATE-10 — M1: reopened after `01aeacd` rescoped the codegen-staleness check
+  (`7a2e7be` failed on any dirty path due to untracked `macos/Flutter/`); keep open
+  until a green PR run proves the scoped check still catches real FRB drift
+  (`.github/workflows/ci.yml`).
 - MAILSLATE-11 — M2: the CI rust job smoke-fetches the GreenMail JAR
   (`.github/workflows/ci.yml`) but cannot run `--features greenmail` integration
   tests until setup-java is wired (`specs/DEVELOPMENT_ENVIRONMENT.md` §8).
@@ -33,8 +37,9 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-17 — M1: the daemon-unavailable card ships Retry only; add the
   `View log` action (USER_FLOW.md §9) alongside the M5 Settings daemon section
   (`lib/features/shell/shell_screen.dart`).
-
-## Closed
-
-- MAILSLATE-10 — closed by `7a2e7be`: CI now regenerates the FRB bindings and
-  fails on stale output, and `rust/deny.toml` runs cargo-deny in the rust job.
+- MAILSLATE-18 — M2: `is_compatible` in `rust/crates/protocol/` is never called;
+  wire the protocol compatibility check and the update-required screen when the
+  daemon earns its first wire change (ARCHITECTURE.md §5.2; `lib/features/shell/`).
+- MAILSLATE-19 — M1: no automated end-to-end test drives the real GUI against a
+  spawned daemon (a manual `flutter run -d linux` smoke is the only evidence);
+  add an automated GUI↔daemon E2E before M2 closes.
