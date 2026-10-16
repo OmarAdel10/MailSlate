@@ -55,5 +55,8 @@ app.*.map.json
 # Tool downloads (GreenMail JAR etc.) - never commit binaries
 /.tools/
 
+# fvm-managed Flutter SDK cache
+/.fvm/
+
 # fastforge packaging output
 /dist/
