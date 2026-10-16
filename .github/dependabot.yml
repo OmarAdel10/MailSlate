@@ -1,6 +1,6 @@
 version: 2
-# Keep the SHA-pinned actions (see .github/workflows) and the Rust crates
-# current.
+# Keep the SHA-pinned actions (see .github/workflows), the Rust crates, and
+# the Dart packages current.
 updates:
   - package-ecosystem: github-actions
     directory: /
@@ -8,5 +8,9 @@ updates:
       interval: weekly
   - package-ecosystem: cargo
     directory: /rust
+    schedule:
+      interval: weekly
+  - package-ecosystem: pub
+    directory: /
     schedule:
       interval: weekly
