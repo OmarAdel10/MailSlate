@@ -1,0 +1,12 @@
+# Codacy configuration (advisory checks; DEVELOPMENT_ENVIRONMENT.md §9.1).
+# Generated code and documentation are excluded - the FRB bindings under
+# lib/src/rust/ and rust/rust_builder/ are committed per AGENTS.md §5 but are
+# not hand-written.
+exclude_paths:
+  - 'specs/**'
+  - '.github/**'
+  - 'rust/target/**'
+  - '**/*.g.dart'
+  - '**/*.freezed.dart'
+  - 'lib/src/rust/**'
+  - 'rust/rust_builder/**'
