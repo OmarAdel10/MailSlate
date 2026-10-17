@@ -21,6 +21,21 @@ use crate::logging::LoggingError;
 /// exhaustion); the server logs them and keeps serving.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
+/// Maximum simultaneously served connections.
+///
+/// Beyond this the daemon assumes a misbehaving (same-uid) peer is holding
+/// slots and drops new connections at accept time. One GUI client plus
+/// short-lived probes never approach the cap.
+const MAX_CONNECTIONS: usize = 8;
+
+/// Per-connection idle budget.
+///
+/// A connection that sends nothing within this window is dropped: an
+/// idle (or hostile) same-uid peer cannot hold a task and a frame
+/// allocation forever. The GUI opens a fresh connection per call, so
+/// legitimate traffic never approaches the window.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Fatal daemon errors: startup failures and server lifecycle problems.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -57,6 +72,9 @@ enum ConnError {
     /// The peer runs under a different user id.
     #[error("peer uid {0} does not own this daemon")]
     PeerRejected(u32),
+    /// The peer sent nothing within the connection's read budget.
+    #[error("connection idle for {0:?}; dropped")]
+    Idle(Duration),
 }
 
 /// Serves the IPC protocol on `socket_path` until shutdown.
@@ -130,6 +148,7 @@ async fn accept_loop(
     shutdown: Arc<tokio::sync::Notify>,
     mut sigterm: tokio::signal::unix::Signal,
 ) -> Result<(), ServerError> {
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
@@ -147,11 +166,21 @@ async fn accept_loop(
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _)) => {
+                        use std::sync::atomic::Ordering;
+                        if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                            tracing::warn!("connection limit reached; rejecting peer");
+                            continue; // dropping the stream closes the connection
+                        }
+                        active.fetch_add(1, Ordering::Relaxed);
                         let shutdown = Arc::clone(&shutdown);
+                        let active = Arc::clone(&active);
                         tokio::spawn(async move {
-                            if let Err(err) = handle_connection(stream, shutdown).await {
+                            if let Err(err) =
+                                handle_connection(stream, shutdown, READ_TIMEOUT).await
+                            {
                                 tracing::debug!(error = %err, "connection closed with error");
                             }
+                            active.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
                     Err(err) => {
@@ -169,16 +198,19 @@ async fn accept_loop(
 async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     shutdown: Arc<tokio::sync::Notify>,
+    read_timeout: Duration,
 ) -> Result<(), ConnError> {
     check_peer_uid(&stream)?;
     loop {
-        let request: Request = match read_json_frame_async(&mut stream).await {
-            Ok(request) => request,
-            Err(FrameError::Io(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(()); // client disconnected
-            }
-            Err(err) => return Err(ConnError::Frame(err)),
-        };
+        let request: Request =
+            match tokio::time::timeout(read_timeout, read_json_frame_async(&mut stream)).await {
+                Ok(Ok(request)) => request,
+                Ok(Err(FrameError::Io(err))) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(()); // client disconnected
+                }
+                Ok(Err(err)) => return Err(ConnError::Frame(err)),
+                Err(_) => return Err(ConnError::Idle(read_timeout)),
+            };
         let (response, stop) = match dispatch::dispatch(&request.method) {
             Ok(Dispatched::Reply(value)) => (Response::ok(request.id, value), false),
             Ok(Dispatched::Stop(value)) => (Response::ok(request.id, value), true),
@@ -207,4 +239,35 @@ fn check_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), ConnError> {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn check_peer_uid(_stream: &tokio::net::UnixStream) -> Result<(), ConnError> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    /// An idle peer must be dropped within its read budget — without the
+    /// timeout the server side would block on the first read forever.
+    #[tokio::test]
+    async fn idle_connection_is_dropped_within_read_budget() {
+        let (mut client, server) = tokio::net::UnixStream::pair().expect("socket pair");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let handled = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_connection(server, shutdown, Duration::from_millis(100)),
+        )
+        .await
+        .expect("idle connection must be dropped promptly, not hang");
+
+        assert!(handled.is_err(), "idle connection must be dropped");
+
+        // The client observes the drop as EOF.
+        let mut buf = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut buf))
+            .await
+            .expect("client read must not hang")
+            .expect("client read");
+        assert_eq!(read, 0, "client must see EOF after the drop");
+    }
 }
