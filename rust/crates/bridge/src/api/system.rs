@@ -296,4 +296,23 @@ mod tests {
     fn init_app_smoke() {
         init_app();
     }
+
+    #[test]
+    fn daemon_log_dir_reports_the_data_dir_logs_path() {
+        let _guard = ENV_LOCK.blocking_lock();
+
+        let dir = tempfile::tempdir().expect("tempdir for the data dir");
+        let saved = std::env::var("MAILSLATE_DATA_DIR").ok();
+        std::env::set_var("MAILSLATE_DATA_DIR", dir.path());
+
+        let reported = daemon_log_dir();
+
+        match saved {
+            Some(value) => std::env::set_var("MAILSLATE_DATA_DIR", value),
+            None => std::env::remove_var("MAILSLATE_DATA_DIR"),
+        }
+
+        let expected = dir.path().join("logs");
+        assert_eq!(Path::new(&reported), expected);
+    }
 }
