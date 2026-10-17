@@ -161,8 +161,29 @@ fn daemon_binary() -> PathBuf {
     candidates.push(Path::new("rust/target/release").join(NAME));
     candidates
         .into_iter()
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_runnable_file(candidate))
         .unwrap_or_else(|| PathBuf::from(NAME))
+}
+
+/// A candidate we can actually execute: a regular file with at least
+/// one execute bit set (unix). Without this filter a stale
+/// non-executable artifact could shadow a working binary, and the
+/// bare-name `PATH` fallback would resolve to anything.
+#[cfg(unix)]
+fn is_runnable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+/// Non-unix platforms have no portable execute bit; a plain file
+/// check is the best available filter there.
+#[cfg(not(unix))]
+fn is_runnable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn frame_error(err: FrameError) -> BridgeError {
@@ -377,6 +398,11 @@ mod tests {
         let tools = tempfile::tempdir().unwrap();
         let fake = tools.path().join("fake-daemon");
         std::fs::write(&fake, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &fake) };
         assert_eq!(daemon_binary(), fake);
 
@@ -437,5 +463,20 @@ mod tests {
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn daemon_binary_skips_non_executable_env_candidate() {
+        let _guard = ENV_LOCK.blocking_lock();
+        let tools = tempfile::tempdir().unwrap();
+        let fake = tools.path().join("not-executable");
+        std::fs::write(&fake, b"").unwrap();
+        unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &fake) };
+        let resolved = daemon_binary();
+        unsafe { std::env::remove_var("MAILSLATE_DAEMON_PATH") };
+        assert_ne!(
+            resolved, fake,
+            "non-executable candidate must not shadow a runnable binary"
+        );
     }
 }
