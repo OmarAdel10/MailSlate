@@ -54,6 +54,10 @@ static void my_application_activate(GApplication* application) {
 
   gtk_window_set_default_size(window, 1280, 720);
 
+  // Keep the 3-pane layout usable: USER_FLOW.md §2 sets the minimum
+  // window at 1024x640 so panes never collapse below spec sizes.
+  gtk_widget_set_size_request(GTK_WIDGET(window), 1024, 640);
+
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
       project, self->dart_entrypoint_arguments);
