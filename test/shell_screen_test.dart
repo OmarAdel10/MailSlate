@@ -142,6 +142,10 @@ void main() {
     final newer = File('${logDir.path}/daemon.2026-10-16.log');
     older.writeAsStringSync('older');
     newer.writeAsStringSync('newer');
+    // Pin the modification times: the newest-log lookup sorts by mtime,
+    // and back-to-back writes can share a timestamp on coarse clocks.
+    older.setLastModifiedSync(DateTime.parse('2026-10-15'));
+    newer.setLastModifiedSync(DateTime.parse('2026-10-16'));
     final opener = FakeLogOpener();
     configureDependencies(
       client: FakeFfiClient(
