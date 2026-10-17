@@ -4,6 +4,16 @@
 [advisories]
 version = 2
 yanked = 'warn'
+ignore = [
+    # The zbus 5.x family was published as unmaintained on 2026-10-17 after the
+    # crates were merged into zbus >= 6.0.0 (zvariant -> wire, zbus_names ->
+    # names, zvariant_derive -> macros). No safe upgrade exists while
+    # keyring -> zbus-secret-service-keyring-store pins zbus 5.19.0.
+    # Remove these ignores when MAILSLATE-25 migrates the keyring chain.
+    { id = 'RUSTSEC-2026-0370', reason = 'no safe upgrade: keyring -> secret-service pins zbus 5.19.0; tracked in MAILSLATE-25' },
+    { id = 'RUSTSEC-2026-0371', reason = 'no safe upgrade: keyring -> secret-service pins zbus 5.19.0; tracked in MAILSLATE-25' },
+    { id = 'RUSTSEC-2026-0372', reason = 'no safe upgrade: keyring -> secret-service pins zbus 5.19.0; tracked in MAILSLATE-25' },
+]
 
 [licenses]
 version = 2
