@@ -47,6 +47,21 @@ void main() {
     expect(dark.scaffoldBackgroundColor, AppTokens.dark.canvas);
   });
 
+  test('theme renders all UI text in Inter', () {
+    final light = buildTheme(Brightness.light);
+    final dark = buildTheme(Brightness.dark);
+
+    expect(light.textTheme.bodyLarge?.fontFamily, 'Inter');
+    expect(light.textTheme.titleSmall?.fontFamily, 'Inter');
+    expect(light.textTheme.labelSmall?.fontFamily, 'Inter');
+    expect(dark.textTheme.bodyMedium?.fontFamily, 'Inter');
+    expect(dark.textTheme.displaySmall?.fontFamily, 'Inter');
+  });
+
+  test('excerpts use the JetBrains Mono family token', () {
+    expect(kMonoFontFamily, 'JetBrainsMono');
+  });
+
   test('copyWith replaces only the named tokens', () {
     final custom = AppTokens.dark.copyWith(primary: const Color(0xFF123456));
     expect(custom.primary, const Color(0xFF123456));
