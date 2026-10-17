@@ -43,3 +43,35 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-19 — M1: no automated end-to-end test drives the real GUI against a
   spawned daemon (a manual `flutter run -d linux` smoke is the only evidence);
   add an automated GUI↔daemon E2E before M2 closes.
+- MAILSLATE-20 — M2: `daemon_binary()` picks the first `is_file()` candidate
+  without an executable-bit check and falls back to a bare PATH lookup
+  (`rust/crates/core/src/infra/ipc.rs:145-166`); require `mode & 0o111` on
+  unix candidates, keep PATH last.
+- MAILSLATE-21 — M2: env-mutating tests set `MAILSLATE_DAEMON_PATH`,
+  `MAILSLATE_DATA_DIR`, `XDG_RUNTIME_DIR` while sibling tests run in the same
+  binary (`rust/crates/core/src/infra/ipc.rs:368-433`,
+  `rust/crates/bridge/src/api/system.rs:208-277`); serialize them or document
+  the single-suite constraint before the suites grow.
+- MAILSLATE-22 — M2: the daemon accept loop has no per-connection read
+  timeout or connection cap (`rust/crates/daemon/src/server.rs:169-193`); an
+  idle same-uid peer can hold a task and force a 64 MiB declared-length
+  allocation — harden before M2 widens the surface.
+- MAILSLATE-23 — M2: the IPC `Client` is desynchronized after a request
+  timeout — a late reply would be consumed by the next call and rejected by
+  the id check (`rust/crates/core/src/infra/ipc.rs:70-98`); document the
+  discard-after-error contract or poison the client.
+- MAILSLATE-24 — M2: the single-instance guard is probe-then-bind (TOCTOU)
+  (`rust/crates/daemon/src/server.rs:104-116`); concurrent starts race and
+  the loser sees a raw io bind error instead of `AlreadyRunning` — use a
+  pid-file lock or re-probe on bind failure.
+
+## Acknowledged test deferrals
+
+Trivial error-variant branches deliberately left untested in M1 (verified by
+the round-3 QA certification; no Plane item — revisit only if these branches
+gain logic):
+
+- `LoggingError::Io` arm — `rust/crates/daemon/src/logging.rs:16-17`.
+- `MigrationError::Version` arm —
+  `rust/crates/core/src/infra/db/migrations.rs:27-28`.
+- `FrameError` Display strings — `rust/crates/protocol/src/framing.rs:31-42`.
