@@ -335,6 +335,39 @@ fn invalid_log_directive_falls_back_to_info() {
 }
 
 #[test]
+fn excess_idle_connections_are_rejected() {
+    let daemon = Daemon::start();
+
+    // Hold every connection slot with an idle peer.
+    let mut idle: Vec<UnixStream> = (0..8).map(|_| daemon.connect()).collect();
+
+    // The slots are really held: every idle connection must have been
+    // accepted by the daemon. Kernel backlog completes connect() before
+    // accept(), so pinging all eight is the only reliable way to drain
+    // the backlog and force active == 8 before the overflow probe.
+    for (slot, id) in idle.iter_mut().zip(1..) {
+        let ping = call(slot, id, "ping");
+        assert!(ping.ok, "occupied slots must stay serviceable");
+    }
+
+    // The ninth connection must be dropped by the daemon: a blocking read
+    // ends at EOF instead of hanging.
+    let mut overflow = daemon.connect();
+    overflow
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    let mut buf = [0u8; 1];
+    let read = overflow
+        .read(&mut buf)
+        .expect("excess connections must be closed by the daemon");
+    assert_eq!(read, 0, "excess connections must be rejected");
+
+    // Cleanup: shutdown via a held slot.
+    let active = idle.first_mut().expect("idle conn");
+    call(active, 2, "shutdown");
+}
+
+#[test]
 fn valid_log_directive_is_accepted() {
     let data = tempfile::tempdir().expect("data dir");
     let runtime = tempfile::tempdir().expect("runtime dir");

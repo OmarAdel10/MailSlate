@@ -93,6 +93,14 @@ pub async fn start_daemon() -> Result<PingInfo, DaemonError> {
         .map(Into::into)
 }
 
+/// Absolute path of the daemon's log directory.
+///
+/// The paused banner's View log action opens the newest rotation file from
+/// this directory (USER_FLOW §9); pure path math, never spawns a daemon.
+pub fn daemon_log_dir() -> String {
+    paths::logs_dir().to_string_lossy().into_owned()
+}
+
 async fn connect_ping(socket: &Path) -> Result<PingInfo, DaemonError> {
     let mut client = Client::connect(socket).await.map_err(DaemonError::from)?;
     client
@@ -125,6 +133,13 @@ mod tests {
     use mailslate_protocol::{methods, PROTOCOL_VERSION};
     use serde_json::json;
     use tokio::net::UnixListener;
+
+    /// Serializes tests that mutate process-wide env vars
+    /// (`MAILSLATE_DATA_DIR`, `MAILSLATE_DAEMON_PATH`,
+    /// `XDG_RUNTIME_DIR`); sibling tests in this binary run in
+    /// parallel. Async-aware because the guarded tests hold it across
+    /// await points.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn serve(listener: UnixListener) {
         while let Ok((mut stream, _)) = listener.accept().await {
@@ -207,6 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_daemon_spawns_the_binary_and_reports_running() {
+        let _guard = ENV_LOCK.lock().await;
         let daemon = daemon_binary_for_tests();
         assert!(
             daemon.is_file(),
@@ -279,5 +295,24 @@ mod tests {
     #[test]
     fn init_app_smoke() {
         init_app();
+    }
+
+    #[test]
+    fn daemon_log_dir_reports_the_data_dir_logs_path() {
+        let _guard = ENV_LOCK.blocking_lock();
+
+        let dir = tempfile::tempdir().expect("tempdir for the data dir");
+        let saved = std::env::var("MAILSLATE_DATA_DIR").ok();
+        std::env::set_var("MAILSLATE_DATA_DIR", dir.path());
+
+        let reported = daemon_log_dir();
+
+        match saved {
+            Some(value) => std::env::set_var("MAILSLATE_DATA_DIR", value),
+            None => std::env::remove_var("MAILSLATE_DATA_DIR"),
+        }
+
+        let expected = dir.path().join("logs");
+        assert_eq!(Path::new(&reported), expected);
     }
 }

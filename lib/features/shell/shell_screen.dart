@@ -3,6 +3,8 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:mailslate/core/di/di.dart';
 import 'package:mailslate/core/ffi/client.dart';
+import 'package:mailslate/core/logging/daemon_log.dart';
+import 'package:mailslate/core/logging/log_opener.dart';
 import 'package:mailslate/core/theme/tokens.dart';
 
 import 'daemon_status_bloc.dart';
@@ -314,11 +316,64 @@ class _UnavailableBanner extends StatelessWidget {
                   ),
                   child: const Text('Retry'),
                 ),
+                const SizedBox(width: 8),
+                const _ViewLogButton(),
               ],
             ),
           ),
         );
       },
+    );
+  }
+}
+
+class _ViewLogButton extends StatefulWidget {
+  const _ViewLogButton();
+
+  @override
+  State<_ViewLogButton> createState() => _ViewLogButtonState();
+}
+
+/// Paused-card action opening the newest daemon log (USER_FLOW §9).
+///
+/// Disabled until a log file exists: the daemon has not run yet, or the
+/// log directory has no rotation file.
+class _ViewLogButtonState extends State<_ViewLogButton> {
+  String? _newestLog;
+
+  @override
+  void initState() {
+    super.initState();
+    // Resolve after the first frame so the banner paints immediately.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      String? newest;
+      try {
+        final dir = await getIt<FfiClient>().daemonLogDir();
+        newest = dir.isEmpty ? null : newestDaemonLog(dir);
+      } catch (_) {
+        // The bridge is unavailable (never loaded, daemon never ran):
+        // stay disabled instead of crashing the paused banner.
+        newest = null;
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _newestLog = newest;
+      });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final log = _newestLog;
+    return Tooltip(
+      message: log == null ? 'No log file yet' : 'Open the newest daemon log',
+      child: TextButton(
+        key: const Key('view-log-button'),
+        onPressed: log == null ? null : () => getIt<LogOpener>().open(log),
+        child: const Text('View log'),
+      ),
     );
   }
 }

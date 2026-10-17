@@ -44,6 +44,8 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  integration_test:
+    sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -62,6 +64,18 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # DESIGN.md §4 type system: Inter renders all UI text; JetBrains Mono
+  # is reserved for code-like excerpts (About box, daemon log lines).
+  # Both are variable fonts (weight axis); styles pick weights via
+  # TextStyle.fontWeight.
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Variable.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Variable.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -27,11 +27,18 @@ const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A request/response channel to the daemon.
+///
+/// The client is **single-shot after failure**: any mid-stream error
+/// (timeout, frame failure, id mismatch) poisons it, because the
+/// stream may hold a late or malformed reply. The next call fails
+/// fast; callers open a fresh connection instead of reusing. Clean
+/// `ok=false` replies are complete exchanges and do not poison.
 #[derive(Debug)]
 pub struct Client {
     stream: tokio::net::UnixStream,
     next_id: u64,
     request_timeout: Duration,
+    poisoned: bool,
 }
 
 impl Client {
@@ -46,6 +53,7 @@ impl Client {
             stream,
             next_id: 0,
             request_timeout: REQUEST_TIMEOUT,
+            poisoned: false,
         })
     }
 
@@ -66,8 +74,17 @@ impl Client {
     /// Sends one request and awaits its matching response.
     ///
     /// Fails with [`ErrorKind::DaemonUnavailable`] when no reply arrives
-    /// within the request timeout.
+    /// within the request timeout. Any such mid-stream failure poisons
+    /// the client; the next call fails fast and the caller must open a
+    /// fresh connection.
     pub async fn request(&mut self, method: &str, params: Value) -> Result<Value, BridgeError> {
+        if self.poisoned {
+            return Err(daemon_unavailable(
+                "client is poisoned: a previous request failed mid-stream, \
+                 open a fresh connection"
+                    .to_string(),
+            ));
+        }
         self.next_id += 1;
         let request = Request {
             id: self.next_id,
@@ -76,7 +93,7 @@ impl Client {
         };
         let timeout = self.request_timeout;
         let stream = &mut self.stream;
-        let response: Response = tokio::time::timeout(timeout, async {
+        let response: Response = match tokio::time::timeout(timeout, async {
             write_json_frame_async(stream, &request)
                 .await
                 .map_err(frame_error)?;
@@ -84,8 +101,21 @@ impl Client {
             Ok::<Response, BridgeError>(response)
         })
         .await
-        .map_err(|_| daemon_unavailable(format!("daemon did not answer within {timeout:?}")))??;
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => {
+                self.poisoned = true;
+                return Err(err);
+            }
+            Err(_) => {
+                self.poisoned = true;
+                return Err(daemon_unavailable(format!(
+                    "daemon did not answer within {timeout:?}"
+                )));
+            }
+        };
         if response.id != request.id {
+            self.poisoned = true;
             return Err(BridgeError::new(
                 ErrorKind::Internal,
                 format!(
@@ -161,8 +191,29 @@ fn daemon_binary() -> PathBuf {
     candidates.push(Path::new("rust/target/release").join(NAME));
     candidates
         .into_iter()
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_runnable_file(candidate))
         .unwrap_or_else(|| PathBuf::from(NAME))
+}
+
+/// A candidate we can actually execute: a regular file with at least
+/// one execute bit set (unix). Without this filter a stale
+/// non-executable artifact could shadow a working binary, and the
+/// bare-name `PATH` fallback would resolve to anything.
+#[cfg(unix)]
+fn is_runnable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+/// Non-unix platforms have no portable execute bit; a plain file
+/// check is the best available filter there.
+#[cfg(not(unix))]
+fn is_runnable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 fn frame_error(err: FrameError) -> BridgeError {
@@ -183,6 +234,12 @@ fn daemon_unavailable(message: String) -> BridgeError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Serializes tests that mutate process-wide env vars
+    /// (`MAILSLATE_DAEMON_PATH`, `XDG_RUNTIME_DIR`); sibling tests in
+    /// this binary run in parallel. Async-aware because the guarded
+    /// tests hold it across await points.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// A fake daemon: answers `ping`, errors on `boom`, and replies with a
     /// wrong id for `bad-id`.
@@ -367,9 +424,15 @@ mod tests {
     /// path. Kept as one test because both mutate process-wide env vars.
     #[tokio::test]
     async fn spawn_path_uses_env_overrides() {
+        let _guard = ENV_LOCK.lock().await;
         let tools = tempfile::tempdir().unwrap();
         let fake = tools.path().join("fake-daemon");
         std::fs::write(&fake, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &fake) };
         assert_eq!(daemon_binary(), fake);
 
@@ -430,5 +493,81 @@ mod tests {
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn daemon_binary_skips_non_executable_env_candidate() {
+        let _guard = ENV_LOCK.blocking_lock();
+        let tools = tempfile::tempdir().unwrap();
+        let fake = tools.path().join("not-executable");
+        std::fs::write(&fake, b"").unwrap();
+        unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &fake) };
+        let resolved = daemon_binary();
+        unsafe { std::env::remove_var("MAILSLATE_DAEMON_PATH") };
+        assert_ne!(
+            resolved, fake,
+            "non-executable candidate must not shadow a runnable binary"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_is_poisoned_after_a_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket)
+            .await
+            .unwrap()
+            .with_request_timeout(Duration::from_millis(100));
+        let err = client.request("stall", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+        assert!(err.message.contains("did not answer"));
+        // The stream is desynchronized after the timeout; reuse must
+        // fail fast instead of consuming the late reply.
+        let started = std::time::Instant::now();
+        let err = client
+            .request(methods::PING, Value::Null)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+        assert!(
+            err.message.contains("poisoned"),
+            "expected a poisoned-client error, got: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "poisoned client must fail fast, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn client_is_poisoned_after_an_id_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("bad-id", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("does not match"));
+        let err = client
+            .request(methods::PING, Value::Null)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+        assert!(
+            err.message.contains("poisoned"),
+            "expected a poisoned-client error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_survives_clean_daemon_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("boom", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Storage);
+        // An ok=false reply is a complete, in-sync exchange: the same
+        // connection must stay usable.
+        client.ping().await.unwrap();
     }
 }

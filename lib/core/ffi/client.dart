@@ -30,6 +30,11 @@ class FfiClient {
   /// Ensures a daemon is running (spawning it when needed) and pings it.
   Future<rust.PingInfo> startDaemon() => _guard(rust.startDaemon);
 
+  /// The daemon's log directory, as an absolute path.
+  ///
+  /// Pure path lookup on the Rust side; works while the daemon is down.
+  Future<String> daemonLogDir() => _guard(rust.daemonLogDir);
+
   /// Daemon push events (new mail, sync progress, …).
   ///
   /// The daemon event channel ships with the M2 sync engine; until then the

@@ -2,11 +2,17 @@ import 'package:flutter/material.dart';
 
 import 'tokens.dart';
 
+/// Font family for code-like excerpts (About box, daemon log lines).
+///
+/// DESIGN.md §4 reserves JetBrains Mono for these surfaces; all other
+/// UI text renders in Inter via [buildTheme].
+const String kMonoFontFamily = 'JetBrainsMono';
+
 /// Builds the app theme for [brightness] from the DESIGN.md token tables.
 ///
 /// Light/dark are token swaps only — widgets never branch on brightness.
-/// Typography uses the platform font stack in M1; bundling Inter and
-/// JetBrains Mono is tracked as a follow-up (DESIGN §4).
+/// Typography renders in the bundled Inter variable font (DESIGN §4);
+/// [kMonoFontFamily] styles the code-like excerpts.
 ThemeData buildTheme(Brightness brightness) {
   final tokens = brightness == Brightness.dark
       ? AppTokens.dark
@@ -14,6 +20,7 @@ ThemeData buildTheme(Brightness brightness) {
 
   return ThemeData(
     brightness: brightness,
+    fontFamily: 'Inter',
     colorScheme: ColorScheme(
       brightness: brightness,
       primary: tokens.primary,
