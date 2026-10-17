@@ -1,0 +1,43 @@
+# cargo-deny configuration — advisory, license, and source checks
+# (ARCHITECTURE.md §12 supply chain; AGENTS.md §6 gates).
+
+[advisories]
+version = 2
+yanked = 'warn'
+ignore = [
+    # The zbus 5.x family was published as unmaintained on 2026-10-17 after the
+    # crates were merged into zbus >= 6.0.0 (zvariant -> wire, zbus_names ->
+    # names, zvariant_derive -> macros). No safe upgrade exists while
+    # keyring -> zbus-secret-service-keyring-store pins zbus 5.19.0.
+    # Remove these ignores when MAILSLATE-25 migrates the keyring chain.
+    { id = 'RUSTSEC-2026-0370', reason = 'no safe upgrade: keyring -> secret-service pins zbus 5.19.0; tracked in MAILSLATE-25' },
+    { id = 'RUSTSEC-2026-0371', reason = 'no safe upgrade: keyring -> secret-service pins zbus 5.19.0; tracked in MAILSLATE-25' },
+    { id = 'RUSTSEC-2026-0372', reason = 'no safe upgrade: keyring -> secret-service pins zbus 5.19.0; tracked in MAILSLATE-25' },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+  'MIT',
+  'Apache-2.0',
+  'Apache-2.0 WITH LLVM-exception',
+  'BSD-2-Clause',
+  'BSD-3-Clause',
+  'ISC',
+  'Zlib',
+  'MPL-2.0',
+  'Unicode-3.0',
+  'Unicode-DFS-2016',
+  'CC0-1.0',
+  'BSL-1.0',
+]
+
+# Workspace crates are unpublished application code; registry license
+# requirements do not apply to them.
+[licenses.private]
+ignore = true
+
+[sources]
+unknown-registry = 'deny'
+unknown-git = 'deny'

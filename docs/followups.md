@@ -12,8 +12,10 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-9 — M1: `.github/workflows/ci.yml` build-matrix is Linux-only and the
   windows/macos legs of `.github/workflows/cd.yml` auto-skip until the Windows/macOS
   Flutter scaffolds are committed (`flutter create` on each OS); restore the legs then.
-- MAILSLATE-10 — M1: CI does not yet fail on stale flutter_rust_bridge codegen
-  (`AGENTS.md` §5); add a freshness check once the FRB 2.13.0 toolchain is wired.
+- MAILSLATE-10 — M1: reopened after `01aeacd` rescoped the codegen-staleness check
+  (`7a2e7be` failed on any dirty path due to untracked `macos/Flutter/`); keep open
+  until a green PR run proves the scoped check still catches real FRB drift
+  (`.github/workflows/ci.yml`).
 - MAILSLATE-11 — M2: the CI rust job smoke-fetches the GreenMail JAR
   (`.github/workflows/ci.yml`) but cannot run `--features greenmail` integration
   tests until setup-java is wired (`specs/DEVELOPMENT_ENVIRONMENT.md` §8).
@@ -26,3 +28,50 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-14 — Docs: `specs/DEVELOPMENT_ENVIRONMENT.md` §10 does not yet match the
   shipped `cd.yml` (appdmg 0.6.6, deb `installed_size`/`license` fields, Inno Setup
   6.7.1 pin, actionlint v1.7.12 pin); sync the spec text.
+- MAILSLATE-15 — M1: the shell renders the platform font stack; DESIGN.md §4
+  specifies Inter (UI) and JetBrains Mono (code) — bundle both and set the
+  TextTheme families (`lib/core/theme/theme.dart`).
+- MAILSLATE-16 — M1: minimum window size 1024x640 (USER_FLOW.md §2) is not yet
+  enforced; wire the desktop runners once the scaffolds land (MAILSLATE-9;
+  `lib/main.dart`, `linux/`, `windows/`, `macos/`).
+- MAILSLATE-17 — M1: the daemon-unavailable card ships Retry only; add the
+  `View log` action (USER_FLOW.md §9) alongside the M5 Settings daemon section
+  (`lib/features/shell/shell_screen.dart`).
+- MAILSLATE-18 — M2: `is_compatible` in `rust/crates/protocol/` is never called;
+  wire the protocol compatibility check and the update-required screen when the
+  daemon earns its first wire change (ARCHITECTURE.md §5.2; `lib/features/shell/`).
+- MAILSLATE-19 — M1: no automated end-to-end test drives the real GUI against a
+  spawned daemon (a manual `flutter run -d linux` smoke is the only evidence);
+  add an automated GUI↔daemon E2E before M2 closes.
+- MAILSLATE-20 — M2: `daemon_binary()` picks the first `is_file()` candidate
+  without an executable-bit check and falls back to a bare PATH lookup
+  (`rust/crates/core/src/infra/ipc.rs:145-166`); require `mode & 0o111` on
+  unix candidates, keep PATH last.
+- MAILSLATE-21 — M2: env-mutating tests set `MAILSLATE_DAEMON_PATH`,
+  `MAILSLATE_DATA_DIR`, `XDG_RUNTIME_DIR` while sibling tests run in the same
+  binary (`rust/crates/core/src/infra/ipc.rs:368-433`,
+  `rust/crates/bridge/src/api/system.rs:208-277`); serialize them or document
+  the single-suite constraint before the suites grow.
+- MAILSLATE-22 — M2: the daemon accept loop has no per-connection read
+  timeout or connection cap (`rust/crates/daemon/src/server.rs:169-193`); an
+  idle same-uid peer can hold a task and force a 64 MiB declared-length
+  allocation — harden before M2 widens the surface.
+- MAILSLATE-23 — M2: the IPC `Client` is desynchronized after a request
+  timeout — a late reply would be consumed by the next call and rejected by
+  the id check (`rust/crates/core/src/infra/ipc.rs:70-98`); document the
+  discard-after-error contract or poison the client.
+- MAILSLATE-24 — M2: the single-instance guard is probe-then-bind (TOCTOU)
+  (`rust/crates/daemon/src/server.rs:104-116`); concurrent starts race and
+  the loser sees a raw io bind error instead of `AlreadyRunning` — use a
+  pid-file lock or re-probe on bind failure.
+
+## Acknowledged test deferrals
+
+Trivial error-variant branches deliberately left untested in M1 (verified by
+the round-3 QA certification; no Plane item — revisit only if these branches
+gain logic):
+
+- `LoggingError::Io` arm — `rust/crates/daemon/src/logging.rs:16-17`.
+- `MigrationError::Version` arm —
+  `rust/crates/core/src/infra/db/migrations.rs:27-28`.
+- `FrameError` Display strings — `rust/crates/protocol/src/framing.rs:31-42`.

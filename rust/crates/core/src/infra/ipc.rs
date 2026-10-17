@@ -1,0 +1,434 @@
+//! IPC client: talks to the daemon over the socket it serves.
+//!
+//! The GUI uses one [`Client`] per logical connection; method calls are
+//! serialized on the stream and request ids increase monotonically
+//! (ARCHITECTURE §5). `connect_or_spawn` starts the daemon on demand so the
+//! GUI works even when nothing autostarted it at login.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use mailslate_protocol::FrameError;
+use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
+use mailslate_protocol::message::{Request, Response};
+use mailslate_protocol::{BridgeError, ErrorKind, PingResult, methods};
+use serde_json::Value;
+
+use crate::infra::paths;
+
+/// How long `connect_or_spawn` waits for a freshly spawned daemon.
+const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Delay between connection attempts after a spawn.
+const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// How long [`Client::request`] waits for the daemon's reply before giving
+/// up; keeps the GUI from hanging on a wedged daemon.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A request/response channel to the daemon.
+#[derive(Debug)]
+pub struct Client {
+    stream: tokio::net::UnixStream,
+    next_id: u64,
+    request_timeout: Duration,
+}
+
+impl Client {
+    /// Connects to the daemon listening at `socket`, without spawning one.
+    pub async fn connect(socket: &Path) -> Result<Self, BridgeError> {
+        let stream = tokio::net::UnixStream::connect(socket)
+            .await
+            .map_err(|err| {
+                daemon_unavailable(format!("could not connect to {}: {err}", socket.display()))
+            })?;
+        Ok(Self {
+            stream,
+            next_id: 0,
+            request_timeout: REQUEST_TIMEOUT,
+        })
+    }
+
+    /// Connects to the daemon for `data_dir`, spawning it when needed and
+    /// waiting until it accepts connections.
+    ///
+    /// The spawned child is intentionally not waited on; a running daemon
+    /// outlives the caller and exits on its own via IPC or a signal.
+    pub async fn connect_or_spawn(data_dir: &Path) -> Result<Self, BridgeError> {
+        let socket = paths::socket_path_for(data_dir);
+        if let Ok(client) = Self::connect(&socket).await {
+            return Ok(client);
+        }
+        spawn_daemon(data_dir)?;
+        connect_with_retry(&socket).await
+    }
+
+    /// Sends one request and awaits its matching response.
+    ///
+    /// Fails with [`ErrorKind::DaemonUnavailable`] when no reply arrives
+    /// within the request timeout.
+    pub async fn request(&mut self, method: &str, params: Value) -> Result<Value, BridgeError> {
+        self.next_id += 1;
+        let request = Request {
+            id: self.next_id,
+            method: method.to_string(),
+            params,
+        };
+        let timeout = self.request_timeout;
+        let stream = &mut self.stream;
+        let response: Response = tokio::time::timeout(timeout, async {
+            write_json_frame_async(stream, &request)
+                .await
+                .map_err(frame_error)?;
+            let response: Response = read_json_frame_async(stream).await.map_err(frame_error)?;
+            Ok::<Response, BridgeError>(response)
+        })
+        .await
+        .map_err(|_| daemon_unavailable(format!("daemon did not answer within {timeout:?}")))??;
+        if response.id != request.id {
+            return Err(BridgeError::new(
+                ErrorKind::Internal,
+                format!(
+                    "response id {} does not match request id {}",
+                    response.id, request.id
+                ),
+            ));
+        }
+        response.into_result()
+    }
+
+    /// The `ping` handshake: both sides' versions.
+    pub async fn ping(&mut self) -> Result<PingResult, BridgeError> {
+        let value = self.request(methods::PING, Value::Null).await?;
+        serde_json::from_value(value).map_err(|err| {
+            BridgeError::new(ErrorKind::Internal, format!("invalid ping payload: {err}"))
+        })
+    }
+
+    /// Overrides the per-request timeout; tests use short values.
+    #[cfg(test)]
+    pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+}
+
+async fn connect_with_retry(socket: &Path) -> Result<Client, BridgeError> {
+    let deadline = tokio::time::Instant::now() + SPAWN_CONNECT_TIMEOUT;
+    loop {
+        match Client::connect(socket).await {
+            Ok(client) => return Ok(client),
+            Err(err) if tokio::time::Instant::now() >= deadline => {
+                return Err(daemon_unavailable(format!(
+                    "daemon did not become ready within {SPAWN_CONNECT_TIMEOUT:?}: {err}"
+                )));
+            }
+            Err(_) => tokio::time::sleep(CONNECT_RETRY_DELAY).await,
+        }
+    }
+}
+
+/// Spawns the daemon binary detached, with `data_dir` as its profile.
+fn spawn_daemon(data_dir: &Path) -> Result<(), BridgeError> {
+    std::process::Command::new(daemon_binary())
+        .env(paths::DATA_DIR_ENV, data_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| daemon_unavailable(format!("could not start the daemon: {err}")))
+}
+
+/// Locates the daemon binary: `MAILSLATE_DAEMON_PATH`, an executable
+/// sibling, the workspace target directory, then `PATH`.
+fn daemon_binary() -> PathBuf {
+    const NAME: &str = "mailslate-daemon";
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = std::env::var_os("MAILSLATE_DAEMON_PATH") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join(NAME));
+    }
+    // Development layout: `rust/target/{debug,release}` relative to this crate.
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    candidates.push(target.join("debug").join(NAME));
+    candidates.push(target.join("release").join(NAME));
+    candidates.push(Path::new("rust/target/debug").join(NAME));
+    candidates.push(Path::new("rust/target/release").join(NAME));
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(NAME))
+}
+
+fn frame_error(err: FrameError) -> BridgeError {
+    match err {
+        FrameError::Io(io) => daemon_unavailable(format!("connection to the daemon failed: {io}")),
+        other => BridgeError::new(
+            ErrorKind::Internal,
+            format!("daemon sent an invalid frame: {other}"),
+        ),
+    }
+}
+
+fn daemon_unavailable(message: String) -> BridgeError {
+    BridgeError::new(ErrorKind::DaemonUnavailable, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A fake daemon: answers `ping`, errors on `boom`, and replies with a
+    /// wrong id for `bad-id`.
+    async fn serve(listener: tokio::net::UnixListener) {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        loop {
+            let request: Request = match read_json_frame_async(&mut stream).await {
+                Ok(request) => request,
+                Err(_) => return,
+            };
+            let response = match request.method.as_str() {
+                methods::PING => Response::ok(
+                    request.id,
+                    json!({"protocol_version": 1, "daemon_version": "9.9.9"}),
+                ),
+                "boom" => Response::err(
+                    request.id,
+                    BridgeError::new(ErrorKind::Storage, "disk busy"),
+                ),
+                "bad-id" => Response::ok(request.id + 1, Value::Null),
+                "echo-id" => Response::ok(request.id, json!({"seen": request.id})),
+                "stall" => {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    return;
+                }
+                "garbage" => {
+                    use tokio::io::AsyncWriteExt;
+                    let payload = b"not json";
+                    stream
+                        .write_all(&(payload.len() as u32).to_le_bytes())
+                        .await
+                        .expect("garbage length");
+                    stream.write_all(payload).await.expect("garbage payload");
+                    return;
+                }
+                "huge" => {
+                    use tokio::io::AsyncWriteExt;
+                    let header = ((mailslate_protocol::MAX_FRAME_BYTES as u32) + 1).to_le_bytes();
+                    stream.write_all(&header).await.expect("huge header");
+                    return;
+                }
+                "drop" => return,
+                _ => Response::ok(request.id, Value::Null),
+            };
+            write_json_frame_async(&mut stream, &response)
+                .await
+                .expect("write response");
+        }
+    }
+
+    fn start_fake_server(dir: &tempfile::TempDir) -> PathBuf {
+        let socket = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(serve(listener));
+        socket
+    }
+
+    #[tokio::test]
+    async fn ping_round_trips_through_the_wire_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let ping = client.ping().await.unwrap();
+        assert_eq!(ping.protocol_version, 1);
+        assert_eq!(ping.daemon_version, "9.9.9");
+    }
+
+    #[tokio::test]
+    async fn daemon_errors_surface_as_bridge_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("boom", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Storage);
+        assert_eq!(err.message, "disk busy");
+        assert!(!err.retryable);
+    }
+
+    #[tokio::test]
+    async fn mismatched_response_ids_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("bad-id", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn connect_failure_is_daemon_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Client::connect(&dir.path().join("absent.sock"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+    }
+
+    #[tokio::test]
+    async fn stalled_daemon_request_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket)
+            .await
+            .unwrap()
+            .with_request_timeout(Duration::from_millis(50));
+        let err = client.request("stall", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+        assert!(err.message.contains("did not answer"));
+    }
+
+    #[tokio::test]
+    async fn invalid_frame_from_daemon_is_internal() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("garbage", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("invalid frame"));
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_header_from_daemon_is_internal() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("huge", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("invalid frame"));
+    }
+
+    #[tokio::test]
+    async fn invalid_ping_payload_is_internal() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let request: Request = read_json_frame_async(&mut stream).await.expect("request");
+            let response = Response::ok(request.id, json!("not-an-object"));
+            write_json_frame_async(&mut stream, &response)
+                .await
+                .expect("write");
+        });
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.ping().await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("invalid ping payload"));
+    }
+
+    #[tokio::test]
+    async fn dropped_connection_maps_to_daemon_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let err = client.request("drop", Value::Null).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DaemonUnavailable);
+        assert!(err.message.contains("connection to the daemon failed"));
+    }
+
+    #[tokio::test]
+    async fn request_ids_increase_monotonically() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let first = client.request("echo-id", Value::Null).await.unwrap();
+        let second = client.request("echo-id", Value::Null).await.unwrap();
+        assert_eq!(first["seen"], json!(1));
+        assert_eq!(second["seen"], json!(2));
+    }
+
+    /// The daemon binary built next to this test binary
+    /// (`rust/target/{debug,release}/mailslate-daemon`).
+    fn daemon_binary_for_tests() -> PathBuf {
+        let exe = std::env::current_exe().expect("test binary path");
+        exe.parent()
+            .and_then(Path::parent)
+            .map(|dir| dir.join("mailslate-daemon"))
+            .expect("target directory")
+    }
+
+    /// Covers the `MAILSLATE_DAEMON_PATH` override and the spawn-on-demand
+    /// path. Kept as one test because both mutate process-wide env vars.
+    #[tokio::test]
+    async fn spawn_path_uses_env_overrides() {
+        let tools = tempfile::tempdir().unwrap();
+        let fake = tools.path().join("fake-daemon");
+        std::fs::write(&fake, b"").unwrap();
+        unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &fake) };
+        assert_eq!(daemon_binary(), fake);
+
+        // Keep sockets inside test temp dirs even on desktops that set
+        // XDG_RUNTIME_DIR (it redirects socket_path_for elsewhere).
+        let saved_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+
+        // Fast path: a daemon that already answers must win over spawning.
+        // MAILSLATE_DAEMON_PATH still points at the empty fake file, so a
+        // spawn attempt would fail this test.
+        let live = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&live);
+        assert_eq!(socket, paths::socket_path_for(live.path()));
+        let mut client = Client::connect_or_spawn(live.path()).await.unwrap();
+        assert_eq!(client.ping().await.unwrap().daemon_version, "9.9.9");
+
+        let daemon = daemon_binary_for_tests();
+        assert!(
+            daemon.is_file(),
+            "daemon binary not built at {}; run cargo test --workspace",
+            daemon.display()
+        );
+        unsafe { std::env::set_var("MAILSLATE_DAEMON_PATH", &daemon) };
+        let dir = tempfile::tempdir().unwrap();
+        // The product gives a spawned daemon 10 s to become ready. On an
+        // oversubscribed temp filesystem a cold boot can occasionally run
+        // past that budget, so wait a little longer here: a broken spawn
+        // path never becomes reachable, so this only tolerates slow disks.
+        let mut client = match Client::connect_or_spawn(dir.path()).await {
+            Ok(client) => client,
+            Err(first_err) => {
+                let socket = dir.path().join("daemon.sock");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    match Client::connect(&socket).await {
+                        Ok(client) => break client,
+                        Err(_) => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "spawned daemon never became reachable: {first_err}"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
+        };
+        assert!(dir.path().join("daemon.sock").exists());
+        let ping = client.ping().await.unwrap();
+        assert_eq!(ping.protocol_version, mailslate_protocol::PROTOCOL_VERSION);
+        assert!(!ping.daemon_version.is_empty());
+        let _ = client.request(methods::SHUTDOWN, Value::Null).await;
+        unsafe {
+            std::env::remove_var("MAILSLATE_DAEMON_PATH");
+            match saved_xdg {
+                Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+        }
+    }
+}

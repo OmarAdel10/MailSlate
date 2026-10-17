@@ -1,0 +1,9 @@
+# flutter_rust_bridge v2 codegen configuration.
+#
+# Lockstep rule (AGENTS.md §5): the codegen CLI version, the
+# `flutter_rust_bridge` crate in rust/crates/bridge/Cargo.toml, and the
+# Dart dependency in pubspec.yaml must all match (2.13.0).
+
+rust_input: crate::api
+rust_root: rust/crates/bridge/
+dart_output: lib/src/rust

@@ -106,7 +106,7 @@ sequenceDiagram
 | `mailslate-core` | lib | Domain + infra: sync engine, IMAP/SMTP adapters, OAuth, DB writer/read pool, keyring, MIME, threading, search, outbox, notifier. | external crates only |
 | `mailslate-protocol` | lib | IPC message types (serde), framing codec, protocol version const. | serde |
 | `mailslate-daemon` | bin | Wires core + protocol: IPC server, dispatcher, event fan-out, autostart management, logging. | core, protocol |
-| `mailslate-bridge` | cdylib | FRB surface for Flutter: thin conversion layer, read-only DB pool, IPC client, event stream bridging. | core (types only where possible), protocol |
+| `mailslate_bridge` | cdylib | FRB surface for Flutter: thin conversion layer, read-only DB pool, IPC client, event stream bridging. | core (types only where possible), protocol |
 
 **Dependency rule (strict):** `daemon → core ← bridge`; `bridge` must NOT run sync logic and must NOT write the DB. `core` never imports FRB or daemon types. `protocol` is standalone.
 
@@ -240,7 +240,7 @@ Delivery guarantees: events are **coalesced invalidations**, not a journal — a
 
 ---
 
-## 6. FRB surface (`mailslate-bridge` → Dart)
+## 6. FRB surface (`mailslate_bridge` → Dart)
 
 FRB v2 generates async Dart functions and stream bridges. The API is deliberately coarse (page-level reads, op-level writes) to keep IPC/FFI chatter low.
 
