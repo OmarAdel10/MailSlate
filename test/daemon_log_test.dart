@@ -29,8 +29,11 @@ void main() {
     final older = File('${dir.path}/daemon.2026-10-15.log');
     final newer = File('${dir.path}/daemon.2026-10-16.log');
     await older.writeAsString('older');
-    await Future<void>.delayed(const Duration(milliseconds: 20));
     await newer.writeAsString('newer');
+    // Pin mtimes explicitly: coarse filesystems can give both files the
+    // same timestamp and flip the pick.
+    older.setLastModifiedSync(DateTime.parse('2026-10-15'));
+    newer.setLastModifiedSync(DateTime.parse('2026-10-16'));
 
     expect(newestDaemonLog(dir.path), newer.path);
   });
