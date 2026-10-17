@@ -341,10 +341,12 @@ fn excess_idle_connections_are_rejected() {
     // Hold every connection slot with an idle peer.
     let mut idle: Vec<UnixStream> = (0..8).map(|_| daemon.connect()).collect();
 
-    // The slots are really held: the daemon still serves one of them.
-    {
-        let active = idle.first_mut().expect("idle conn");
-        let ping = call(active, 1, "ping");
+    // The slots are really held: every idle connection must have been
+    // accepted by the daemon. Kernel backlog completes connect() before
+    // accept(), so pinging all eight is the only reliable way to drain
+    // the backlog and force active == 8 before the overflow probe.
+    for (slot, id) in idle.iter_mut().zip(1..) {
+        let ping = call(slot, id, "ping");
         assert!(ping.ok, "occupied slots must stay serviceable");
     }
 
