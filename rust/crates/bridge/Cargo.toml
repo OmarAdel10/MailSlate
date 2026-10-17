@@ -1,5 +1,9 @@
 [package]
-name = "mailslate-bridge"
+# Underscored to match the flutter_rust_bridge template convention: cargokit
+# looks up build artifacts as `lib$packageName.so` with the raw package
+# name, while cargo emits files under the underscored lib name. A hyphenated
+# package name therefore breaks the Linux link step silently.
+name = "mailslate_bridge"
 description = "flutter_rust_bridge v2 surface: the FFI API between the Flutter GUI and Rust."
 version.workspace = true
 # Pinned to 2021: FRB codegen formats the generated file with rustfmt

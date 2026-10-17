@@ -72,7 +72,7 @@ mailslate/
 │   ├── crates/core/          # mailslate-core: domain + infra
 │   ├── crates/protocol/      # mailslate-protocol: IPC types + framing
 │   ├── crates/daemon/        # mailslate-daemon: headless sync engine binary
-│   ├── crates/bridge/        # mailslate-bridge: FRB cdylib for the GUI
+│   ├── crates/bridge/        # mailslate_bridge: FRB cdylib for the GUI
 │   └── rust_builder/         # FRB generated plugin shim (committed)
 ├── specs/                    # This suite — source of truth (PRD, ARCHITECTURE, …)
 ├── tool/                     # generate_icons.sh, dev helpers, JAR fetcher

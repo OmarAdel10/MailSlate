@@ -1,4 +1,4 @@
-# mailslate-bridge
+# mailslate_bridge
 
 The `flutter_rust_bridge` v2 surface the Flutter GUI links against
 (ARCHITECTURE.md §1, §6).
@@ -35,6 +35,6 @@ the `flutter_rust_bridge` crate, and the Dart dependency must all read
 
 ## Tests
 
-- `cargo test -p mailslate-bridge` — unit tests.
+- `cargo test -p mailslate_bridge` — unit tests.
 - CI regenerates the bindings and fails when the committed output drifts
   (codegen staleness job in `.github/workflows/ci.yml`).

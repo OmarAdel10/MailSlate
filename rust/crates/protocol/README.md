@@ -22,7 +22,7 @@ IPC types and framing shared by the daemon and the GUI bridge
 
 - Consumes: nothing (leaf crate; serde + serde_json only).
 - Produces: typed contract consumed by both `mailslate-daemon` and
-  `mailslate-bridge`.
+  `mailslate_bridge`.
 
 ## Tests
 
