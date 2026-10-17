@@ -126,6 +126,13 @@ mod tests {
     use serde_json::json;
     use tokio::net::UnixListener;
 
+    /// Serializes tests that mutate process-wide env vars
+    /// (`MAILSLATE_DATA_DIR`, `MAILSLATE_DAEMON_PATH`,
+    /// `XDG_RUNTIME_DIR`); sibling tests in this binary run in
+    /// parallel. Async-aware because the guarded tests hold it across
+    /// await points.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn serve(listener: UnixListener) {
         while let Ok((mut stream, _)) = listener.accept().await {
             tokio::spawn(async move {
@@ -207,6 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_daemon_spawns_the_binary_and_reports_running() {
+        let _guard = ENV_LOCK.lock().await;
         let daemon = daemon_binary_for_tests();
         assert!(
             daemon.is_file(),

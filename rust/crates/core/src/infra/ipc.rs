@@ -184,6 +184,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Serializes tests that mutate process-wide env vars
+    /// (`MAILSLATE_DAEMON_PATH`, `XDG_RUNTIME_DIR`); sibling tests in
+    /// this binary run in parallel. Async-aware because the guarded
+    /// tests hold it across await points.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// A fake daemon: answers `ping`, errors on `boom`, and replies with a
     /// wrong id for `bad-id`.
     async fn serve(listener: tokio::net::UnixListener) {
@@ -367,6 +373,7 @@ mod tests {
     /// path. Kept as one test because both mutate process-wide env vars.
     #[tokio::test]
     async fn spawn_path_uses_env_overrides() {
+        let _guard = ENV_LOCK.lock().await;
         let tools = tempfile::tempdir().unwrap();
         let fake = tools.path().join("fake-daemon");
         std::fs::write(&fake, b"").unwrap();
