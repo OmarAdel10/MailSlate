@@ -35,6 +35,9 @@ class FakeRustLibApi extends RustLibApi {
   Future<void> crateApiSystemInitApp() async {}
 
   @override
+  Future<String> crateApiSystemDaemonLogDir() async => '';
+
+  @override
   Future<PingInfo> crateApiSystemPing() async {
     pingCalls += 1;
     final failure = error;

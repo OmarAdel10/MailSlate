@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mailslate/core/di/di.dart';
@@ -7,6 +9,7 @@ import 'package:mailslate/core/theme/theme.dart';
 import 'package:mailslate/features/shell/shell_screen.dart';
 
 import 'support/fake_ffi_client.dart';
+import 'support/fake_log_opener.dart';
 
 const _running = DaemonStatus(
   state: DaemonState.running,
@@ -130,5 +133,55 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(client.statusCalls, 2);
+  });
+
+  testWidgets('paused banner opens the newest daemon log', (tester) async {
+    final logDir = Directory.systemTemp.createTempSync('mailslate-ui-log-');
+    addTearDown(() => logDir.deleteSync(recursive: true));
+    final older = File('${logDir.path}/daemon.2026-10-15.log');
+    final newer = File('${logDir.path}/daemon.2026-10-16.log');
+    older.writeAsStringSync('older');
+    newer.writeAsStringSync('newer');
+    final opener = FakeLogOpener();
+    configureDependencies(
+      client: FakeFfiClient(
+        startFailure: const DaemonUnavailableFailure(),
+        status: const DaemonStatus(state: DaemonState.unavailable),
+        logDir: logDir.path,
+      ),
+      logOpener: opener,
+    );
+
+    await tester.pumpWidget(shell());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('View log'));
+    await tester.pumpAndSettle();
+
+    expect(opener.paths, [newer.path]);
+  });
+
+  testWidgets('View log stays disabled while no log exists', (tester) async {
+    final logDir = Directory.systemTemp.createTempSync('mailslate-ui-log-');
+    addTearDown(() => logDir.deleteSync(recursive: true));
+    final opener = FakeLogOpener();
+    configureDependencies(
+      client: FakeFfiClient(
+        startFailure: const DaemonUnavailableFailure(),
+        status: const DaemonStatus(state: DaemonState.unavailable),
+        logDir: logDir.path,
+      ),
+      logOpener: opener,
+    );
+
+    await tester.pumpWidget(shell());
+    await tester.pumpAndSettle();
+
+    final button = tester.widget<TextButton>(
+      find.byKey(const Key('view-log-button')),
+    );
+    expect(button.onPressed, isNull);
+    expect(find.byTooltip('No log file yet'), findsOneWidget);
+    expect(opener.paths, isEmpty);
   });
 }

@@ -14,6 +14,7 @@ class FakeFfiClient extends FfiClient {
     this.startFailure,
     this.statusFailure,
     this.statusThrow,
+    this.logDir = '',
   });
 
   /// Returned by [daemonStatus] when [statusFailure] is null.
@@ -30,6 +31,9 @@ class FakeFfiClient extends FfiClient {
 
   /// When set, [daemonStatus] throws it (any object, for generic catches).
   Object? statusThrow;
+
+  /// Returned by [daemonLogDir].
+  String logDir;
 
   /// How often [startDaemon] was called.
   int startCalls = 0;
@@ -70,6 +74,9 @@ class FakeFfiClient extends FfiClient {
     }
     return pingResult;
   }
+
+  @override
+  Future<String> daemonLogDir() async => logDir;
 
   @override
   Future<PingInfo> ping() async => pingResult;

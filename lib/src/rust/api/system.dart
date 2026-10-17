@@ -21,6 +21,13 @@ Future<DaemonStatus> daemonStatus() =>
 Future<PingInfo> startDaemon() =>
     RustLib.instance.api.crateApiSystemStartDaemon();
 
+/// Absolute path of the daemon's log directory.
+///
+/// The paused banner's View log action opens the newest rotation file from
+/// this directory (USER_FLOW §9); pure path math, never spawns a daemon.
+Future<String> daemonLogDir() =>
+    RustLib.instance.api.crateApiSystemDaemonLogDir();
+
 /// A failure crossing the FFI boundary.
 class DaemonError implements FrbException {
   /// Machine-readable kind (`ErrorKind` snake_case name).

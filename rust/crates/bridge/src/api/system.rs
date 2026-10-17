@@ -93,6 +93,14 @@ pub async fn start_daemon() -> Result<PingInfo, DaemonError> {
         .map(Into::into)
 }
 
+/// Absolute path of the daemon's log directory.
+///
+/// The paused banner's View log action opens the newest rotation file from
+/// this directory (USER_FLOW §9); pure path math, never spawns a daemon.
+pub fn daemon_log_dir() -> String {
+    paths::logs_dir().to_string_lossy().into_owned()
+}
+
 async fn connect_ping(socket: &Path) -> Result<PingInfo, DaemonError> {
     let mut client = Client::connect(socket).await.map_err(DaemonError::from)?;
     client
