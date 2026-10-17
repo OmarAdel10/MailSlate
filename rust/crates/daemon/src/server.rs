@@ -91,7 +91,7 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
 
     prepare_socket(&socket_path)?;
 
-    let listener = tokio::net::UnixListener::bind(&socket_path)?;
+    let listener = bind_with_race_check(&socket_path)?;
     set_socket_permissions(&socket_path)?;
     std::fs::write(&pid_file, std::process::id().to_string())?;
 
@@ -130,6 +130,23 @@ fn prepare_socket(socket_path: &Path) -> Result<(), ServerError> {
             let _ = std::fs::remove_file(socket_path);
             Ok(())
         }
+    }
+}
+
+/// Binds the listener, turning a lost bind race into a friendly error.
+///
+/// [`prepare_socket`]'s probe and the bind are two steps: a concurrent
+/// daemon can claim the path in between. Re-probing on bind failure lets
+/// the race loser report [`ServerError::AlreadyRunning`]; a dead path
+/// keeps its original io error.
+#[cfg(unix)]
+fn bind_with_race_check(socket_path: &Path) -> Result<tokio::net::UnixListener, ServerError> {
+    match tokio::net::UnixListener::bind(socket_path) {
+        Ok(listener) => Ok(listener),
+        Err(error) => match std::os::unix::net::UnixStream::connect(socket_path) {
+            Ok(_) => Err(ServerError::AlreadyRunning),
+            Err(_) => Err(ServerError::Io(error)),
+        },
     }
 }
 
@@ -269,5 +286,34 @@ mod tests {
             .expect("client read must not hang")
             .expect("client read");
         assert_eq!(read, 0, "client must see EOF after the drop");
+    }
+
+    /// A bind race lost to a concurrent daemon surfaces the friendly
+    /// AlreadyRunning error instead of a raw io error.
+    #[test]
+    fn bind_race_reports_already_running_when_socket_is_live() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let socket_path = dir.path().join("race.sock");
+        let winner = std::os::unix::net::UnixListener::bind(&socket_path).expect("winner binds");
+
+        let error =
+            bind_with_race_check(&socket_path).expect_err("live socket must report AlreadyRunning");
+        assert!(
+            matches!(error, ServerError::AlreadyRunning),
+            "got {error:?}"
+        );
+        drop(winner);
+    }
+
+    /// A bind failure with no live daemon behind it keeps the original
+    /// io error (e.g. a plain file squatting on the socket path).
+    #[test]
+    fn bind_failure_without_live_daemon_returns_the_io_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let socket_path = dir.path().join("squat.sock");
+        std::fs::write(&socket_path, b"not a socket").expect("squat file");
+
+        let error = bind_with_race_check(&socket_path).expect_err("dead path must fail");
+        assert!(matches!(error, ServerError::Io(_)), "got {error:?}");
     }
 }
