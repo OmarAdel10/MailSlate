@@ -36,6 +36,14 @@ const MAX_CONNECTIONS: usize = 8;
 /// legitimate traffic never approaches the window.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Per-connection stalled-write budget.
+///
+/// A peer that sends a request but never reads its reply must not hold
+/// the connection slot forever: once replies outgrow the socket buffers
+/// the write would block indefinitely. M1 replies are tiny, but the
+/// budget is in place before M2 grows the payloads.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Fatal daemon errors: startup failures and server lifecycle problems.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -75,6 +83,9 @@ enum ConnError {
     /// The peer sent nothing within the connection's read budget.
     #[error("connection idle for {0:?}; dropped")]
     Idle(Duration),
+    /// The peer stopped reading within the connection's write budget.
+    #[error("peer stopped reading for {0:?}; dropped")]
+    Stalled(Duration),
 }
 
 /// Serves the IPC protocol on `socket_path` until shutdown.
@@ -89,6 +100,7 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
     // killing the process with the default disposition.
     let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
+    let _single_instance = acquire_single_instance_lock(&socket_path)?;
     prepare_socket(&socket_path)?;
 
     let listener = bind_with_race_check(&socket_path)?;
@@ -114,6 +126,44 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
 #[cfg(not(unix))]
 pub async fn run(_socket_path: PathBuf, _pid_file: PathBuf) -> Result<(), ServerError> {
     Err(ServerError::UnsupportedPlatform)
+}
+
+/// A held exclusive flock that serializes daemon startups.
+///
+/// The lock is taken before [`prepare_socket`] probes the socket, so an
+/// interleaved double-start can never unlink a live daemon's socket:
+/// the loser rejects with [`ServerError::AlreadyRunning`] without
+/// touching the path. The kernel releases the flock when the holder
+/// exits, so a crashed daemon leaves no stale lock behind.
+#[cfg(unix)]
+#[derive(Debug)]
+struct SingleInstanceLock {
+    /// The held lock file. Kept open for the daemon's lifetime.
+    _file: std::fs::File,
+}
+
+/// Acquires the single-instance flock for the daemon owning
+/// `socket_path`. The lock file lives beside the socket.
+#[cfg(unix)]
+fn acquire_single_instance_lock(socket_path: &Path) -> Result<SingleInstanceLock, ServerError> {
+    let lock_path = socket_path.with_extension("lock");
+    // The lock file lives beside the socket; its parent dir may not exist
+    // yet (prepare_socket creates it later). Create it here so the lock can
+    // be taken before the probe, closing the TOCTOU window.
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(ServerError::Io)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    // LOCK_EX | LOCK_NB: fail fast while another daemon holds the lock.
+    let flock_result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if flock_result != 0 {
+        return Err(ServerError::AlreadyRunning);
+    }
+    Ok(SingleInstanceLock { _file: file })
 }
 
 /// Ensures the socket path is ours to bind: a live daemon is reported, a
@@ -160,6 +210,9 @@ fn set_socket_permissions(socket_path: &Path) -> Result<(), ServerError> {
 use std::os::unix::fs::PermissionsExt;
 
 #[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
+#[cfg(unix)]
 async fn accept_loop(
     listener: tokio::net::UnixListener,
     shutdown: Arc<tokio::sync::Notify>,
@@ -192,8 +245,13 @@ async fn accept_loop(
                         let shutdown = Arc::clone(&shutdown);
                         let active = Arc::clone(&active);
                         tokio::spawn(async move {
-                            if let Err(err) =
-                                handle_connection(stream, shutdown, READ_TIMEOUT).await
+                            if let Err(err) = handle_connection(
+                                stream,
+                                shutdown,
+                                READ_TIMEOUT,
+                                WRITE_TIMEOUT,
+                            )
+                            .await
                             {
                                 tracing::debug!(error = %err, "connection closed with error");
                             }
@@ -216,6 +274,7 @@ async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     shutdown: Arc<tokio::sync::Notify>,
     read_timeout: Duration,
+    write_timeout: Duration,
 ) -> Result<(), ConnError> {
     check_peer_uid(&stream)?;
     loop {
@@ -233,7 +292,16 @@ async fn handle_connection(
             Ok(Dispatched::Stop(value)) => (Response::ok(request.id, value), true),
             Err(err) => (Response::err(request.id, err), false),
         };
-        write_json_frame_async(&mut stream, &response).await?;
+        match tokio::time::timeout(
+            write_timeout,
+            write_json_frame_async(&mut stream, &response),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(ConnError::Frame(err)),
+            Err(_) => return Err(ConnError::Stalled(write_timeout)),
+        }
         if stop {
             shutdown.notify_one();
             return Ok(());
@@ -272,7 +340,12 @@ mod tests {
 
         let handled = tokio::time::timeout(
             Duration::from_secs(5),
-            handle_connection(server, shutdown, Duration::from_millis(100)),
+            handle_connection(
+                server,
+                shutdown,
+                Duration::from_millis(100),
+                Duration::from_secs(60),
+            ),
         )
         .await
         .expect("idle connection must be dropped promptly, not hang");
@@ -286,6 +359,59 @@ mod tests {
             .expect("client read must not hang")
             .expect("client read");
         assert_eq!(read, 0, "client must see EOF after the drop");
+    }
+
+    /// A peer that sends a request but never reads the reply must be
+    /// dropped within its write budget — the reply to a 1 MB method
+    /// name overflows the default socket buffers, so without the
+    /// timeout the server side would block on the write forever.
+    #[tokio::test]
+    async fn stalled_reader_is_dropped_within_write_budget() {
+        let (mut client, server) = tokio::net::UnixStream::pair().expect("socket pair");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        // Send a request whose not-found reply echoes the >1 MB method
+        // name back, then never read it. The write must run in a task:
+        // it fills the socket buffer and only completes once the server
+        // drains the request.
+        let huge = "x".repeat(1 << 20);
+        let writer = tokio::spawn(async move {
+            write_json_frame_async(&mut client, &Request::new(1, &huge))
+                .await
+                .expect("client writes the request");
+            client
+        });
+
+        let handled = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_connection(
+                server,
+                shutdown,
+                Duration::from_millis(100),
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("stalled writer must be dropped within the budget, not hang");
+
+        assert!(
+            matches!(handled, Err(ConnError::Stalled(_))),
+            "a stalled reply must be dropped as Stalled, got {handled:?}"
+        );
+
+        // The client observes the drop as EOF once it drains the
+        // buffered reply bytes.
+        let mut client = writer.await.expect("writer task must not panic");
+        let mut scratch = [0u8; 4096];
+        loop {
+            let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut scratch))
+                .await
+                .expect("client read must not hang")
+                .expect("client read");
+            if read == 0 {
+                break;
+            }
+        }
     }
 
     /// A bind race lost to a concurrent daemon surfaces the friendly
@@ -315,5 +441,26 @@ mod tests {
 
         let error = bind_with_race_check(&socket_path).expect_err("dead path must fail");
         assert!(matches!(error, ServerError::Io(_)), "got {error:?}");
+    }
+
+    /// The single-instance lock serializes startups: while one daemon
+    /// holds the flock, a second acquire reports AlreadyRunning, and
+    /// the lock is reusable once released.
+    #[test]
+    fn single_instance_lock_serializes_daemon_startups() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let socket_path = dir.path().join("daemon.sock");
+
+        let held = acquire_single_instance_lock(&socket_path).expect("first acquire must succeed");
+
+        let error = acquire_single_instance_lock(&socket_path)
+            .expect_err("second acquire must report AlreadyRunning");
+        assert!(
+            matches!(error, ServerError::AlreadyRunning),
+            "got {error:?}"
+        );
+
+        drop(held);
+        acquire_single_instance_lock(&socket_path).expect("lock must be reusable after release");
     }
 }

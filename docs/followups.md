@@ -64,6 +64,28 @@ project (global `AGENTS.md` §4 and §13).
   (`rust/crates/daemon/src/server.rs:104-116`); concurrent starts race and
   the loser sees a raw io bind error instead of `AlreadyRunning` — use a
   pid-file lock or re-probe on bind failure.
+- MAILSLATE-27 — M2+: the accept loop releases its connection slot with
+  bare `active.fetch_sub(...)` after the handler task — a panic inside
+  the task leaks the slot (`rust/crates/daemon/src/server.rs:244-260`);
+  replace with an RAII drop guard.
+- MAILSLATE-29 — M2+: `newestDaemonLog` walks with `listSync()` and
+  `statSync()`, both of which follow symlinks — a planted symlink can
+  win the newest-contest (`lib/core/logging/daemon_log.dart:15-28`);
+  use `followLinks: false` plus a FileSystemEntity type check.
+- MAILSLATE-30 — M2+: the paused-card `View log` action discards
+  `open()`'s result and is a silent no-op on non-Linux or missing
+  xdg-open (`lib/features/shell/shell_screen.dart:374`); surface the
+  failure with a SnackBar.
+- MAILSLATE-31 — M2+: the paused banner resolves the newest daemon log
+  once per mount and never re-resolves when the bloc re-emits
+  `DaemonUnavailable` (`lib/features/shell/shell_screen.dart:337-362`).
+- MAILSLATE-32 — M2: `integration_test/daemon_e2e_test.dart:21-52` has
+  no tearDown shutdown; local runs orphan the daemon and the scratch
+  dir — kill via pid file in teardown and note the constraint in the
+  file header.
+- MAILSLATE-34 — CI: re-verify the e2e job apt list (gtk/ninja/
+  pkg-config) and the Node-20 deprecation warnings after the Ubuntu-26
+  runner flip (`.github/workflows/ci.yml`); starts 2026-10-19.
 
 ## Acknowledged test deferrals
 

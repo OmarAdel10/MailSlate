@@ -49,6 +49,7 @@ impl Client {
             .map_err(|err| {
                 daemon_unavailable(format!("could not connect to {}: {err}", socket.display()))
             })?;
+        check_peer_uid(&stream)?;
         Ok(Self {
             stream,
             next_id: 0,
@@ -230,6 +231,24 @@ fn daemon_unavailable(message: String) -> BridgeError {
     BridgeError::new(ErrorKind::DaemonUnavailable, message)
 }
 
+/// Refuses to talk to a daemon owned by another user: a foreign-uid
+/// socket could be planted in a writable directory to hijack this
+/// session. Mirrors the server side of the same check: both ends of
+/// a connection must see a peer running as the effective user.
+fn check_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), BridgeError> {
+    let cred = stream
+        .peer_cred()
+        .map_err(|err| daemon_unavailable(format!("could not read peer credentials: {err}")))?;
+    let owner = unsafe { libc::geteuid() };
+    if cred.uid() != owner {
+        return Err(daemon_unavailable(format!(
+            "daemon is owned by another user (uid {} != {owner}); refusing to connect",
+            cred.uid()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +314,24 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
         tokio::spawn(serve(listener));
         socket
+    }
+
+    /// The client only speaks to a daemon owned by this user: the peer
+    /// credential check runs at connect and must accept the fake server
+    /// (a same-uid process).
+    #[tokio::test]
+    async fn peer_credentials_are_verified_on_connect() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("peercred.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        tokio::spawn(serve(listener));
+
+        let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+        let checked = check_peer_uid(&stream);
+        assert!(
+            checked.is_ok(),
+            "same-uid peer must be accepted: {checked:?}"
+        );
     }
 
     #[tokio::test]
