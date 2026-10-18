@@ -23,6 +23,20 @@ pub const BATCH_WINDOW: Duration = Duration::from_millis(50);
 pub enum WriteOp {
     /// Upserts one `meta` key/value row.
     MetaPut { key: String, value: String },
+    /// Inserts one account row (phase 3).
+    AccountAdd {
+        id: i64,
+        display_name: String,
+        email: String,
+        provider: String,
+        imap_host: String,
+        imap_port: u16,
+        imap_security: String,
+        smtp_host: String,
+        smtp_port: u16,
+        smtp_security: String,
+        auth_type: String,
+    },
     /// Internal: ack after every queued op before it is committed.
     Flush(mpsc::Sender<()>),
 }
@@ -116,6 +130,41 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                     [key, value],
                 )
                 .expect("meta upsert");
+            }
+            WriteOp::AccountAdd {
+                id,
+                display_name,
+                email,
+                provider,
+                imap_host,
+                imap_port,
+                imap_security,
+                smtp_host,
+                smtp_port,
+                smtp_security,
+                auth_type,
+            } => {
+                tx.execute(
+                    "INSERT INTO accounts(
+                        id, display_name, email, provider,
+                        imap_host, imap_port, imap_security,
+                        smtp_host, smtp_port, smtp_security, auth_type, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, unixepoch())",
+                    rusqlite::params![
+                        id,
+                        display_name,
+                        email,
+                        provider,
+                        imap_host,
+                        *imap_port as i64,
+                        imap_security,
+                        smtp_host,
+                        *smtp_port as i64,
+                        smtp_security,
+                        auth_type
+                    ],
+                )
+                .expect("account insert");
             }
             WriteOp::Flush(ack) => {
                 // Commit what precedes the marker, then ack: the ack
