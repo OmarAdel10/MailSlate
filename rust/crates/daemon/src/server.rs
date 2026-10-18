@@ -100,6 +100,7 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
     // killing the process with the default disposition.
     let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
+    let _single_instance = acquire_single_instance_lock(&socket_path)?;
     prepare_socket(&socket_path)?;
 
     let listener = bind_with_race_check(&socket_path)?;
@@ -125,6 +126,44 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
 #[cfg(not(unix))]
 pub async fn run(_socket_path: PathBuf, _pid_file: PathBuf) -> Result<(), ServerError> {
     Err(ServerError::UnsupportedPlatform)
+}
+
+/// A held exclusive flock that serializes daemon startups.
+///
+/// The lock is taken before [`prepare_socket`] probes the socket, so an
+/// interleaved double-start can never unlink a live daemon's socket:
+/// the loser rejects with [`ServerError::AlreadyRunning`] without
+/// touching the path. The kernel releases the flock when the holder
+/// exits, so a crashed daemon leaves no stale lock behind.
+#[cfg(unix)]
+#[derive(Debug)]
+struct SingleInstanceLock {
+    /// The held lock file. Kept open for the daemon's lifetime.
+    _file: std::fs::File,
+}
+
+/// Acquires the single-instance flock for the daemon owning
+/// `socket_path`. The lock file lives beside the socket.
+#[cfg(unix)]
+fn acquire_single_instance_lock(socket_path: &Path) -> Result<SingleInstanceLock, ServerError> {
+    let lock_path = socket_path.with_extension("lock");
+    // The lock file lives beside the socket; its parent dir may not exist
+    // yet (prepare_socket creates it later). Create it here so the lock can
+    // be taken before the probe, closing the TOCTOU window.
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(ServerError::Io)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    // LOCK_EX | LOCK_NB: fail fast while another daemon holds the lock.
+    let flock_result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if flock_result != 0 {
+        return Err(ServerError::AlreadyRunning);
+    }
+    Ok(SingleInstanceLock { _file: file })
 }
 
 /// Ensures the socket path is ours to bind: a live daemon is reported, a
@@ -169,6 +208,9 @@ fn set_socket_permissions(socket_path: &Path) -> Result<(), ServerError> {
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 
 #[cfg(unix)]
 async fn accept_loop(
@@ -399,5 +441,26 @@ mod tests {
 
         let error = bind_with_race_check(&socket_path).expect_err("dead path must fail");
         assert!(matches!(error, ServerError::Io(_)), "got {error:?}");
+    }
+
+    /// The single-instance lock serializes startups: while one daemon
+    /// holds the flock, a second acquire reports AlreadyRunning, and
+    /// the lock is reusable once released.
+    #[test]
+    fn single_instance_lock_serializes_daemon_startups() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let socket_path = dir.path().join("daemon.sock");
+
+        let held = acquire_single_instance_lock(&socket_path).expect("first acquire must succeed");
+
+        let error = acquire_single_instance_lock(&socket_path)
+            .expect_err("second acquire must report AlreadyRunning");
+        assert!(
+            matches!(error, ServerError::AlreadyRunning),
+            "got {error:?}"
+        );
+
+        drop(held);
+        acquire_single_instance_lock(&socket_path).expect("lock must be reusable after release");
     }
 }
