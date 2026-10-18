@@ -8,4 +8,5 @@ pub mod db;
 #[cfg(unix)]
 pub mod ipc;
 pub mod keyring;
+pub mod oauth;
 pub mod paths;
