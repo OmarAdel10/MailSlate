@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use mailslate_protocol::FrameError;
 use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
-use mailslate_protocol::message::{Request, Response};
+use mailslate_protocol::message::{Event, Request, Response};
 use mailslate_protocol::{BridgeError, ErrorKind, PingResult, methods};
 use serde_json::Value;
 
@@ -39,6 +39,10 @@ pub struct Client {
     next_id: u64,
     request_timeout: Duration,
     poisoned: bool,
+    /// Daemon events interleaved during request/reply frames, parked for
+    /// the consumer until an event API surfaces them (phase 7 wires the
+    /// GUI stream).
+    pending_events: std::collections::VecDeque<Event>,
 }
 
 impl Client {
@@ -55,6 +59,7 @@ impl Client {
             next_id: 0,
             request_timeout: REQUEST_TIMEOUT,
             poisoned: false,
+            pending_events: std::collections::VecDeque::new(),
         })
     }
 
@@ -93,13 +98,23 @@ impl Client {
             params,
         };
         let timeout = self.request_timeout;
-        let stream = &mut self.stream;
         let response: Response = match tokio::time::timeout(timeout, async {
-            write_json_frame_async(stream, &request)
+            write_json_frame_async(&mut self.stream, &request)
                 .await
                 .map_err(frame_error)?;
-            let response: Response = read_json_frame_async(stream).await.map_err(frame_error)?;
-            Ok::<Response, BridgeError>(response)
+            // Events may interleave with replies: skip-and-park every
+            // frame until a response envelope resolves this request.
+            loop {
+                let raw: Value = read_json_frame_async(&mut self.stream)
+                    .await
+                    .map_err(frame_error)?;
+                if let Ok(event) = serde_json::from_value::<Event>(raw.clone()) {
+                    self.pending_events.push_back(event);
+                    continue;
+                }
+                let response: Response = serde_json::from_value(raw).map_err(json_error)?;
+                break Ok::<Response, BridgeError>(response);
+            }
         })
         .await
         {
@@ -227,6 +242,15 @@ fn frame_error(err: FrameError) -> BridgeError {
     }
 }
 
+/// Maps a serde deserialization failure on a decoded frame to the
+/// "daemon sent an invalid frame" contract used by [`frame_error`].
+fn json_error(err: serde_json::Error) -> BridgeError {
+    BridgeError::new(
+        ErrorKind::Internal,
+        format!("daemon sent an invalid frame: {err}"),
+    )
+}
+
 fn daemon_unavailable(message: String) -> BridgeError {
     BridgeError::new(ErrorKind::DaemonUnavailable, message)
 }
@@ -301,6 +325,14 @@ mod tests {
                     return;
                 }
                 "drop" => return,
+                "event-then-ping" => {
+                    let event =
+                        Event::new("sync_progress", serde_json::json!({"done": 3, "total": 10}));
+                    write_json_frame_async(&mut stream, &event)
+                        .await
+                        .expect("fake server writes the event frame");
+                    Response::ok(request.id, json!({"seen": true}))
+                }
                 _ => Response::ok(request.id, Value::Null),
             };
             write_json_frame_async(&mut stream, &response)
@@ -314,6 +346,21 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
         tokio::spawn(serve(listener));
         socket
+    }
+
+    /// An unsolicited event frame that arrives while the client awaits
+    /// its response is skipped, not fatal: the reply on the wire still
+    /// resolves the pending request.
+    #[tokio::test]
+    async fn event_frame_before_response_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let reply = client
+            .request("event-then-ping", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(reply["seen"], true);
     }
 
     /// The client only speaks to a daemon owned by this user: the peer

@@ -13,6 +13,7 @@ use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async
 use mailslate_protocol::message::{Request, Response};
 
 use crate::dispatch::{self, Dispatched};
+use crate::events::EventBus;
 use crate::logging::LoggingError;
 
 /// Pause after a failed `accept()` before retrying.
@@ -114,7 +115,8 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
     );
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
-    let result = accept_loop(listener, shutdown, sigterm).await;
+    let bus = EventBus::new();
+    let result = accept_loop(listener, shutdown, bus, sigterm).await;
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&pid_file);
@@ -216,6 +218,7 @@ use std::os::unix::io::AsRawFd;
 async fn accept_loop(
     listener: tokio::net::UnixListener,
     shutdown: Arc<tokio::sync::Notify>,
+    bus: Arc<EventBus>,
     mut sigterm: tokio::signal::unix::Signal,
 ) -> Result<(), ServerError> {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -244,10 +247,12 @@ async fn accept_loop(
                         active.fetch_add(1, Ordering::Relaxed);
                         let shutdown = Arc::clone(&shutdown);
                         let active = Arc::clone(&active);
+                        let events = Arc::clone(&bus);
                         tokio::spawn(async move {
                             if let Err(err) = handle_connection(
                                 stream,
                                 shutdown,
+                                events,
                                 READ_TIMEOUT,
                                 WRITE_TIMEOUT,
                             )
@@ -273,38 +278,80 @@ async fn accept_loop(
 async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     shutdown: Arc<tokio::sync::Notify>,
+    events: Arc<EventBus>,
     read_timeout: Duration,
     write_timeout: Duration,
 ) -> Result<(), ConnError> {
     check_peer_uid(&stream)?;
+    let mut event_feed = events.subscribe();
     loop {
-        let request: Request =
-            match tokio::time::timeout(read_timeout, read_json_frame_async(&mut stream)).await {
-                Ok(Ok(request)) => request,
-                Ok(Err(FrameError::Io(err))) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    return Ok(()); // client disconnected
+        tokio::select! {
+            // An unsolicited event from the daemon-internal bus goes out
+            // on the stream as soon as it is published while the client
+            // is quiet. Deliver it directly, before the next request.
+            event = event_feed.recv() => {
+                match event {
+                    Ok(event) => {
+                        tokio::time::timeout(
+                            write_timeout,
+                            write_json_frame_async(&mut stream, &event),
+                        )
+                        .await
+                        .map_err(|_| ConnError::Stalled(write_timeout))?
+                        .map_err(ConnError::Frame)?;
+                    }
+                    // Lagged: bus moved past this subscriber while the
+                    // connection was idle reading requests. Keep serving
+                    // requests; the GUI re-syncs state on the next call.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(ConnError::Io(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "event bus closed",
+                        )));
+                    }
                 }
-                Ok(Err(err)) => return Err(ConnError::Frame(err)),
-                Err(_) => return Err(ConnError::Idle(read_timeout)),
-            };
-        let (response, stop) = match dispatch::dispatch(&request.method) {
-            Ok(Dispatched::Reply(value)) => (Response::ok(request.id, value), false),
-            Ok(Dispatched::Stop(value)) => (Response::ok(request.id, value), true),
-            Err(err) => (Response::err(request.id, err), false),
-        };
-        match tokio::time::timeout(
-            write_timeout,
-            write_json_frame_async(&mut stream, &response),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(ConnError::Frame(err)),
-            Err(_) => return Err(ConnError::Stalled(write_timeout)),
-        }
-        if stop {
-            shutdown.notify_one();
-            return Ok(());
+            }
+            request_reply = async {
+                let request: Request =
+                    match tokio::time::timeout(read_timeout, read_json_frame_async(&mut stream)).await {
+                        Ok(Ok(request)) => request,
+                        Ok(Err(FrameError::Io(err)))
+                            if err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                        {
+                            return Ok(None); // client disconnected
+                        }
+                        Ok(Err(err)) => return Err(ConnError::Frame(err)),
+                        Err(_) => return Err(ConnError::Idle(read_timeout)),
+                    };
+                let (response, stop) = match dispatch::dispatch(&request.method) {
+                    Ok(Dispatched::Reply(value)) => (Response::ok(request.id, value), false),
+                    Ok(Dispatched::Stop(value)) => (Response::ok(request.id, value), true),
+                    Err(err) => (Response::err(request.id, err), false),
+                };
+                Ok(Some((response, stop)))
+            } => {
+                let maybe_exchange = request_reply?;
+                match maybe_exchange {
+                    Some((response, stop)) => {
+                        match tokio::time::timeout(
+                            write_timeout,
+                            write_json_frame_async(&mut stream, &response),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => return Err(ConnError::Frame(err)),
+                            Err(_) => return Err(ConnError::Stalled(write_timeout)),
+                        }
+                        if stop {
+                            shutdown.notify_one();
+                            return Ok(());
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            }
         }
     }
 }
@@ -329,6 +376,7 @@ fn check_peer_uid(_stream: &tokio::net::UnixStream) -> Result<(), ConnError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use mailslate_protocol::message::Event;
     use tokio::io::AsyncReadExt;
 
     /// An idle peer must be dropped within its read budget — without the
@@ -337,12 +385,14 @@ mod tests {
     async fn idle_connection_is_dropped_within_read_budget() {
         let (mut client, server) = tokio::net::UnixStream::pair().expect("socket pair");
         let shutdown = Arc::new(tokio::sync::Notify::new());
+        let bus = EventBus::new();
 
         let handled = tokio::time::timeout(
             Duration::from_secs(5),
             handle_connection(
                 server,
                 shutdown,
+                bus,
                 Duration::from_millis(100),
                 Duration::from_secs(60),
             ),
@@ -387,6 +437,7 @@ mod tests {
             handle_connection(
                 server,
                 shutdown,
+                EventBus::new(),
                 Duration::from_millis(100),
                 Duration::from_millis(100),
             ),
@@ -462,5 +513,34 @@ mod tests {
 
         drop(held);
         acquire_single_instance_lock(&socket_path).expect("lock must be reusable after release");
+    }
+
+    /// Every subscriber receives a published event; per-subscriber order
+    /// is preserved.
+    #[tokio::test]
+    async fn events_fan_out_to_subscribers_in_order() {
+        let bus = EventBus::new();
+        let mut a = bus.subscribe();
+        let mut b = bus.subscribe();
+
+        bus.publish(Event::new("mail_new", serde_json::json!({"id": 1})));
+        bus.publish(Event::new("sync_progress", serde_json::json!({"p": 2})));
+
+        let (first, second) = (a.recv().await.unwrap(), b.recv().await.unwrap());
+        assert_eq!(first.event, "mail_new");
+        assert_eq!(second.event, "mail_new");
+    }
+
+    /// Events published before a client subscribes are not delivered —
+    /// broadcast semantics, no replay of history.
+    #[tokio::test]
+    async fn subscriber_after_publish_misses_old_event() {
+        let bus = EventBus::new();
+        bus.publish(Event::new("sync_progress", serde_json::json!({"p": 1})));
+        let mut late = bus.subscribe();
+        bus.publish(Event::new("sync_progress", serde_json::json!({"p": 2})));
+
+        let received = late.recv().await.expect("only the new event arrives");
+        assert_eq!(received.data["p"], 2);
     }
 }

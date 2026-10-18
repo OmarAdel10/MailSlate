@@ -6,6 +6,7 @@
 //! GUI over the `mailslate-protocol` IPC (ARCHITECTURE.md §2, §5).
 
 mod dispatch;
+mod events;
 mod logging;
 mod server;
 
