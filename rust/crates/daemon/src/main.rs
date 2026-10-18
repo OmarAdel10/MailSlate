@@ -66,15 +66,25 @@ fn run() -> Result<(), ServerError> {
     std::fs::create_dir_all(&data_dir)?;
     let _logs = logging::init(&paths::logs_dir())?;
 
-    let mut conn = db::open_rw(&paths::db_path())?;
+    let db_path = paths::db_path();
+    let mut conn = db::open_rw(&db_path)?;
     let schema = db::migrations::run(&mut conn)?;
     db::assert_fts5()?;
+    drop(conn); // the writer actor owns the rw connection from here on
     tracing::info!(schema, "database ready");
+
+    let keystore: std::sync::Arc<dyn mailslate_core::infra::keyring::KeyStore> =
+        std::sync::Arc::new(mailslate_core::infra::keyring::OsKeyStore);
+    let ctx = std::sync::Arc::new(crate::dispatch::DispatchCtx {
+        writer: std::sync::Arc::new(db::writer::WriterActor::spawn(&db_path)),
+        keystore,
+        reader: std::sync::Arc::new(db::pool::ReadPool::open(&db_path)?),
+    });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(server::run(paths::socket_path(), paths::pid_file()))
+    runtime.block_on(server::run(paths::socket_path(), paths::pid_file(), ctx))
 }
 
 #[cfg(not(unix))]

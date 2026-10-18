@@ -5,7 +5,7 @@
 //! through [`KeyStore`] under the `account:{id}:*` key scheme.
 
 use crate::infra::db::writer::{WriteOp, WriterActor};
-use crate::infra::keyring::{KeyStore, KeyStoreError, imap_password_key};
+use crate::infra::keyring::{KeyStore, KeyStoreError, imap_password_key, oauth_key};
 
 /// Transport-layer security for IMAP/SMTP endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +121,85 @@ fn next_account_id(writer: &WriterActor) -> Result<i64, AccountError> {
 use std::sync::atomic::{AtomicI64, Ordering};
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
 
+/// A read-side summary of one stored account.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountSummary {
+    pub id: i64,
+    pub display_name: String,
+    pub email: String,
+    pub provider: String,
+    pub auth_type: String,
+    pub color: Option<String>,
+    pub sync_window_days: i64,
+}
+
+/// Lists every stored account, newest last (insertion order by id).
+pub fn get_accounts(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<AccountSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, display_name, email, provider, auth_type, color, sync_window_days
+         FROM accounts
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(AccountSummary {
+            id: row.get(0)?,
+            display_name: row.get(1)?,
+            email: row.get(2)?,
+            provider: row.get(3)?,
+            auth_type: row.get(4)?,
+            color: row.get(5)?,
+            sync_window_days: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// A partial update: `None` leaves the field untouched; for color,
+/// `Some(None)` clears it.
+#[derive(Debug, Clone, Default)]
+pub struct AccountPatch {
+    pub display_name: Option<String>,
+    pub color: Option<Option<String>>,
+    pub sync_window_days: Option<i64>,
+}
+
+/// Patches an account's mutable fields. `None` leaves a field
+/// untouched; for color, `Some(None)` clears it. Durability on
+/// return: the patch is committed by the time this returns.
+pub fn update_account(
+    writer: &WriterActor,
+    account_id: i64,
+    patch: AccountPatch,
+) -> Result<(), AccountError> {
+    writer.enqueue(WriteOp::AccountUpdate {
+        id: account_id,
+        display_name: patch.display_name,
+        color: patch.color,
+        sync_window_days: patch.sync_window_days,
+    });
+    writer.flush();
+    Ok(())
+}
+
+/// Removes an account: the row goes (children cascade) and both
+/// keyring keys are scrubbed best-effort. The keep-local offline
+/// variant is a later-slice concern (GUI semantics, phase 7).
+pub fn remove_account(
+    keystore: &dyn KeyStore,
+    writer: &WriterActor,
+    account_id: i64,
+) -> Result<(), AccountError> {
+    // Scrub secrets first: if the DB delete fails the keyring is
+    // already clean and a retry cannot leave a live orphan secret.
+    let _ = keystore.delete(&imap_password_key(account_id));
+    let _ = keystore.delete(&oauth_key(account_id));
+    writer.enqueue(WriteOp::AccountRemove { id: account_id });
+    // Removal is UI-visible: the row (and cascaded children) must be
+    // durable by the time this returns.
+    writer.flush();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +276,172 @@ mod tests {
                 .expect("key get"),
             Some("secret-pw".into())
         );
+    }
+
+    /// The account list reports every stored account with its summary
+    /// fields, including schema defaults (no color, one-year window).
+    #[test]
+    fn get_accounts_lists_every_account_with_defaults() {
+        let (_dir, path) = seeded_db();
+        let keystore = FakeKeyStore::new();
+        let writer = WriterActor::spawn(&path);
+
+        let first = ImapAccountDraft {
+            display_name: "Work".into(),
+            email: "work@example.com".into(),
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_security: Security::Tls,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_security: Security::Tls,
+            auth: AuthKind::Password,
+        };
+        let second = ImapAccountDraft {
+            display_name: "Personal".into(),
+            email: "home@example.com".into(),
+            imap_host: "imap2.example.com".into(),
+            imap_port: 143,
+            imap_security: Security::StartTls,
+            smtp_host: "smtp2.example.com".into(),
+            smtp_port: 587,
+            smtp_security: Security::StartTls,
+            auth: AuthKind::Password,
+        };
+        let first_id = add_imap_account(&keystore, &writer, &first, "pw-1").expect("first account");
+        let second_id =
+            add_imap_account(&keystore, &writer, &second, "pw-2").expect("second account");
+
+        let conn = crate::infra::db::open_readonly(&path).expect("reopen");
+        let accounts = get_accounts(&conn).expect("account list");
+
+        assert_eq!(accounts.len(), 2, "both accounts must be listed");
+        let by_id: std::collections::HashMap<i64, &AccountSummary> =
+            accounts.iter().map(|a| (a.id, a)).collect();
+        let work = by_id.get(&first_id).expect("first account listed");
+        assert_eq!(work.display_name, "Work");
+        assert_eq!(work.email, "work@example.com");
+        assert_eq!(work.provider, "imap");
+        assert_eq!(work.auth_type, "password");
+        assert_eq!(work.color, None, "no color assigned yet");
+        assert_eq!(work.sync_window_days, 365, "schema default window");
+        let home = by_id.get(&second_id).expect("second account listed");
+        assert_eq!(home.display_name, "Personal");
+        assert_eq!(home.email, "home@example.com");
+    }
+
+    /// A fresh database lists no accounts.
+    #[test]
+    fn get_accounts_on_fresh_db_is_empty() {
+        let (_dir, path) = seeded_db();
+        let conn = crate::infra::db::open_readonly(&path).expect("reopen");
+        let accounts = get_accounts(&conn).expect("account list");
+        assert!(accounts.is_empty(), "fresh db must list nothing");
+    }
+
+    /// Removing an account deletes its row (children cascade) and
+    /// scrubs both keyring keys best-effort.
+    #[test]
+    fn remove_account_deletes_row_and_keyring_entries() {
+        let (_dir, path) = seeded_db();
+        let keystore = FakeKeyStore::new();
+        let writer = WriterActor::spawn(&path);
+
+        let draft = ImapAccountDraft {
+            display_name: "Work".into(),
+            email: "work@example.com".into(),
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_security: Security::Tls,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_security: Security::Tls,
+            auth: AuthKind::Password,
+        };
+        let account_id =
+            add_imap_account(&keystore, &writer, &draft, "secret-pw").expect("account");
+
+        // An OAuth key may also exist for other provider kinds; both go.
+        keystore
+            .store(&oauth_key(account_id), "oauth-json")
+            .expect("store oauth key");
+
+        remove_account(&keystore, &writer, account_id).expect("remove");
+
+        let conn = crate::infra::db::open_readonly(&path).expect("reopen");
+        assert!(
+            get_accounts(&conn).expect("list").is_empty(),
+            "account row must be gone"
+        );
+        assert_eq!(
+            keystore
+                .get(&imap_password_key(account_id))
+                .expect("pw get"),
+            None,
+            "imap password key must be scrubbed"
+        );
+        assert_eq!(
+            keystore.get(&oauth_key(account_id)).expect("oauth get"),
+            None,
+            "oauth key must be scrubbed"
+        );
+    }
+
+    /// update_account patches only the fields the caller set: unset
+    /// fields keep their stored values, and an explicit Some(None)
+    /// clears the color.
+    #[test]
+    fn update_account_patches_only_given_fields() {
+        let (_dir, path) = seeded_db();
+        let keystore = FakeKeyStore::new();
+        let writer = WriterActor::spawn(&path);
+        let draft = ImapAccountDraft {
+            display_name: "Work".into(),
+            email: "user@example.com".into(),
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_security: Security::Tls,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_security: Security::Tls,
+            auth: AuthKind::Password,
+        };
+        let account_id = add_imap_account(&keystore, &writer, &draft, "pw").expect("create");
+
+        // 1. Set color + window; display name untouched.
+        update_account(
+            &writer,
+            account_id,
+            AccountPatch {
+                display_name: None,
+                color: Some(Some("blue".into())),
+                sync_window_days: Some(90),
+            },
+        )
+        .expect("update 1");
+        let conn = crate::infra::db::open_readonly(&path).expect("reopen");
+        let listed = get_accounts(&conn).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].display_name, "Work", "unset field untouched");
+        assert_eq!(listed[0].color.as_deref(), Some("blue"));
+        assert_eq!(listed[0].sync_window_days, 90);
+        drop(conn);
+
+        // 2. Rename + explicitly clear color; window untouched.
+        update_account(
+            &writer,
+            account_id,
+            AccountPatch {
+                display_name: Some("Renamed".into()),
+                color: Some(None),
+                sync_window_days: None,
+            },
+        )
+        .expect("update 2");
+        let conn = crate::infra::db::open_readonly(&path).expect("reopen 2");
+        let listed = get_accounts(&conn).expect("list 2");
+        assert_eq!(listed[0].display_name, "Renamed");
+        assert_eq!(listed[0].color, None, "Some(None) must clear the color");
+        assert_eq!(listed[0].sync_window_days, 90, "unset field untouched");
     }
 }

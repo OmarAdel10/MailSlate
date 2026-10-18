@@ -12,7 +12,7 @@ use mailslate_protocol::FrameError;
 use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
 use mailslate_protocol::message::{Event, Request, Response};
 use mailslate_protocol::{BridgeError, ErrorKind, PingResult, methods};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::infra::paths;
 
@@ -149,6 +149,43 @@ impl Client {
         serde_json::from_value(value).map_err(|err| {
             BridgeError::new(ErrorKind::Internal, format!("invalid ping payload: {err}"))
         })
+    }
+
+    /// Creates a generic IMAP/SMTP account; replies with `account_id`.
+    pub async fn add_imap_account(
+        &mut self,
+        conn: Value,
+        creds: Value,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::ADD_IMAP_ACCOUNT,
+            json!({ "conn": conn, "creds": creds }),
+        )
+        .await
+    }
+
+    /// Lists every configured account.
+    pub async fn get_accounts(&mut self) -> Result<Value, BridgeError> {
+        self.request(methods::GET_ACCOUNTS, json!({})).await
+    }
+
+    /// Removes an account and scrubs its keyring secrets.
+    pub async fn remove_account(&mut self, account_id: i64) -> Result<Value, BridgeError> {
+        self.request(methods::REMOVE_ACCOUNT, json!({ "account_id": account_id }))
+            .await
+    }
+
+    /// Patches mutable account fields (name, color, sync window).
+    pub async fn update_account(
+        &mut self,
+        account_id: i64,
+        patch: Value,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::UPDATE_ACCOUNT,
+            json!({ "account_id": account_id, "patch": patch }),
+        )
+        .await
     }
 
     /// Overrides the per-request timeout; tests use short values.
@@ -333,6 +370,11 @@ mod tests {
                         .expect("fake server writes the event frame");
                     Response::ok(request.id, json!({"seen": true}))
                 }
+                methods::GET_ACCOUNTS => Response::ok(request.id, json!({ "accounts": [] })),
+                methods::ADD_IMAP_ACCOUNT => Response::ok(request.id, json!({ "account_id": 7 })),
+                methods::REMOVE_ACCOUNT | methods::UPDATE_ACCOUNT => {
+                    Response::ok(request.id, json!({ "ok": true }))
+                }
                 _ => Response::ok(request.id, Value::Null),
             };
             write_json_frame_async(&mut stream, &response)
@@ -361,6 +403,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply["seen"], true);
+    }
+
+    /// Thin typed wrappers round-trip the account method names and
+    /// parameter shapes over the wire.
+    #[tokio::test]
+    async fn account_method_wrappers_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+
+        let created = client
+            .add_imap_account(json!({ "imap_host": "h" }), json!({ "password": "p" }))
+            .await
+            .unwrap();
+        assert_eq!(created["account_id"], json!(7));
+
+        let listing = client.get_accounts().await.unwrap();
+        assert_eq!(listing["accounts"], json!([]));
+
+        client
+            .update_account(7, json!({ "color": "blue" }))
+            .await
+            .unwrap();
+        client.remove_account(7).await.unwrap();
     }
 
     /// The client only speaks to a daemon owned by this user: the peer

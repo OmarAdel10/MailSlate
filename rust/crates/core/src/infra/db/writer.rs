@@ -39,6 +39,16 @@ pub enum WriteOp {
     },
     /// Internal: ack after every queued op before it is committed.
     Flush(mpsc::Sender<()>),
+    /// Deletes one account row (children cascade via FK).
+    AccountRemove { id: i64 },
+    /// Patches one account's mutable fields; `None` fields keep the
+    /// stored value, `Some(None)` on color clears it.
+    AccountUpdate {
+        id: i64,
+        display_name: Option<String>,
+        color: Option<Option<String>>,
+        sync_window_days: Option<i64>,
+    },
 }
 
 /// Handle for enqueueing writes; `Drop` joins the actor after
@@ -165,6 +175,37 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                     ],
                 )
                 .expect("account insert");
+            }
+            WriteOp::AccountRemove { id } => {
+                // Children cascade via FK (mailboxes, messages,
+                // locations, bodies, attachments, tags, outbox).
+                tx.execute("DELETE FROM accounts WHERE id = ?1", [id])
+                    .expect("account delete");
+            }
+            WriteOp::AccountUpdate {
+                id,
+                display_name,
+                color,
+                sync_window_days,
+            } => {
+                // COALESCE keeps stored values for None; the color's
+                // outer None = untouched, inner None = clear to NULL
+                // (?3 marks presence, ?4 carries the value-or-NULL).
+                tx.execute(
+                    "UPDATE accounts SET
+                        display_name = COALESCE(?2, display_name),
+                        color = CASE WHEN ?3 THEN ?4 ELSE color END,
+                        sync_window_days = COALESCE(?5, sync_window_days)
+                     WHERE id = ?1",
+                    rusqlite::params![
+                        id,
+                        display_name,
+                        color.is_some(),
+                        color.as_ref().cloned().flatten(),
+                        sync_window_days
+                    ],
+                )
+                .expect("account update");
             }
             WriteOp::Flush(ack) => {
                 // Commit what precedes the marker, then ack: the ack

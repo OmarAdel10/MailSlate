@@ -12,7 +12,7 @@ use mailslate_protocol::FrameError;
 use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
 use mailslate_protocol::message::{Request, Response};
 
-use crate::dispatch::{self, Dispatched};
+use crate::dispatch::{self, DispatchCtx, Dispatched};
 use crate::events::EventBus;
 use crate::logging::LoggingError;
 
@@ -94,7 +94,11 @@ enum ConnError {
 /// Exits with [`ServerError::AlreadyRunning`] when a live daemon already
 /// answers on the socket; a stale socket file is removed and rebound.
 #[cfg(unix)]
-pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerError> {
+pub async fn run(
+    socket_path: PathBuf,
+    pid_file: PathBuf,
+    ctx: Arc<crate::dispatch::DispatchCtx>,
+) -> Result<(), ServerError> {
     // Register SIGTERM before the socket exists: an external observer treats
     // the socket as readiness, so a signal arriving right after startup must
     // already be handled (graceful exit + artifact cleanup) instead of
@@ -116,7 +120,7 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let bus = EventBus::new();
-    let result = accept_loop(listener, shutdown, bus, sigterm).await;
+    let result = accept_loop(listener, shutdown, bus, sigterm, ctx).await;
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&pid_file);
@@ -126,7 +130,11 @@ pub async fn run(socket_path: PathBuf, pid_file: PathBuf) -> Result<(), ServerEr
 /// Not implemented outside Unix yet (Windows named pipes land with the
 /// Windows build).
 #[cfg(not(unix))]
-pub async fn run(_socket_path: PathBuf, _pid_file: PathBuf) -> Result<(), ServerError> {
+pub async fn run(
+    _socket_path: PathBuf,
+    _pid_file: PathBuf,
+    _ctx: Arc<crate::dispatch::DispatchCtx>,
+) -> Result<(), ServerError> {
     Err(ServerError::UnsupportedPlatform)
 }
 
@@ -220,6 +228,7 @@ async fn accept_loop(
     shutdown: Arc<tokio::sync::Notify>,
     bus: Arc<EventBus>,
     mut sigterm: tokio::signal::unix::Signal,
+    ctx: Arc<crate::dispatch::DispatchCtx>,
 ) -> Result<(), ServerError> {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     loop {
@@ -248,11 +257,13 @@ async fn accept_loop(
                         let shutdown = Arc::clone(&shutdown);
                         let active = Arc::clone(&active);
                         let events = Arc::clone(&bus);
+                        let ctx = Arc::clone(&ctx);
                         tokio::spawn(async move {
                             if let Err(err) = handle_connection(
                                 stream,
                                 shutdown,
                                 events,
+                                ctx,
                                 READ_TIMEOUT,
                                 WRITE_TIMEOUT,
                             )
@@ -279,6 +290,7 @@ async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     shutdown: Arc<tokio::sync::Notify>,
     events: Arc<EventBus>,
+    ctx: Arc<DispatchCtx>,
     read_timeout: Duration,
     write_timeout: Duration,
 ) -> Result<(), ConnError> {
@@ -324,7 +336,8 @@ async fn handle_connection(
                         Ok(Err(err)) => return Err(ConnError::Frame(err)),
                         Err(_) => return Err(ConnError::Idle(read_timeout)),
                     };
-                let (response, stop) = match dispatch::dispatch(&request.method) {
+                let (response, stop) =
+                    match dispatch::dispatch(&ctx, &request.method, &request.params) {
                     Ok(Dispatched::Reply(value)) => (Response::ok(request.id, value), false),
                     Ok(Dispatched::Stop(value)) => (Response::ok(request.id, value), true),
                     Err(err) => (Response::err(request.id, err), false),
@@ -376,6 +389,24 @@ fn check_peer_uid(_stream: &tokio::net::UnixStream) -> Result<(), ConnError> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A dispatch context over a throwaway database for connection tests.
+    fn test_ctx() -> Arc<DispatchCtx> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("mailslate.db");
+        let mut conn = mailslate_core::infra::db::open_rw(&db_path).expect("writer db open");
+        mailslate_core::infra::db::migrations::run(&mut conn).expect("migrate");
+        drop(conn);
+        Arc::new(DispatchCtx {
+            writer: Arc::new(mailslate_core::infra::db::writer::WriterActor::spawn(
+                &db_path,
+            )),
+            keystore: Arc::new(mailslate_core::infra::keyring::FakeKeyStore::new()),
+            reader: Arc::new(
+                mailslate_core::infra::db::pool::ReadPool::open(&db_path).expect("pool"),
+            ),
+        })
+    }
     use mailslate_protocol::message::Event;
     use tokio::io::AsyncReadExt;
 
@@ -393,6 +424,7 @@ mod tests {
                 server,
                 shutdown,
                 bus,
+                test_ctx(),
                 Duration::from_millis(100),
                 Duration::from_secs(60),
             ),
@@ -438,6 +470,7 @@ mod tests {
                 server,
                 shutdown,
                 EventBus::new(),
+                test_ctx(),
                 Duration::from_millis(100),
                 Duration::from_millis(100),
             ),
