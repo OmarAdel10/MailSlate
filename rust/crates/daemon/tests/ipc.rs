@@ -338,16 +338,33 @@ fn invalid_log_directive_falls_back_to_info() {
 fn excess_idle_connections_are_rejected() {
     let daemon = Daemon::start();
 
-    // Hold every connection slot with an idle peer.
-    let mut idle: Vec<UnixStream> = (0..8).map(|_| daemon.connect()).collect();
-
-    // The slots are really held: every idle connection must have been
-    // accepted by the daemon. Kernel backlog completes connect() before
-    // accept(), so pinging all eight is the only reliable way to drain
-    // the backlog and force active == 8 before the overflow probe.
-    for (slot, id) in idle.iter_mut().zip(1..) {
-        let ping = call(slot, id, "ping");
-        assert!(ping.ok, "occupied slots must stay serviceable");
+    // Hold every connection slot with an idle, provably accepted peer.
+    // Two races defeat a plain connect-eight-then-ping drain:
+    // - the kernel completes connect() before the daemon accepts, and
+    // - the wait_ready probe leaves a handler that may not have
+    //   retired yet, so the daemon can drop one of these connections
+    //   while active is still saturated by that stale handler.
+    // A dropped connection fails its ping and is simply replaced; once
+    // eight pings have been answered, active == 8 for certain.
+    let mut idle: Vec<UnixStream> = Vec::with_capacity(8);
+    let mut id = 1u64;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while idle.len() < 8 {
+        assert!(
+            Instant::now() < deadline,
+            "daemon never answered eight idle pings"
+        );
+        let mut slot = daemon.connect();
+        if write_json_frame(&mut slot, &Request::new(id, "ping")).is_err() {
+            continue; // dropped while a stale handler still holds a slot
+        }
+        match read_json_frame::<_, Response>(&mut slot) {
+            Ok(response) if response.ok => {
+                id += 1;
+                idle.push(slot);
+            }
+            _ => continue,
+        }
     }
 
     // The ninth connection must be dropped by the daemon: a blocking read
