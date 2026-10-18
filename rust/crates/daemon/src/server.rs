@@ -36,6 +36,14 @@ const MAX_CONNECTIONS: usize = 8;
 /// legitimate traffic never approaches the window.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Per-connection stalled-write budget.
+///
+/// A peer that sends a request but never reads its reply must not hold
+/// the connection slot forever: once replies outgrow the socket buffers
+/// the write would block indefinitely. M1 replies are tiny, but the
+/// budget is in place before M2 grows the payloads.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Fatal daemon errors: startup failures and server lifecycle problems.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -75,6 +83,9 @@ enum ConnError {
     /// The peer sent nothing within the connection's read budget.
     #[error("connection idle for {0:?}; dropped")]
     Idle(Duration),
+    /// The peer stopped reading within the connection's write budget.
+    #[error("peer stopped reading for {0:?}; dropped")]
+    Stalled(Duration),
 }
 
 /// Serves the IPC protocol on `socket_path` until shutdown.
@@ -192,8 +203,13 @@ async fn accept_loop(
                         let shutdown = Arc::clone(&shutdown);
                         let active = Arc::clone(&active);
                         tokio::spawn(async move {
-                            if let Err(err) =
-                                handle_connection(stream, shutdown, READ_TIMEOUT).await
+                            if let Err(err) = handle_connection(
+                                stream,
+                                shutdown,
+                                READ_TIMEOUT,
+                                WRITE_TIMEOUT,
+                            )
+                            .await
                             {
                                 tracing::debug!(error = %err, "connection closed with error");
                             }
@@ -216,6 +232,7 @@ async fn handle_connection(
     mut stream: tokio::net::UnixStream,
     shutdown: Arc<tokio::sync::Notify>,
     read_timeout: Duration,
+    write_timeout: Duration,
 ) -> Result<(), ConnError> {
     check_peer_uid(&stream)?;
     loop {
@@ -233,7 +250,16 @@ async fn handle_connection(
             Ok(Dispatched::Stop(value)) => (Response::ok(request.id, value), true),
             Err(err) => (Response::err(request.id, err), false),
         };
-        write_json_frame_async(&mut stream, &response).await?;
+        match tokio::time::timeout(
+            write_timeout,
+            write_json_frame_async(&mut stream, &response),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(ConnError::Frame(err)),
+            Err(_) => return Err(ConnError::Stalled(write_timeout)),
+        }
         if stop {
             shutdown.notify_one();
             return Ok(());
@@ -272,7 +298,12 @@ mod tests {
 
         let handled = tokio::time::timeout(
             Duration::from_secs(5),
-            handle_connection(server, shutdown, Duration::from_millis(100)),
+            handle_connection(
+                server,
+                shutdown,
+                Duration::from_millis(100),
+                Duration::from_secs(60),
+            ),
         )
         .await
         .expect("idle connection must be dropped promptly, not hang");
@@ -286,6 +317,59 @@ mod tests {
             .expect("client read must not hang")
             .expect("client read");
         assert_eq!(read, 0, "client must see EOF after the drop");
+    }
+
+    /// A peer that sends a request but never reads the reply must be
+    /// dropped within its write budget — the reply to a 1 MB method
+    /// name overflows the default socket buffers, so without the
+    /// timeout the server side would block on the write forever.
+    #[tokio::test]
+    async fn stalled_reader_is_dropped_within_write_budget() {
+        let (mut client, server) = tokio::net::UnixStream::pair().expect("socket pair");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        // Send a request whose not-found reply echoes the >1 MB method
+        // name back, then never read it. The write must run in a task:
+        // it fills the socket buffer and only completes once the server
+        // drains the request.
+        let huge = "x".repeat(1 << 20);
+        let writer = tokio::spawn(async move {
+            write_json_frame_async(&mut client, &Request::new(1, &huge))
+                .await
+                .expect("client writes the request");
+            client
+        });
+
+        let handled = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_connection(
+                server,
+                shutdown,
+                Duration::from_millis(100),
+                Duration::from_millis(100),
+            ),
+        )
+        .await
+        .expect("stalled writer must be dropped within the budget, not hang");
+
+        assert!(
+            matches!(handled, Err(ConnError::Stalled(_))),
+            "a stalled reply must be dropped as Stalled, got {handled:?}"
+        );
+
+        // The client observes the drop as EOF once it drains the
+        // buffered reply bytes.
+        let mut client = writer.await.expect("writer task must not panic");
+        let mut scratch = [0u8; 4096];
+        loop {
+            let read = tokio::time::timeout(Duration::from_secs(5), client.read(&mut scratch))
+                .await
+                .expect("client read must not hang")
+                .expect("client read");
+            if read == 0 {
+                break;
+            }
+        }
     }
 
     /// A bind race lost to a concurrent daemon surfaces the friendly
