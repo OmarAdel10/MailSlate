@@ -5,6 +5,9 @@
 //! bridge open read-only snapshots.
 
 pub mod migrations;
+pub mod pool;
+pub mod queries;
+pub mod writer;
 
 use std::path::Path;
 use std::time::Duration;
