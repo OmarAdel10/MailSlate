@@ -21,3 +21,11 @@ pub const UPDATE_ACCOUNT: &str = "update_account";
 
 /// Lists every configured account (Settings → Accounts, M2).
 pub const GET_ACCOUNTS: &str = "get_accounts";
+
+/// Begins the OAuth authorize-code flow for a provider; replies with
+/// the authorize URL the GUI must open in a browser (M2).
+pub const START_OAUTH: &str = "start_oauth";
+
+/// Finalizes a finished OAuth flow with the user-provided profile
+/// (name, email, color); creates the account row (M2).
+pub const COMPLETE_OAUTH_ACCOUNT: &str = "complete_oauth_account";

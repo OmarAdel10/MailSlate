@@ -6,6 +6,7 @@
 
 use crate::infra::db::writer::{WriteOp, WriterActor};
 use crate::infra::keyring::{KeyStore, KeyStoreError, imap_password_key, oauth_key};
+use crate::infra::oauth::tokens;
 
 /// Transport-layer security for IMAP/SMTP endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +100,59 @@ pub fn add_imap_account(
     });
     // Account creation is a UI-visible operation: when it returns, the
     // row must be durable (batch window otherwise delays it up to 50ms).
+    writer.flush();
+    Ok(account_id)
+}
+
+/// Keyring id that stages OAuth tokens between the browser callback
+/// and `complete_oauth_account`: `oauth_key(0)` = `account:0:oauth`.
+pub const PENDING_ACCOUNT_ID: i64 = 0;
+
+/// Creates an OAuth2 account from a completed authorization-code flow.
+///
+/// The token snapshot is staged under [`PENDING_ACCOUNT_ID`] by the
+/// daemon's callback waiter; this moves it to the real account's key,
+/// removes the staging copy, and writes the row with provider endpoints
+/// from the provider profile. `color` (optional) is applied via a
+/// follow-up patch because the add op carries no color column.
+#[allow(clippy::too_many_arguments)]
+pub fn add_oauth_account(
+    keystore: &dyn KeyStore,
+    writer: &WriterActor,
+    provider: &str,
+    display_name: &str,
+    email: &str,
+    color: Option<String>,
+    imap: (&str, u16, Security),
+    smtp: (&str, u16, Security),
+    snapshot: &crate::infra::oauth::tokens::TokenSnapshot,
+) -> Result<i64, AccountError> {
+    let account_id = next_account_id(writer)?;
+
+    tokens::save(keystore, account_id, snapshot)?;
+    tokens::delete(keystore, PENDING_ACCOUNT_ID)?;
+
+    writer.enqueue(WriteOp::AccountAdd {
+        id: account_id,
+        display_name: display_name.into(),
+        email: email.into(),
+        provider: provider.into(),
+        imap_host: imap.0.into(),
+        imap_port: imap.1,
+        imap_security: imap.2.as_str().into(),
+        smtp_host: smtp.0.into(),
+        smtp_port: smtp.1,
+        smtp_security: smtp.2.as_str().into(),
+        auth_type: AuthKind::OAuth2.as_str().into(),
+    });
+    if let Some(color) = color {
+        writer.enqueue(WriteOp::AccountUpdate {
+            id: account_id,
+            display_name: None,
+            color: Some(Some(color)),
+            sync_window_days: None,
+        });
+    }
     writer.flush();
     Ok(account_id)
 }
@@ -443,5 +497,60 @@ mod tests {
         assert_eq!(listed[0].display_name, "Renamed");
         assert_eq!(listed[0].color, None, "Some(None) must clear the color");
         assert_eq!(listed[0].sync_window_days, 90, "unset field untouched");
+    }
+
+    #[test]
+    fn add_oauth_account_moves_staged_tokens_and_creates_row() {
+        use crate::infra::keyring::oauth_key;
+        use crate::infra::oauth::tokens::{self, TokenSnapshot};
+
+        let (_dir, path) = seeded_db();
+        let keystore = FakeKeyStore::new();
+        let writer = WriterActor::spawn(&path);
+        let snapshot = TokenSnapshot {
+            access_token: "at-o".into(),
+            refresh_token: "rt-o".into(),
+            expires_at: 9_999,
+            scopes: "scope-1".into(),
+        };
+        tokens::save(&keystore, PENDING_ACCOUNT_ID, &snapshot).expect("stage snapshot");
+
+        let account_id = add_oauth_account(
+            &keystore,
+            &writer,
+            "gmail",
+            "Gmail",
+            "me@gmail.com",
+            Some("blue".into()),
+            ("imap.gmail.com", 993, Security::Tls),
+            ("smtp.gmail.com", 587, Security::StartTls),
+            &snapshot,
+        )
+        .expect("oauth account created");
+
+        writer.flush();
+        let moved = keystore
+            .get(&oauth_key(account_id))
+            .expect("keystore readable")
+            .expect("tokens re-keyed to the real account");
+        assert!(moved.contains("at-o"), "moved snapshot: {moved}");
+        assert_eq!(
+            keystore.get(&oauth_key(PENDING_ACCOUNT_ID)).unwrap(),
+            None,
+            "staged key scrubbed"
+        );
+
+        let conn = crate::infra::db::open_readonly(&path).expect("reopen");
+        let (provider, auth_type, color, imap_host): (String, String, Option<String>, String) =
+            conn.query_row(
+                "SELECT provider, auth_type, color, imap_host FROM accounts WHERE id = ?1",
+                [account_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("account row");
+        assert_eq!(provider, "gmail");
+        assert_eq!(auth_type, "oauth2");
+        assert_eq!(imap_host, "imap.gmail.com");
+        assert_eq!(color.as_deref(), Some("blue"));
     }
 }

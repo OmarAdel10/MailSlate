@@ -119,8 +119,7 @@ pub async fn run(
     );
 
     let shutdown = Arc::new(tokio::sync::Notify::new());
-    let bus = EventBus::new();
-    let result = accept_loop(listener, shutdown, bus, sigterm, ctx).await;
+    let result = accept_loop(listener, shutdown, ctx.bus.clone(), sigterm, ctx).await;
 
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&pid_file);
@@ -405,6 +404,10 @@ mod tests {
             reader: Arc::new(
                 mailslate_core::infra::db::pool::ReadPool::open(&db_path).expect("pool"),
             ),
+            bus: crate::events::EventBus::new(),
+            oauth: std::sync::Mutex::new(None),
+            token_poster: Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
+            oauth_deadline: std::time::Duration::from_secs(5),
         })
     }
     use mailslate_protocol::message::Event;

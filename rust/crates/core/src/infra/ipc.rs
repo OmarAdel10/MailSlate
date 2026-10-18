@@ -176,6 +176,27 @@ impl Client {
     }
 
     /// Patches mutable account fields (name, color, sync window).
+    /// Starts an OAuth authorization-code flow; the reply carries the
+    /// provider's authorize URL for the GUI to open in a browser.
+    pub async fn start_oauth(&mut self, provider: &str) -> Result<Value, BridgeError> {
+        self.request(methods::START_OAUTH, json!({ "provider": provider }))
+            .await
+    }
+
+    /// Completes a started OAuth flow: names the account and files it.
+    pub async fn complete_oauth_account(
+        &mut self,
+        display_name: &str,
+        email: &str,
+        color: Option<&str>,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::COMPLETE_OAUTH_ACCOUNT,
+            json!({ "display_name": display_name, "email": email, "color": color }),
+        )
+        .await
+    }
+
     pub async fn update_account(
         &mut self,
         account_id: i64,
@@ -372,6 +393,13 @@ mod tests {
                 }
                 methods::GET_ACCOUNTS => Response::ok(request.id, json!({ "accounts": [] })),
                 methods::ADD_IMAP_ACCOUNT => Response::ok(request.id, json!({ "account_id": 7 })),
+                methods::START_OAUTH => Response::ok(
+                    request.id,
+                    json!({ "url": "https://accounts.example.test/auth" }),
+                ),
+                methods::COMPLETE_OAUTH_ACCOUNT => {
+                    Response::ok(request.id, json!({ "account_id": 11 }))
+                }
                 methods::REMOVE_ACCOUNT | methods::UPDATE_ACCOUNT => {
                     Response::ok(request.id, json!({ "ok": true }))
                 }
@@ -407,6 +435,22 @@ mod tests {
 
     /// Thin typed wrappers round-trip the account method names and
     /// parameter shapes over the wire.
+    #[tokio::test]
+    async fn oauth_method_wrappers_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+
+        let reply = client.start_oauth("google").await.unwrap();
+        assert_eq!(reply["url"], json!("https://accounts.example.test/auth"));
+
+        let reply = client
+            .complete_oauth_account("Gmail", "me@gmail.com", Some("blue"))
+            .await
+            .unwrap();
+        assert_eq!(reply["account_id"], json!(11));
+    }
+
     #[tokio::test]
     async fn account_method_wrappers_round_trip() {
         let dir = tempfile::tempdir().unwrap();

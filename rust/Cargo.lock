@@ -1336,6 +1336,7 @@ dependencies = [
 name = "mailslate-daemon"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "libc",
  "mailslate-core",
  "mailslate-protocol",

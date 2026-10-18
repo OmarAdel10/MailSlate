@@ -123,7 +123,7 @@ pub fn id_token_email(id_token: &str) -> Option<String> {
 
 /// Exchanges an authorization code (plus PKCE verifier) for tokens at
 /// the provider's token endpoint. `now` seeds the expiry clock.
-pub async fn exchange_code<E: TokenEndpoint>(
+pub async fn exchange_code<E: TokenPoster + ?Sized>(
     endpoint: &E,
     provider: Provider,
     code: &str,
@@ -132,6 +132,30 @@ pub async fn exchange_code<E: TokenEndpoint>(
     client_id: &str,
     now: i64,
 ) -> Result<TokenSnapshot, OAuthError> {
+    exchange_code_detail(
+        endpoint,
+        provider,
+        code,
+        code_verifier,
+        redirect_uri,
+        client_id,
+        now,
+    )
+    .await
+    .map(|(snapshot, _)| snapshot)
+}
+
+/// [`exchange_code`] that also surfaces the id_token, so the caller
+/// can extract the account email without a userinfo round-trip.
+pub async fn exchange_code_detail<E: TokenPoster + ?Sized>(
+    endpoint: &E,
+    provider: Provider,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+    client_id: &str,
+    now: i64,
+) -> Result<(TokenSnapshot, Option<String>), OAuthError> {
     let profile = providers::profile(provider);
     let form = [
         ("grant_type", "authorization_code"),
@@ -141,13 +165,36 @@ pub async fn exchange_code<E: TokenEndpoint>(
         ("code_verifier", code_verifier),
     ];
     let response = endpoint.post(profile.token_url, &form).await?;
-    Ok(to_snapshot(response, now, None))
+    let id_token = response.id_token.as_deref().and_then(id_token_email);
+    Ok((to_snapshot(response, now, None), id_token))
+}
+
+/// Object-safe stand-in for [`TokenEndpoint`]: AFIT makes the original
+/// trait `dyn`-incompatible, and shared daemon state must hold the
+/// endpoint behind a pointer so tests can inject a fake.
+pub trait TokenPoster: Send + Sync {
+    fn post<'a>(
+        &'a self,
+        token_url: &'a str,
+        form: &'a [(&'a str, &'a str)],
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<TokenResponse, OAuthError>> + Send + 'a>>;
+}
+
+impl<T: TokenEndpoint + Send + Sync + ?Sized> TokenPoster for T {
+    fn post<'a>(
+        &'a self,
+        token_url: &'a str,
+        form: &'a [(&'a str, &'a str)],
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<TokenResponse, OAuthError>> + Send + 'a>>
+    {
+        Box::pin(TokenEndpoint::post(self, token_url, form))
+    }
 }
 
 /// Refreshes an access token with a refresh token grant. When the
 /// provider does not rotate the refresh token, the old one stays in
 /// the snapshot.
-pub async fn refresh<E: TokenEndpoint>(
+pub async fn refresh<E: TokenPoster + ?Sized>(
     endpoint: &E,
     provider: Provider,
     refresh_token: &str,

@@ -28,6 +28,16 @@ impl Provider {
             Provider::Microsoft => "microsoft",
         }
     }
+
+    /// Wire identity stored in the `accounts.provider` column; the
+    /// schema CHECK constrains values to `gmail`/`outlook`/`imap`,
+    /// which differ from the OAuth wire names above.
+    pub fn db_name(self) -> &'static str {
+        match self {
+            Provider::Google => "gmail",
+            Provider::Microsoft => "outlook",
+        }
+    }
 }
 
 /// Everything the OAuth flow and the account wizard need to know about

@@ -79,6 +79,10 @@ fn run() -> Result<(), ServerError> {
         writer: std::sync::Arc::new(db::writer::WriterActor::spawn(&db_path)),
         keystore,
         reader: std::sync::Arc::new(db::pool::ReadPool::open(&db_path)?),
+        bus: crate::events::EventBus::new(),
+        oauth: std::sync::Mutex::new(None),
+        token_poster: std::sync::Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
+        oauth_deadline: std::time::Duration::from_secs(300),
     });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
