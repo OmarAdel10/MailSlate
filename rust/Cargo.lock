@@ -1006,6 +1006,7 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "keyring",
+ "libc",
  "mailslate-protocol",
  "rusqlite",
  "serde_json",
