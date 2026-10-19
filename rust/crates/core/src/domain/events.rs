@@ -1,4 +1,4 @@
-//! Daemon-internal event bus (M2, ARCHITECTURE §9).
+//! Core event bus shared by sync, OAuth, and account tasks (ARCHITECTURE §9).
 //!
 //! Sync, OAuth, and mutation tasks publish [`Event`]s here; every live
 //! IPC connection carries a subscriber so the GUI receives unsolicited

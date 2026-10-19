@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::events::EventBus;
+use mailslate_core::domain::events::EventBus;
 
 /// What the connection handler should do after replying.
 #[derive(Debug)]
@@ -639,7 +639,7 @@ mod tests {
             writer: Arc::new(WriterActor::spawn(&db_path)),
             keystore: Arc::new(FakeKeyStore::new()),
             reader: Arc::new(ReadPool::open(&db_path).unwrap()),
-            bus: crate::events::EventBus::new(),
+            bus: mailslate_core::domain::events::EventBus::new(),
             oauth: std::sync::Mutex::new(None),
             token_poster: Arc::new(FakePoster),
             oauth_deadline,

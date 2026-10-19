@@ -13,8 +13,8 @@ use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async
 use mailslate_protocol::message::{Request, Response};
 
 use crate::dispatch::{self, DispatchCtx, Dispatched};
-use crate::events::EventBus;
 use crate::logging::LoggingError;
+use mailslate_core::domain::events::EventBus;
 
 /// Pause after a failed `accept()` before retrying.
 ///
@@ -404,7 +404,7 @@ mod tests {
             reader: Arc::new(
                 mailslate_core::infra::db::pool::ReadPool::open(&db_path).expect("pool"),
             ),
-            bus: crate::events::EventBus::new(),
+            bus: mailslate_core::domain::events::EventBus::new(),
             oauth: std::sync::Mutex::new(None),
             token_poster: Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
             oauth_deadline: std::time::Duration::from_secs(5),
