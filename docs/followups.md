@@ -86,6 +86,19 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-34 — CI: re-verify the e2e job apt list (gtk/ninja/
   pkg-config) and the Node-20 deprecation warnings after the Ubuntu-26
   runner flip (`.github/workflows/ci.yml`); starts 2026-10-19.
+- MAILSLATE-36 — M3 (user-committed 2026-10-19): incremental sync via
+  CONDSTORE CHANGEDSINCE + UIDVALIDITY wipe; SyncNow full-refetch is
+  the M2 fallback (`rust/crates/core/src/domain/sync/initial.rs`;
+  quirks detection ready in `rust/crates/core/src/infra/imap/quirks.rs`).
+- MAILSLATE-37 — M3 (user-committed 2026-10-19): IDLE push with 29-min
+  re-issue + 60s polling fallback; pull forward mid-M3 if dogfooding
+  demands it (`rust/crates/core/src/domain/sync/actor.rs`).
+- MAILSLATE-38 — M3 (user-committed 2026-10-19): sync-window filtering
+  + body-fetch-on-open (body_state headers→full) — absorbed by the M3
+  reading UI by necessity.
+- MAILSLATE-39 — M3 (user-committed 2026-10-19): outbox drainer for
+  server mutations (uid_store/uid_move, FIFO per target, retry jitter
+  ≤60s) — absorbed by the M3 reading UI by necessity.
 
 ## Acknowledged test deferrals
 
