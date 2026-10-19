@@ -38,7 +38,9 @@ pub(crate) struct EnvelopeRow {
     pub size: Option<u32>,
     /// RFC 3339 string (chrono `FixedOffset` rendered by us; chrono is
     /// async-imap's dependency, never core's).
-    pub internal_date: Option<String>,
+    /// Received time as a unix epoch (IMAP INTERNALDATE), the sync
+    /// engine's preferred `date_utc` source.
+    pub internal_date: Option<i64>,
     /// Raw header bytes (`BODY.PEEK[HEADER.FIELDS (...)]`), parsed into
     /// structured fields by the sync engine.
     pub header: Option<Vec<u8>>,
@@ -105,7 +107,7 @@ fn envelope_row(fetch: Fetch) -> EnvelopeRow {
         uid: fetch.uid,
         flags: fetch.flags().map(flag_string).collect(),
         size: fetch.size,
-        internal_date: fetch.internal_date().map(|date| date.to_rfc3339()),
+        internal_date: fetch.internal_date().map(|date| date.timestamp()),
         header: fetch.header().map(<[u8]>::to_vec),
     }
 }

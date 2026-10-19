@@ -9,5 +9,6 @@ pub mod imap;
 #[cfg(unix)]
 pub mod ipc;
 pub mod keyring;
+pub mod mime;
 pub mod oauth;
 pub mod paths;
