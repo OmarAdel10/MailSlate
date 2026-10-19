@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mailslate_core::domain::events::EventBus;
+use mailslate_core::domain::sync::actor::SyncHandle;
 
 /// What the connection handler should do after replying.
 #[derive(Debug)]
@@ -66,6 +67,8 @@ pub struct DispatchCtx {
     pub token_poster: Arc<dyn TokenPoster>,
     /// How long the callback waiter waits before giving up.
     pub oauth_deadline: Duration,
+    /// Running sync actors by account id (daemon spawns one each).
+    pub sync: std::sync::Mutex<std::collections::HashMap<i64, SyncHandle>>,
 }
 
 /// Dispatches one method call against shared daemon state.
@@ -87,6 +90,8 @@ pub fn dispatch(
         methods::COMPLETE_OAUTH_ACCOUNT => {
             complete_oauth_account_dispatch(ctx, params).map(Dispatched::Reply)
         }
+        methods::SYNC_NOW => sync_now_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::GET_STATUS => get_status_dispatch(ctx).map(Dispatched::Reply),
         other => Err(BridgeError::new(
             ErrorKind::NotFound,
             format!("unknown method: {other}"),
@@ -312,6 +317,40 @@ fn complete_oauth_account_dispatch(
 /// Maps an OAuth failure onto the wire error vocabulary.
 fn oauth_error(err: OAuthError) -> BridgeError {
     BridgeError::new(ErrorKind::Internal, err.to_string())
+}
+
+/// Forwards a `sync_now` to the account's actor.
+fn sync_now_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let handles = ctx.sync.lock().expect("sync handle lock");
+    let handle = handles.get(&account_id).ok_or_else(|| {
+        BridgeError::new(
+            ErrorKind::NotFound,
+            format!("no sync actor for account {account_id}"),
+        )
+    })?;
+    if !handle.try_sync_now() {
+        return Err(BridgeError::new(
+            ErrorKind::Internal,
+            format!("sync actor for account {account_id} is unreachable"),
+        ));
+    }
+    Ok(json!({ "ok": true }))
+}
+
+/// Lists every account with its last published sync state.
+fn get_status_dispatch(ctx: &DispatchCtx) -> Result<Value, BridgeError> {
+    let handles = ctx.sync.lock().expect("sync handle lock");
+    let accounts: Vec<Value> = handles
+        .iter()
+        .map(|(account_id, handle)| {
+            json!({
+                "id": account_id,
+                "state": handle.current_state().as_str(),
+            })
+        })
+        .collect();
+    Ok(json!({ "accounts": accounts }))
 }
 
 /// Unix seconds; token expiry arithmetic uses whole seconds only.
@@ -643,6 +682,7 @@ mod tests {
             oauth: std::sync::Mutex::new(None),
             token_poster: Arc::new(FakePoster),
             oauth_deadline,
+            sync: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -827,5 +867,25 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Validation);
         assert!(err.message.contains("pending"));
+    }
+
+    #[test]
+    fn sync_now_without_an_actor_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        let err = dispatch(&ctx, methods::SYNC_NOW, &json!({ "account_id": 1 })).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotFound);
+        assert!(err.message.contains("no sync actor"));
+    }
+
+    #[test]
+    fn get_status_lists_actor_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        let Dispatched::Reply(value) = dispatch(&ctx, methods::GET_STATUS, &json!({})).unwrap()
+        else {
+            panic!("get_status must reply");
+        };
+        assert_eq!(value["accounts"], json!([]));
     }
 }

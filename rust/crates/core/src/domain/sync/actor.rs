@@ -4,12 +4,6 @@
 //! The daemon spawns one actor per configured account and holds its
 //! [`SyncHandle`]; dispatch forwards `sync_now` requests and reads
 //! `current_state` for `get_status`.
-//!
-//! The daemon wiring (the first consumer) lands in the next slice;
-//! until then the items are intentionally unused in-crate, so
-//! dead-code is allowed module-wide.
-
-#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,7 +22,7 @@ use tokio::sync::mpsc;
 
 /// Commands the actor serves after the initial sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SyncCmd {
+pub enum SyncCmd {
     /// Re-run the sync on the live session.
     SyncNow,
     /// Drop the session and stop the task.
@@ -38,7 +32,7 @@ pub(crate) enum SyncCmd {
 /// Connection + auth facts for one account, as the daemon reads them
 /// from the accounts row and the keyring.
 #[derive(Debug, Clone)]
-pub(crate) struct AccountConfig {
+pub struct AccountConfig {
     pub id: i64,
     pub email: String,
     pub imap_host: String,
@@ -50,32 +44,33 @@ pub(crate) struct AccountConfig {
 
 /// Handle to a running sync actor: sends commands, reads the last
 /// published state.
-pub(crate) struct SyncHandle {
+pub struct SyncHandle {
     tx: mpsc::Sender<SyncCmd>,
     state: Arc<Mutex<SyncState>>,
 }
 
 impl SyncHandle {
     /// The actor's most recent state (for `get_status`).
-    pub(crate) fn current_state(&self) -> SyncState {
+    pub fn current_state(&self) -> SyncState {
         self.state.lock().expect("state lock").clone()
     }
 
-    /// Asks the actor to re-run the sync.
-    pub(crate) async fn sync_now(&self) {
-        let _ = self.tx.send(SyncCmd::SyncNow).await;
+    /// Enqueues a re-sync request; false when the actor is gone or
+    /// its queue is full (sync dispatch context — no blocking send).
+    pub fn try_sync_now(&self) -> bool {
+        self.tx.try_send(SyncCmd::SyncNow).is_ok()
     }
 
-    /// Asks the actor to stop.
-    pub(crate) async fn shutdown(&self) {
-        let _ = self.tx.send(SyncCmd::Shutdown).await;
+    /// Enqueues a shutdown request; false when the actor is gone.
+    pub fn try_shutdown(&self) -> bool {
+        self.tx.try_send(SyncCmd::Shutdown).is_ok()
     }
 }
 
 /// Spawns the sync actor for one account. The task connects,
 /// authenticates, runs the initial sync once, then serves commands;
 /// every state change publishes an `account_status` event.
-pub(crate) fn spawn_actor(
+pub fn spawn_actor(
     account: AccountConfig,
     keystore: Arc<dyn KeyStore>,
     writer: Arc<WriterActor>,
@@ -265,7 +260,7 @@ mod tests {
         wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
         assert_eq!(fetches.load(Ordering::SeqCst), 1, "one initial sync round");
 
-        handle.sync_now().await;
+        handle.try_sync_now();
         // The state is already idle from the first round; poll the
         // counter until the re-sync's UID FETCH lands.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -278,7 +273,7 @@ mod tests {
         }
         wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
 
-        handle.shutdown().await;
+        handle.try_shutdown();
         wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
 
         let mut statuses = Vec::new();

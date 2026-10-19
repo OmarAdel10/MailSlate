@@ -209,6 +209,17 @@ impl Client {
         .await
     }
 
+    /// Asks the daemon to re-run the sync for one account.
+    pub async fn sync_now(&mut self, account_id: i64) -> Result<Value, BridgeError> {
+        self.request(methods::SYNC_NOW, json!({ "account_id": account_id }))
+            .await
+    }
+
+    /// Lists every account with its current sync state.
+    pub async fn get_status(&mut self) -> Result<Value, BridgeError> {
+        self.request(methods::GET_STATUS, json!({})).await
+    }
+
     /// Overrides the per-request timeout; tests use short values.
     #[cfg(test)]
     pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {
@@ -403,6 +414,11 @@ mod tests {
                 methods::REMOVE_ACCOUNT | methods::UPDATE_ACCOUNT => {
                     Response::ok(request.id, json!({ "ok": true }))
                 }
+                methods::SYNC_NOW => Response::ok(request.id, json!({ "ok": true })),
+                methods::GET_STATUS => Response::ok(
+                    request.id,
+                    json!({ "accounts": [{ "id": 3, "state": "idle" }] }),
+                ),
                 _ => Response::ok(request.id, Value::Null),
             };
             write_json_frame_async(&mut stream, &response)
@@ -449,6 +465,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply["account_id"], json!(11));
+    }
+
+    /// sync_now / get_status wrappers round-trip the wire shapes.
+    #[tokio::test]
+    async fn sync_method_wrappers_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+
+        let reply = client.sync_now(3).await.unwrap();
+        assert_eq!(reply["ok"], json!(true));
+
+        let status = client.get_status().await.unwrap();
+        assert_eq!(status["accounts"][0]["id"], json!(3));
+        assert_eq!(status["accounts"][0]["state"], json!("idle"));
     }
 
     #[tokio::test]

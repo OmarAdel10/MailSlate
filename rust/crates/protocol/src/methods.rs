@@ -29,3 +29,10 @@ pub const START_OAUTH: &str = "start_oauth";
 /// Finalizes a finished OAuth flow with the user-provided profile
 /// (name, email, color); creates the account row (M2).
 pub const COMPLETE_OAUTH_ACCOUNT: &str = "complete_oauth_account";
+
+/// Asks the daemon to re-run the sync for one account (or all when
+/// `account_id` is absent) (M2).
+pub const SYNC_NOW: &str = "sync_now";
+
+/// Lists every account with its current sync state (M2).
+pub const GET_STATUS: &str = "get_status";

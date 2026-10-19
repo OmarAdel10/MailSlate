@@ -408,6 +408,7 @@ mod tests {
             oauth: std::sync::Mutex::new(None),
             token_poster: Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
             oauth_deadline: std::time::Duration::from_secs(5),
+            sync: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
     use mailslate_protocol::message::Event;

@@ -24,6 +24,17 @@ impl Security {
             Security::Plaintext => "plaintext",
         }
     }
+
+    /// Parses the schema's wire names; unknown values yield None
+    /// (CHECK constraint should make that unreachable for stored rows).
+    pub fn parse(raw: &str) -> Option<Security> {
+        match raw {
+            "tls" => Some(Security::Tls),
+            "starttls" => Some(Security::StartTls),
+            "plaintext" => Some(Security::Plaintext),
+            _ => None,
+        }
+    }
 }
 
 /// How an account authenticates.
@@ -185,6 +196,41 @@ pub struct AccountSummary {
     pub auth_type: String,
     pub color: Option<String>,
     pub sync_window_days: i64,
+}
+
+/// Connection + auth facts for one account — exactly what the sync
+/// actor needs to connect and authenticate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountConnection {
+    pub id: i64,
+    pub email: String,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_security: Security,
+    pub auth_type: String,
+}
+
+/// Lists every account's sync inputs (daemon spawns one actor each).
+pub fn get_account_connections(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<Vec<AccountConnection>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, email, imap_host, imap_port, imap_security, auth_type
+         FROM accounts
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(AccountConnection {
+            id: row.get(0)?,
+            email: row.get(1)?,
+            imap_host: row.get(2)?,
+            imap_port: row.get::<_, i64>(3)? as u16,
+            imap_security: Security::parse(row.get::<_, String>(4)?.as_str())
+                .unwrap_or(Security::Tls),
+            auth_type: row.get(5)?,
+        })
+    })?;
+    rows.collect()
 }
 
 /// Lists every stored account, newest last (insertion order by id).
@@ -552,5 +598,42 @@ mod tests {
         assert_eq!(auth_type, "oauth2");
         assert_eq!(imap_host, "imap.gmail.com");
         assert_eq!(color.as_deref(), Some("blue"));
+    }
+
+    #[test]
+    fn security_parses_wire_names() {
+        assert_eq!(Security::parse("tls"), Some(Security::Tls));
+        assert_eq!(Security::parse("starttls"), Some(Security::StartTls));
+        assert_eq!(Security::parse("plaintext"), Some(Security::Plaintext));
+        assert_eq!(Security::parse("bogus"), None);
+    }
+
+    #[test]
+    fn account_connections_carry_sync_inputs() {
+        let (_dir, path) = seeded_db();
+        let keystore = FakeKeyStore::new();
+        let writer = WriterActor::spawn(&path);
+        let draft = ImapAccountDraft {
+            display_name: "Work".into(),
+            email: "work@example.com".into(),
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_security: Security::StartTls,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 587,
+            smtp_security: Security::StartTls,
+            auth: AuthKind::Password,
+        };
+        let account_id = add_imap_account(&keystore, &writer, &draft, "pw").expect("account");
+
+        let conn = crate::infra::db::open_readonly(&path).expect("reopen");
+        let connections = get_account_connections(&conn).expect("connections");
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].id, account_id);
+        assert_eq!(connections[0].email, "work@example.com");
+        assert_eq!(connections[0].imap_host, "imap.example.com");
+        assert_eq!(connections[0].imap_port, 993);
+        assert_eq!(connections[0].imap_security, Security::StartTls);
+        assert_eq!(connections[0].auth_type, "password");
     }
 }

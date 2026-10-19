@@ -82,12 +82,47 @@ fn run() -> Result<(), ServerError> {
         oauth: std::sync::Mutex::new(None),
         token_poster: std::sync::Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
         oauth_deadline: std::time::Duration::from_secs(300),
+        sync: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(server::run(paths::socket_path(), paths::pid_file(), ctx))
+    runtime.block_on(async {
+        // One sync actor per configured account; failures inside the
+        // actor publish account_status and stop the task — the daemon
+        // keeps serving IPC regardless.
+        {
+            let connections = {
+                let conn = ctx
+                    .reader
+                    .acquire()
+                    .map_err(|err| ServerError::Io(std::io::Error::other(err.to_string())))?;
+                mailslate_core::domain::accounts::get_account_connections(&conn)
+                    .map_err(|err| ServerError::Io(std::io::Error::other(err.to_string())))?
+            };
+            for account in connections {
+                let handle = mailslate_core::domain::sync::actor::spawn_actor(
+                    mailslate_core::domain::sync::actor::AccountConfig {
+                        id: account.id,
+                        email: account.email,
+                        imap_host: account.imap_host,
+                        imap_port: account.imap_port,
+                        imap_security: account.imap_security,
+                        auth_type: account.auth_type,
+                    },
+                    std::sync::Arc::clone(&ctx.keystore),
+                    std::sync::Arc::clone(&ctx.writer),
+                    std::sync::Arc::clone(&ctx.bus),
+                );
+                ctx.sync
+                    .lock()
+                    .expect("sync handle lock")
+                    .insert(account.id, handle);
+            }
+        }
+        server::run(paths::socket_path(), paths::pid_file(), ctx).await
+    })
 }
 
 #[cfg(not(unix))]
