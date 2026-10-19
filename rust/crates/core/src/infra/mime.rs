@@ -25,6 +25,10 @@ pub(crate) struct MessageRecord {
     pub(crate) cc_json: String,
     pub(crate) reply_to_json: String,
     pub(crate) date_utc: i64,
+    /// Threading root: the first entry of References, else
+    /// In-Reply-To, else None (angle brackets stripped like
+    /// message_id_hdr). Generic JWZ clustering key.
+    pub(crate) root_message_id: Option<String>,
 }
 
 /// Parses a raw header block (BODY.PEEK[HEADER.FIELDS (...)] bytes).
@@ -41,6 +45,7 @@ pub(crate) fn parse_header(header: &[u8]) -> MessageRecord {
             cc_json: "[]".to_string(),
             reply_to_json: "[]".to_string(),
             date_utc: 0,
+            root_message_id: None,
         };
     };
 
@@ -54,6 +59,47 @@ pub(crate) fn parse_header(header: &[u8]) -> MessageRecord {
         cc_json: addresses_json(message.cc()),
         reply_to_json: addresses_json(message.reply_to()),
         date_utc: message.date().map(|date| date.to_timestamp()).unwrap_or(0),
+        root_message_id: message
+            .header_raw("References")
+            .and_then(root_id)
+            .or_else(|| message.header_raw("In-Reply-To").and_then(root_id)),
+    }
+}
+
+/// The first message-id of a References/In-Reply-To header value,
+/// with angle brackets stripped; None when the header holds no id.
+fn root_id(raw: &str) -> Option<String> {
+    raw.split_whitespace()
+        .next()
+        .map(|id| id.trim_start_matches('<').trim_end_matches('>').to_string())
+        .filter(|id| !id.is_empty())
+}
+
+/// Normalizes a subject for generic thread clustering: repeatedly
+/// strips reply/forward prefixes, lowercases, and collapses
+/// whitespace. Nothing left to cluster on yields None.
+pub(crate) fn subject_norm(subject: Option<&str>) -> Option<String> {
+    let mut current = subject?.trim().to_string();
+    loop {
+        let lower = current.to_lowercase();
+        let stripped = lower
+            .strip_prefix("re:")
+            .or_else(|| lower.strip_prefix("fw:"))
+            .or_else(|| lower.strip_prefix("fwd:"));
+        let Some(rest) = stripped else {
+            break;
+        };
+        let trimmed = rest.trim_start().to_string();
+        if trimmed.is_empty() {
+            return None;
+        }
+        current = trimmed;
+    }
+    let normalized = current.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
     }
 }
 
@@ -180,5 +226,29 @@ mod tests {
             resolve_date_utc(None, &parse_header(b"Subject: x\r\n\r\n"), 1_000),
             1_000
         );
+    }
+
+    #[test]
+    fn references_yield_the_root_message_id() {
+        let record = parse_header(b"Subject: re: thread\r\nReferences: <b@y> <a@x>\r\n\r\n");
+
+        assert_eq!(record.root_message_id.as_deref(), Some("b@y"));
+    }
+
+    #[test]
+    fn in_reply_to_is_the_fallback_root() {
+        let record = parse_header(b"Subject: re: thread\r\nIn-Reply-To: <parent@x>\r\n\r\n");
+
+        assert_eq!(record.root_message_id.as_deref(), Some("parent@x"));
+    }
+
+    #[test]
+    fn subject_norm_strips_reply_prefixes_and_case() {
+        assert_eq!(
+            subject_norm(Some("Re: FWD:  Hello   World")),
+            Some("hello world".to_string())
+        );
+        assert_eq!(subject_norm(Some("Re:")), None);
+        assert_eq!(subject_norm(None), None);
     }
 }
