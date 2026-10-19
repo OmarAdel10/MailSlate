@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::infra::db::{self, migrations};
 
@@ -16,6 +16,24 @@ pub const BATCH_OPS: usize = 500;
 
 /// How long the writer waits before flushing a partial batch.
 pub const BATCH_WINDOW: Duration = Duration::from_millis(50);
+
+/// One message_locations slot carried inline with a
+/// [`WriteOp::MessageUpsert`], keyed by mailbox NAME so the writer
+/// can resolve both foreign ids inside its own transaction (the
+/// sync actor cannot read row ids back synchronously).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct LocationInline {
+    pub mailbox_name: String,
+    pub uid: u32,
+    pub seen: bool,
+    pub flagged: bool,
+    pub answered: bool,
+    pub draft: bool,
+    pub deleted: bool,
+    pub keywords_json: String,
+    pub modseq: Option<u64>,
+}
 
 /// Operations the writer applies. The set grows with upcoming
 /// phases (accounts, messages, mutations); meta writes cover the
@@ -75,7 +93,6 @@ pub enum WriteOp {
         account_id: i64,
         dedupe_key: String,
         message_id_hdr: Option<String>,
-        thread_id: Option<i64>,
         subject: Option<String>,
         from_json: String,
         to_json: String,
@@ -84,6 +101,18 @@ pub enum WriteOp {
         date_utc: Option<i64>,
         size_bytes: Option<i64>,
         snippet: Option<String>,
+        /// Gmail X-GM-THRID when the server advertises X-GM-EXT-1;
+        /// resolution moves writer-side (see [`LocationInline`]).
+        gmail_thread_id: Option<String>,
+        /// First References entry (else In-Reply-To), angle brackets
+        /// stripped — clusters generic threads.
+        root_message_id: Option<String>,
+        /// Lowercased subject with reply prefixes stripped.
+        subject_norm: Option<String>,
+        /// One message_locations slot keyed by mailbox NAME, resolved
+        /// inside the same transaction (the actor cannot read back
+        /// row ids synchronously).
+        location: Option<LocationInline>,
     },
     /// Upserts one message_locations row keyed by (mailbox_id, uid).
     ///
@@ -117,6 +146,11 @@ pub enum WriteOp {
         subject_norm: Option<String>,
         last_date: i64,
     },
+    /// Recomputes denormalized thread counters (message_count,
+    /// unread_count) for every thread of the account. Called after a
+    /// batch of message upserts; counters must match the locations.
+    #[allow(dead_code)]
+    ThreadCountersRecompute { account_id: i64 },
 }
 
 /// Handle for enqueueing writes; `Drop` joins the actor after
@@ -311,7 +345,6 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                 account_id,
                 dedupe_key,
                 message_id_hdr,
-                thread_id,
                 subject,
                 from_json,
                 to_json,
@@ -320,18 +353,22 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                 date_utc,
                 size_bytes,
                 snippet,
+                gmail_thread_id,
+                root_message_id,
+                subject_norm,
+                location,
             } => {
                 // body_state is deliberately absent from the UPDATE:
                 // a header re-sync must never downgrade a fetched body.
+                // thread_id is resolved below, never taken from the wire.
                 tx.execute(
                     "INSERT INTO messages(
-                        account_id, dedupe_key, message_id_hdr, thread_id,
+                        account_id, dedupe_key, message_id_hdr,
                         subject, from_json, to_json, cc_json, reply_to_json,
                         date_utc, size_bytes, snippet
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                      ON CONFLICT(account_id, dedupe_key) DO UPDATE SET
                         message_id_hdr = excluded.message_id_hdr,
-                        thread_id = excluded.thread_id,
                         subject = excluded.subject,
                         from_json = excluded.from_json,
                         to_json = excluded.to_json,
@@ -344,7 +381,6 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                         account_id,
                         dedupe_key,
                         message_id_hdr,
-                        thread_id,
                         subject,
                         from_json,
                         to_json,
@@ -356,6 +392,131 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                     ],
                 )
                 .expect("message upsert");
+
+                // Resolve (or create) the thread row and link the
+                // message: a Gmail thrid wins, else the generic
+                // (root_message_id OR subject_norm) cluster matches,
+                // else a fresh thread is inserted.
+                let thread_id: Option<i64> = if let Some(thrid) = gmail_thread_id.as_deref() {
+                    let existing: Option<i64> = tx
+                        .query_row(
+                            "SELECT id FROM threads
+                             WHERE account_id = ?1 AND gmail_thread_id = ?2",
+                            rusqlite::params![account_id, thrid],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .expect("gmail thread lookup");
+                    Some(existing.unwrap_or_else(|| {
+                        tx.execute(
+                            "INSERT INTO threads(
+                                account_id, gmail_thread_id, root_message_id,
+                                subject_norm, last_date
+                             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                            rusqlite::params![
+                                account_id,
+                                thrid,
+                                root_message_id,
+                                subject_norm,
+                                date_utc.unwrap_or(0)
+                            ],
+                        )
+                        .expect("gmail thread insert");
+                        tx.last_insert_rowid()
+                    }))
+                } else if root_message_id.is_some() || subject_norm.is_some() {
+                    let existing: Option<i64> = tx
+                        .query_row(
+                            "SELECT id FROM threads
+                             WHERE account_id = ?1
+                               AND ((?2 IS NOT NULL AND root_message_id = ?2)
+                                 OR (?3 IS NOT NULL AND subject_norm = ?3))
+                             ORDER BY id
+                             LIMIT 1",
+                            rusqlite::params![account_id, root_message_id, subject_norm],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .expect("generic thread lookup");
+                    Some(existing.unwrap_or_else(|| {
+                        tx.execute(
+                            "INSERT INTO threads(
+                                account_id, gmail_thread_id, root_message_id,
+                                subject_norm, last_date
+                             ) VALUES (?1, NULL, ?2, ?3, ?4)",
+                            rusqlite::params![
+                                account_id,
+                                root_message_id,
+                                subject_norm,
+                                date_utc.unwrap_or(0)
+                            ],
+                        )
+                        .expect("generic thread insert");
+                        tx.last_insert_rowid()
+                    }))
+                } else {
+                    // No threading signals: the message stays
+                    // unthreaded until a sibling upsert clusters it.
+                    None
+                };
+                if let Some(thread_id) = thread_id {
+                    tx.execute(
+                        "UPDATE messages SET thread_id = ?1
+                         WHERE account_id = ?2 AND dedupe_key = ?3",
+                        rusqlite::params![thread_id, account_id, dedupe_key],
+                    )
+                    .expect("thread link");
+                }
+
+                // Inline location: resolve both ids inside the same
+                // transaction (mailbox by name, message just upserted).
+                if let Some(loc) = location {
+                    let mailbox_id: i64 = tx
+                        .query_row(
+                            "SELECT id FROM mailboxes
+                             WHERE account_id = ?1 AND name = ?2",
+                            rusqlite::params![account_id, loc.mailbox_name],
+                            |row| row.get(0),
+                        )
+                        .expect("mailbox id for inline location");
+                    let message_id: i64 = tx
+                        .query_row(
+                            "SELECT id FROM messages
+                             WHERE account_id = ?1 AND dedupe_key = ?2",
+                            rusqlite::params![account_id, dedupe_key],
+                            |row| row.get(0),
+                        )
+                        .expect("message id for inline location");
+                    tx.execute(
+                        "INSERT INTO message_locations(
+                            message_id, mailbox_id, uid,
+                            seen, flagged, answered, draft, deleted,
+                            keywords_json, modseq
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                         ON CONFLICT(mailbox_id, uid) DO UPDATE SET
+                            message_id = excluded.message_id,
+                            seen = excluded.seen,
+                            flagged = excluded.flagged,
+                            answered = excluded.answered,
+                            draft = excluded.draft,
+                            deleted = excluded.deleted,
+                            keywords_json = excluded.keywords_json,
+                            modseq = excluded.modseq",
+                        rusqlite::params![
+                            message_id,
+                            mailbox_id,
+                            loc.uid as i64,
+                            loc.seen,
+                            loc.flagged,
+                            loc.answered,
+                            loc.draft,
+                            loc.deleted,
+                            loc.keywords_json,
+                            loc.modseq.map(|v| v as i64)
+                        ],
+                    )
+                    .expect("inline location upsert");
+                }
             }
             WriteOp::LocationUpsert {
                 message_id,
@@ -444,6 +605,19 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                         .expect("generic thread insert");
                     }
                 }
+            }
+            WriteOp::ThreadCountersRecompute { account_id } => {
+                tx.execute(
+                    "UPDATE threads SET
+                        message_count = (SELECT COUNT(*) FROM messages
+                                         WHERE thread_id = threads.id),
+                        unread_count = (SELECT COUNT(*) FROM messages m
+                                        JOIN message_locations l ON l.message_id = m.id
+                                        WHERE m.thread_id = threads.id AND l.seen = 0)
+                     WHERE account_id = ?1",
+                    rusqlite::params![account_id],
+                )
+                .expect("thread counters recompute");
             }
             WriteOp::Flush(ack) => {
                 // Commit what precedes the marker, then ack: the ack
@@ -596,7 +770,6 @@ mod tests {
             account_id: 1,
             dedupe_key: "mid:abc@example.com".into(),
             message_id_hdr: Some("abc@example.com".into()),
-            thread_id: Some(thread_id),
             subject: Some(subject.into()),
             from_json: "[]".into(),
             to_json: "[]".into(),
@@ -605,6 +778,10 @@ mod tests {
             date_utc: Some(date_utc),
             size_bytes: Some(1024),
             snippet: Some("body text".into()),
+            gmail_thread_id: Some("gm-1".into()),
+            root_message_id: None,
+            subject_norm: None,
+            location: None,
         };
         writer.enqueue(message("Hello", 500));
         writer.flush();
@@ -655,7 +832,6 @@ mod tests {
             account_id: 1,
             dedupe_key: "mid:loc@example.com".into(),
             message_id_hdr: Some("loc@example.com".into()),
-            thread_id: None,
             subject: None,
             from_json: "[]".into(),
             to_json: "[]".into(),
@@ -664,6 +840,10 @@ mod tests {
             date_utc: None,
             size_bytes: None,
             snippet: None,
+            gmail_thread_id: None,
+            root_message_id: None,
+            subject_norm: None,
+            location: None,
         });
         writer.flush();
 
@@ -771,5 +951,92 @@ mod tests {
             )
             .expect("generic thread row");
         assert_eq!(generic, 1);
+    }
+
+    #[test]
+    fn message_upsert_resolves_threads_and_locations_inline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(super::super::DB_FILE_NAME);
+        seed_account(&path, 1);
+
+        let writer = WriterActor::spawn(&path);
+        writer.enqueue(WriteOp::MailboxUpsert {
+            account_id: 1,
+            name: "INBOX".into(),
+            kind: "inbox".into(),
+            special_use: None,
+            uidvalidity: Some(11),
+            uidnext: Some(6),
+            highest_modseq: Some(4),
+        });
+        let message = |dedupe_key: &str, root: &str, seen: bool, uid: u32| WriteOp::MessageUpsert {
+            account_id: 1,
+            dedupe_key: dedupe_key.into(),
+            message_id_hdr: Some(dedupe_key.trim_start_matches("mid:").into()),
+            subject: Some("Re: Hello".into()),
+            from_json: "[]".into(),
+            to_json: "[]".into(),
+            cc_json: "[]".into(),
+            reply_to_json: "[]".into(),
+            date_utc: Some(500),
+            size_bytes: Some(128),
+            snippet: Some("body".into()),
+            gmail_thread_id: None,
+            root_message_id: Some(root.into()),
+            subject_norm: Some("hello".into()),
+            location: Some(LocationInline {
+                mailbox_name: "INBOX".into(),
+                uid,
+                seen,
+                flagged: false,
+                answered: false,
+                draft: false,
+                deleted: false,
+                keywords_json: "[]".into(),
+                modseq: Some(4),
+            }),
+        };
+        writer.enqueue(message("mid:1@example.com", "<r1>", true, 5));
+        writer.enqueue(message("mid:2@example.com", "<r2>", false, 6));
+        writer.enqueue(WriteOp::ThreadCountersRecompute { account_id: 1 });
+        writer.flush();
+
+        let conn = crate::infra::db::open_readonly(&path).expect("re-open");
+        let (thread_count, message_count, unread_count): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(message_count), MAX(unread_count) FROM threads
+                 WHERE account_id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("thread row");
+        assert_eq!(thread_count, 1, "same subject_norm must cluster");
+        assert_eq!(message_count, 2);
+        assert_eq!(unread_count, 1);
+
+        let thread_id: i64 = conn
+            .query_row("SELECT id FROM threads WHERE account_id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("thread row");
+        let assigned: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE account_id = 1 AND thread_id = ?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .expect("thread assignment");
+        assert_eq!(assigned, 2, "both messages join the cluster");
+
+        let (locations, seen_sum): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), SUM(seen) FROM message_locations",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("locations row");
+        assert_eq!(locations, 2);
+        assert_eq!(seen_sum, 1);
     }
 }
