@@ -7,7 +7,11 @@
 
 pub mod auth;
 pub mod connect;
+pub mod mailbox;
 pub mod tls;
+
+#[cfg(test)]
+pub(crate) mod testing;
 
 /// Errors surfaced by the IMAP adapter. The sync engine maps these to
 /// per-account sync states; the wire details stay in this module.

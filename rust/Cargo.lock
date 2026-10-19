@@ -1481,6 +1481,7 @@ dependencies = [
  "async-imap",
  "base64 0.22.1",
  "dirs",
+ "futures-util",
  "keyring",
  "libc",
  "mailslate-protocol",
