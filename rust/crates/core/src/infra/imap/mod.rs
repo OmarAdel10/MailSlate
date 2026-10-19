@@ -8,10 +8,16 @@
 pub mod auth;
 pub mod connect;
 pub mod mailbox;
+pub mod quirks;
 pub mod tls;
 
 #[cfg(test)]
 pub(crate) mod testing;
+
+// GreenMail harness: compiles only under `cargo test --features
+// greenmail`; keeps the adapter's pub(crate) surface closed (ruling).
+#[cfg(all(test, feature = "greenmail"))]
+mod greenmail_tests;
 
 /// Errors surfaced by the IMAP adapter. The sync engine maps these to
 /// per-account sync states; the wire details stay in this module.

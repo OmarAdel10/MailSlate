@@ -30,3 +30,10 @@ webpki-roots = "0.26"
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+
+[features]
+# Gates the GreenMail integration test (tests/greenmail_imap.rs); it needs
+# the pinned standalone jar under .tools/ and a local JVM, so CI never
+# enables it. Run locally with:
+#   cargo test -p mailslate-core --features greenmail --test greenmail_imap
+greenmail = []
