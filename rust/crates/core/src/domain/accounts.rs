@@ -208,6 +208,7 @@ pub struct AccountConnection {
     pub imap_port: u16,
     pub imap_security: Security,
     pub auth_type: String,
+    pub provider: String,
 }
 
 /// Lists every account's sync inputs (daemon spawns one actor each).
@@ -215,7 +216,7 @@ pub fn get_account_connections(
     conn: &rusqlite::Connection,
 ) -> rusqlite::Result<Vec<AccountConnection>> {
     let mut stmt = conn.prepare(
-        "SELECT id, email, imap_host, imap_port, imap_security, auth_type
+        "SELECT id, email, imap_host, imap_port, imap_security, auth_type, provider
          FROM accounts
          ORDER BY id",
     )?;
@@ -228,6 +229,7 @@ pub fn get_account_connections(
             imap_security: Security::parse(row.get::<_, String>(4)?.as_str())
                 .unwrap_or(Security::Tls),
             auth_type: row.get(5)?,
+            provider: row.get(6)?,
         })
     })?;
     rows.collect()
@@ -635,5 +637,6 @@ mod tests {
         assert_eq!(connections[0].imap_port, 993);
         assert_eq!(connections[0].imap_security, Security::StartTls);
         assert_eq!(connections[0].auth_type, "password");
+        assert_eq!(connections[0].provider, "imap");
     }
 }

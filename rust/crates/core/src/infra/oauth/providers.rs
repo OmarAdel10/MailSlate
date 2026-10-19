@@ -40,6 +40,11 @@ impl Provider {
     }
 }
 
+/// Serializes client-id env mutation across ALL core tests (providers
+/// tests and the sync-actor refresh test share MAILSLATE_*_CLIENT_ID).
+#[cfg(test)]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Everything the OAuth flow and the account wizard need to know about
 /// a provider (ARCHITECTURE §8 provider table).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,10 +111,6 @@ pub fn client_id(provider: Provider) -> Result<String, OAuthError> {
 mod tests {
     use super::*;
     use crate::domain::accounts::{AuthKind, Security};
-
-    /// Serializes env mutation with any sibling test that touches the
-    /// same vars; this module's keys are disjoint from ipc.rs's.
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Profiles expose the endpoints and scopes from ARCHITECTURE §8.
     #[test]

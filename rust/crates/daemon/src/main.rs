@@ -110,10 +110,12 @@ fn run() -> Result<(), ServerError> {
                         imap_port: account.imap_port,
                         imap_security: account.imap_security,
                         auth_type: account.auth_type,
+                        provider: account.provider,
                     },
                     std::sync::Arc::clone(&ctx.keystore),
                     std::sync::Arc::clone(&ctx.writer),
                     std::sync::Arc::clone(&ctx.bus),
+                    std::sync::Arc::clone(&ctx.token_poster),
                 );
                 ctx.sync
                     .lock()

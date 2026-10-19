@@ -15,6 +15,9 @@ use crate::domain::sync::initial::initial_sync;
 use crate::infra::db::writer::WriterActor;
 use crate::infra::imap::connect::{connect, login_password, login_xoauth2};
 use crate::infra::keyring::{KeyStore, imap_password_key};
+use crate::infra::oauth::OAuthError;
+use crate::infra::oauth::grant::{self, TokenPoster};
+use crate::infra::oauth::providers::{self, Provider};
 use crate::infra::oauth::tokens;
 use mailslate_protocol::message::Event;
 use serde_json::json;
@@ -40,6 +43,9 @@ pub struct AccountConfig {
     pub imap_security: Security,
     /// "password" or "oauth2" (schema CHECK).
     pub auth_type: String,
+    /// DB provider ("gmail" / "outlook" / "imap") — picks the token
+    /// endpoint for oauth2 refresh.
+    pub provider: String,
 }
 
 /// Handle to a running sync actor: sends commands, reads the last
@@ -67,6 +73,57 @@ impl SyncHandle {
     }
 }
 
+/// Why an OAuth refresh failed: the user must re-authorize, or the
+/// failure is transient and a retry may succeed.
+enum RefreshError {
+    Reauth,
+    Transient(String),
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_secs() as i64
+}
+
+/// Refreshes a stale token snapshot against the account's provider,
+/// persists the result, and returns it. `InvalidGrant` (revoked or
+/// expired refresh token) maps to re-auth; everything else is
+/// transient (network, config, keyring).
+async fn refresh_oauth(
+    account: &AccountConfig,
+    keystore: &Arc<dyn KeyStore>,
+    token_poster: &Arc<dyn TokenPoster>,
+) -> Result<tokens::TokenSnapshot, RefreshError> {
+    let provider = match account.provider.as_str() {
+        "gmail" => Provider::Google,
+        "outlook" => Provider::Microsoft,
+        // oauth2 on a generic imap account is a configuration error.
+        _ => return Err(RefreshError::Reauth),
+    };
+    let client_id = providers::client_id(provider).map_err(|_| RefreshError::Reauth)?;
+    let stale = tokens::load(keystore.as_ref(), account.id)
+        .ok()
+        .flatten()
+        .ok_or(RefreshError::Reauth)?;
+    let refreshed = grant::refresh(
+        token_poster.as_ref(),
+        provider,
+        &stale.refresh_token,
+        &client_id,
+        now_unix(),
+    )
+    .await
+    .map_err(|err| match err {
+        OAuthError::InvalidGrant(_) => RefreshError::Reauth,
+        other => RefreshError::Transient(other.to_string()),
+    })?;
+    tokens::save(keystore.as_ref(), account.id, &refreshed)
+        .map_err(|err| RefreshError::Transient(err.to_string()))?;
+    Ok(refreshed)
+}
+
 /// Spawns the sync actor for one account. The task connects,
 /// authenticates, runs the initial sync once, then serves commands;
 /// every state change publishes an `account_status` event.
@@ -75,6 +132,7 @@ pub fn spawn_actor(
     keystore: Arc<dyn KeyStore>,
     writer: Arc<WriterActor>,
     bus: Arc<EventBus>,
+    token_poster: Arc<dyn TokenPoster>,
 ) -> SyncHandle {
     let (tx, mut rx) = mpsc::channel(16);
     let state = Arc::new(Mutex::new(SyncState::Disconnected));
@@ -101,13 +159,26 @@ pub fn spawn_actor(
 
         set_state(SyncState::Authenticating);
         let mut session = if account.auth_type == "oauth2" {
-            let auth = match tokens::load(keystore.as_ref(), account.id) {
+            let mut auth = match tokens::load(keystore.as_ref(), account.id) {
                 Ok(Some(snapshot)) => snapshot,
                 _ => {
                     set_state(SyncState::ReauthRequired);
                     return;
                 }
             };
+            if !auth.is_fresh(now_unix()) {
+                auth = match refresh_oauth(&account, &keystore, &token_poster).await {
+                    Ok(snapshot) => snapshot,
+                    Err(RefreshError::Reauth) => {
+                        set_state(SyncState::ReauthRequired);
+                        return;
+                    }
+                    Err(RefreshError::Transient(detail)) => {
+                        set_state(SyncState::Backoff(detail));
+                        return;
+                    }
+                };
+            }
             match login_xoauth2(client, &account.email, &auth.access_token).await {
                 Ok(session) => session,
                 Err(err) => {
@@ -165,14 +236,14 @@ mod tests {
     use crate::infra::imap::testing::spawn_fake;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn seeded_db(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    fn seeded_db(dir: &tempfile::TempDir, auth_type: &str, provider: &str) -> std::path::PathBuf {
         let path = dir.path().join(crate::infra::db::DB_FILE_NAME);
         let mut conn = crate::infra::db::open_rw(&path).expect("open");
         crate::infra::db::migrations::run(&mut conn).expect("migrate");
         conn.execute(
             "INSERT INTO accounts(id, display_name, email, provider, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, auth_type, created_at)
-             VALUES (1, 'Seed', 'seed@example.com', 'imap', '127.0.0.1', 143, 'plaintext', 'smtp.example.com', 465, 'tls', 'password', 0)",
-            [],
+             VALUES (1, 'Seed', 'seed@example.com', ?1, '127.0.0.1', 143, 'plaintext', 'smtp.example.com', 465, 'tls', ?2, 0)",
+            [provider, auth_type],
         )
         .expect("seed account");
         drop(conn);
@@ -198,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn actor_connects_syncs_and_serves_commands() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = seeded_db(&dir);
+        let db_path = seeded_db(&dir, "password", "imap");
         let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
 
         let fetches = std::sync::Arc::new(AtomicUsize::new(0));
@@ -251,10 +322,12 @@ mod tests {
                 imap_port: port,
                 imap_security: crate::domain::accounts::Security::Plaintext,
                 auth_type: "password".into(),
+                provider: "imap".into(),
             },
             std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
             std::sync::Arc::clone(&writer),
             std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
         );
 
         wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
@@ -291,5 +364,114 @@ mod tests {
             statuses.iter().any(|e| e.data["state"] == "stopped"),
             "a stopped status must be published"
         );
+    }
+
+    /// A token-endpoint fake that hands out a fresh access token.
+    struct RefreshPoster;
+
+    impl crate::infra::oauth::grant::TokenPoster for RefreshPoster {
+        fn post<'a>(
+            &'a self,
+            _token_url: &'a str,
+            _form: &'a [(&'a str, &'a str)],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::infra::oauth::grant::TokenResponse,
+                            crate::infra::oauth::OAuthError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                Ok(crate::infra::oauth::grant::TokenResponse {
+                    access_token: "at-refreshed".into(),
+                    refresh_token: Some("rt-2".into()),
+                    expires_in: 3600,
+                    scope: None,
+                    id_token: None,
+                })
+            })
+        }
+    }
+
+    /// An oauth2 account with a stale snapshot refreshes before login
+    /// and the refreshed token lands back in the keyring.
+    #[tokio::test]
+    async fn oauth2_actor_refreshes_stale_tokens_before_login() {
+        let guard = crate::infra::oauth::providers::ENV_LOCK.lock().await;
+        // SAFETY: serialized by ENV_LOCK; no concurrent readers of this
+        // key in this test process.
+        unsafe { std::env::set_var("MAILSLATE_GOOGLE_CLIENT_ID", "google-app-id") };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "oauth2", "gmail");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = spawn_fake(|tag: &str, command: &str| {
+            if command.starts_with("AUTHENTICATE") {
+                vec!["+ ".to_string()]
+            } else if command.starts_with("LIST") {
+                vec![
+                    "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                    format!("{tag} OK list done"),
+                ]
+            } else if command.starts_with("SELECT") {
+                vec!["* 0 EXISTS".to_string(), format!("{tag} OK select done")]
+            } else if command.starts_with("UID FETCH") {
+                vec![format!("{tag} OK fetch done")]
+            } else {
+                vec![format!("{tag} OK")]
+            }
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        crate::infra::oauth::tokens::save(
+            keystore.as_ref(),
+            1,
+            &crate::infra::oauth::tokens::TokenSnapshot {
+                access_token: "stale-token".into(),
+                refresh_token: "rt-1".into(),
+                expires_at: 1, // long expired
+                scopes: String::new(),
+            },
+        )
+        .expect("stage stale snapshot");
+
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+        let handle = spawn_actor(
+            AccountConfig {
+                id: 1,
+                email: "me@gmail.com".into(),
+                imap_host: "127.0.0.1".into(),
+                imap_port: port,
+                imap_security: crate::domain::accounts::Security::Plaintext,
+                auth_type: "oauth2".into(),
+                provider: "gmail".into(),
+            },
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
+
+        let refreshed = crate::infra::oauth::tokens::load(keystore.as_ref(), 1)
+            .expect("load refreshed")
+            .expect("snapshot present");
+        assert_eq!(refreshed.access_token, "at-refreshed");
+        assert_eq!(refreshed.refresh_token, "rt-2");
+        assert!(refreshed.expires_at > 1, "expiry must move forward");
+
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("MAILSLATE_GOOGLE_CLIENT_ID") };
+        drop(guard);
     }
 }
