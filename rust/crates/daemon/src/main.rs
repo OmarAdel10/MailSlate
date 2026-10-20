@@ -69,6 +69,10 @@ fn run() -> Result<(), ServerError> {
     let mut conn = db::open_rw(&db_path)?;
     let schema = db::migrations::run(&mut conn)?;
     db::assert_fts5()?;
+    // Resume the account id counter before any request can create
+    // an account: a fresh process would otherwise start handing out
+    // ids that collide with rows from the previous run.
+    mailslate_core::domain::accounts::resume_next_id(&conn)?;
     drop(conn); // the writer actor owns the rw connection from here on
     tracing::info!(schema, "database ready");
 

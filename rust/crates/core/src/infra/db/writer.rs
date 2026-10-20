@@ -217,7 +217,7 @@ impl WriterActor {
         sender
             .send(WriteOp::Flush(ack))
             .expect("writer thread alive");
-        rx.recv_timeout(Duration::from_secs(5))
+        rx.recv_timeout(Duration::from_secs(30))
             .expect("writer acks its batches");
     }
 }

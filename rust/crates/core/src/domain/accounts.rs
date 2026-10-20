@@ -4,6 +4,8 @@
 //! secrets never touch the database — they go to the OS keyring
 //! through [`KeyStore`] under the `account:{id}:*` key scheme.
 
+use rusqlite::OptionalExtension;
+
 use crate::infra::db::writer::{WriteOp, WriterActor};
 use crate::infra::keyring::{KeyStore, KeyStoreError, imap_password_key, oauth_key};
 use crate::infra::oauth::tokens;
@@ -185,6 +187,32 @@ fn next_account_id(writer: &WriterActor) -> Result<i64, AccountError> {
 
 use std::sync::atomic::{AtomicI64, Ordering};
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
+
+/// Resumes the process-local id counter after a restart. The daemon
+/// calls this once at startup, before serving any request: the
+/// counter would otherwise start back at 1 and the first new
+/// account would collide with the previous process's rows (PK
+/// panic) and overwrite its keyring secrets.
+///
+/// Prefers the persisted `accounts.next_id` counter; falls back to
+/// one past the highest stored account id (covers stores written
+/// before the counter existed).
+pub fn resume_next_id(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    let stored: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'accounts.next_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|raw| raw.parse().ok());
+    let highest: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM accounts", [], |row| {
+        row.get(0)
+    })?;
+    let resumed = stored.unwrap_or(highest + 1).max(1);
+    NEXT_ID.store(resumed, Ordering::Relaxed);
+    Ok(())
+}
 
 /// A read-side summary of one stored account.
 #[derive(Debug, Clone, PartialEq)]
@@ -638,5 +666,90 @@ mod tests {
         assert_eq!(connections[0].imap_security, Security::StartTls);
         assert_eq!(connections[0].auth_type, "password");
         assert_eq!(connections[0].provider, "imap");
+    }
+
+    /// `resume_next_id` seeds the process-global counter, so tests
+    /// that store and read it must not interleave.
+    static NEXT_ID_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn draft() -> ImapAccountDraft {
+        ImapAccountDraft {
+            display_name: "Work".into(),
+            email: "user@example.com".into(),
+            imap_host: "imap.example.com".into(),
+            imap_port: 993,
+            imap_security: Security::Tls,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 465,
+            smtp_security: Security::Tls,
+            auth: AuthKind::Password,
+        }
+    }
+
+    /// A restart resumes the persisted counter: the first id handed
+    /// out after `resume_next_id` must never collide with rows or
+    /// keyring entries written by the previous process (QA: id reuse
+    /// overwrites the account:1 secret and panics the PK insert).
+    #[test]
+    fn resume_next_id_continues_the_persisted_counter() {
+        let _guard = NEXT_ID_LOCK.lock().expect("next id lock");
+        let (_dir, path) = seeded_db();
+        let conn = crate::infra::db::open_rw(&path).expect("open seed db");
+        conn.execute(
+            "INSERT INTO accounts(
+                id, display_name, email, provider,
+                imap_host, imap_port, imap_security,
+                smtp_host, smtp_port, smtp_security, auth_type, created_at
+             ) VALUES (1, 'Work', 'user@example.com', 'imap',
+                       'imap.example.com', 993, 'tls',
+                       'smtp.example.com', 465, 'tls', 'password', 0)",
+            [],
+        )
+        .expect("seed account row");
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES ('accounts.next_id', '5')",
+            [],
+        )
+        .expect("seed counter");
+        drop(conn);
+
+        resume_next_id(&crate::infra::db::open_readonly(&path).expect("reopen"))
+            .expect("resume counter");
+
+        let keystore = FakeKeyStore::new();
+        let writer = WriterActor::spawn(&path);
+        let account_id =
+            add_imap_account(&keystore, &writer, &draft(), "secret-pw").expect("add account");
+        assert_eq!(account_id, 5);
+    }
+
+    /// Without the meta counter (e.g. a store written by an older
+    /// build), the counter falls back to one past the highest row.
+    #[test]
+    fn resume_next_id_falls_back_to_the_highest_row() {
+        let _guard = NEXT_ID_LOCK.lock().expect("next id lock");
+        let (_dir, path) = seeded_db();
+        let conn = crate::infra::db::open_rw(&path).expect("open seed db");
+        conn.execute(
+            "INSERT INTO accounts(
+                id, display_name, email, provider,
+                imap_host, imap_port, imap_security,
+                smtp_host, smtp_port, smtp_security, auth_type, created_at
+             ) VALUES (3, 'Work', 'user@example.com', 'imap',
+                       'imap.example.com', 993, 'tls',
+                       'smtp.example.com', 465, 'tls', 'password', 0)",
+            [],
+        )
+        .expect("seed account row");
+        drop(conn);
+
+        resume_next_id(&crate::infra::db::open_readonly(&path).expect("reopen"))
+            .expect("resume counter");
+
+        let keystore = FakeKeyStore::new();
+        let writer = WriterActor::spawn(&path);
+        let account_id =
+            add_imap_account(&keystore, &writer, &draft(), "secret-pw").expect("add account");
+        assert_eq!(account_id, 4);
     }
 }
