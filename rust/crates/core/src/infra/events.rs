@@ -101,14 +101,39 @@ async fn connect_event_connection(socket: &Path) -> Result<UnixStream, BridgeErr
 ///
 /// Returns `true` when the receiver is dropped (the whole loop ends)
 /// and `false` when the connection dies (the caller reconnects).
+///
+/// A dedicated reader task owns the read half so no select arm can
+/// cancel a partial frame: dropping an in-flight read future would
+/// lose the bytes it already consumed and desync the stream. The read
+/// deadline (`2 × heartbeat`) recycles a connection whose daemon went
+/// silent mid-air — heartbeats prove the loop can still write, but
+/// only inbound traffic proves the daemon is still serving us.
 async fn event_connection_loop(
-    mut stream: UnixStream,
+    stream: UnixStream,
     options: &EventStreamOptions,
     sender: &mpsc::Sender<Event>,
 ) -> bool {
+    let (mut read_half, mut write_half) = stream.into_split();
+    let (frame_tx, mut frame_rx) = mpsc::channel::<Value>(8);
+    tokio::spawn(async move {
+        loop {
+            match read_json_frame_async::<_, Value>(&mut read_half).await {
+                Ok(frame) => {
+                    if frame_tx.send(frame).await.is_err() {
+                        return; // loop gone; nothing left to read for
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+    });
+
+    let read_budget = options.heartbeat.saturating_mul(2);
     let mut heartbeat = tokio::time::interval(options.heartbeat);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let _ = heartbeat.tick().await; // consume the immediate first tick
+    let read_deadline = tokio::time::sleep_until(tokio::time::Instant::now() + read_budget);
+    tokio::pin!(read_deadline);
     let mut next_id = 0u64;
     loop {
         tokio::select! {
@@ -122,15 +147,24 @@ async fn event_connection_loop(
                     method: methods::PING.to_string(),
                     params: Value::Null,
                 };
-                if write_json_frame_async(&mut stream, &request).await.is_err() {
+                if write_json_frame_async(&mut write_half, &request).await.is_err() {
                     return false;
                 }
             }
-            frame = read_json_frame_async::<_, Value>(&mut stream) => {
+            _ = &mut read_deadline => {
+                // Nothing inbound for 2 × heartbeats: the daemon hung
+                // mid-air. Reconnect — a fresh daemon may be serving by
+                // now.
+                return false;
+            }
+            frame = frame_rx.recv() => {
                 let raw = match frame {
-                    Ok(raw) => raw,
-                    Err(_) => return false,
+                    Some(raw) => raw,
+                    None => return false, // reader hit EOF or a frame error
                 };
+                read_deadline
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + read_budget);
                 if let Ok(event) = serde_json::from_value::<Event>(raw.clone()) {
                     if sender.send(event).await.is_err() {
                         return true;
@@ -407,6 +441,114 @@ mod tests {
         assert_eq!(
             second_event,
             Event::new("account_status", json!({"account": 1, "state": "idle"}))
+        );
+    }
+
+    /// A daemon that accepts the connection but then goes silent (a hung
+    /// process) must not hold the stream forever: the loop recycles the
+    /// connection after its read deadline (2 × heartbeat) and
+    /// reconnects.
+    #[tokio::test]
+    async fn a_silent_daemon_connection_is_recycled_after_the_read_deadline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = temp_socket(&dir, "silent.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+
+        let mut receiver = spawn_event_stream(
+            socket.clone(),
+            EventStreamOptions {
+                heartbeat: Duration::from_millis(30),
+                retry_initial: Duration::from_millis(10),
+                ..EventStreamOptions::default()
+            },
+        );
+        // Connection 1 is held open but never says a word. Draining the
+        // ping writes is unnecessary — they are a few kilobytes at most —
+        // but the socket must NOT be dropped (a close would recycle via
+        // EOF and prove nothing about the deadline).
+        let first = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("first accept within the timeout")
+            .expect("accept")
+            .0;
+
+        // The read deadline is 2 × 30 ms; the reconnect lands well
+        // inside the 2 s bound when the feature works.
+        let _second = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("the silent connection must be recycled and re-dialed");
+
+        drop(first);
+        receiver.close();
+    }
+
+    /// A heartbeat `ping` written while an event frame is only partially
+    /// read must not lose the consumed bytes: the completed event still
+    /// arrives on the same connection. Dropping the in-flight read
+    /// future on the heartbeat-arm win used to desync the stream.
+    #[tokio::test]
+    async fn a_partial_frame_survives_a_heartbeat_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = temp_socket(&dir, "partial.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+
+        let event = Event::new("sync_progress", json!({"done": 9, "total": 9}));
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut frame = Vec::new();
+            mailslate_protocol::write_json_frame(&mut frame, &event).expect("frame the event");
+            use tokio::io::AsyncWriteExt;
+            stream.write_all(&frame[..6]).await.expect("partial write");
+            // Wait for the heartbeat ping: proof the client wrote while
+            // its read was mid-frame.
+            let _ping: Request =
+                tokio::time::timeout(Duration::from_secs(2), read_json_frame_async(&mut stream))
+                    .await
+                    .expect("heartbeat ping must arrive")
+                    .expect("ping frame");
+            stream
+                .write_all(&frame[6..])
+                .await
+                .expect("remainder write");
+            // Keep the connection healthy afterwards so a recycle cannot
+            // masquerade as delivery: answer every request like the
+            // daemon would.
+            loop {
+                let request: Request = match read_json_frame_async(&mut stream).await {
+                    Ok(request) => request,
+                    Err(_) => return,
+                };
+                let response = Response::ok(
+                    request.id,
+                    json!({
+                        "protocol_version": PROTOCOL_VERSION,
+                        "daemon_version": "9.9.9",
+                    }),
+                );
+                if write_json_frame_async(&mut stream, &response)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+
+        let mut receiver = spawn_event_stream(
+            socket.clone(),
+            EventStreamOptions {
+                heartbeat: Duration::from_millis(10),
+                retry_initial: Duration::from_millis(10),
+                ..EventStreamOptions::default()
+            },
+        );
+        let received = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("event must survive the interleaved heartbeat")
+            .expect("stream alive");
+        assert_eq!(
+            received,
+            Event::new("sync_progress", json!({"done": 9, "total": 9}))
         );
     }
 

@@ -258,6 +258,10 @@ async fn accept_loop(
                         let events = Arc::clone(&bus);
                         let ctx = Arc::clone(&ctx);
                         tokio::spawn(async move {
+                            // Held for the task's whole life (panics
+                            // included): the slot returns to the budget
+                            // on every exit path.
+                            let _release = SlotRelease { active };
                             if let Err(err) = handle_connection(
                                 stream,
                                 shutdown,
@@ -270,7 +274,6 @@ async fn accept_loop(
                             {
                                 tracing::debug!(error = %err, "connection closed with error");
                             }
-                            active.fetch_sub(1, Ordering::Relaxed);
                         });
                     }
                     Err(err) => {
@@ -286,7 +289,7 @@ async fn accept_loop(
 
 #[cfg(unix)]
 async fn handle_connection(
-    mut stream: tokio::net::UnixStream,
+    stream: tokio::net::UnixStream,
     shutdown: Arc<tokio::sync::Notify>,
     events: Arc<EventBus>,
     ctx: Arc<DispatchCtx>,
@@ -295,6 +298,43 @@ async fn handle_connection(
 ) -> Result<(), ConnError> {
     check_peer_uid(&stream)?;
     let mut event_feed = events.subscribe();
+    let (mut read_half, mut write_half) = stream.into_split();
+
+    // A dedicated reader task owns the read half so no select arm can
+    // cancel a partial frame: dropping an in-flight read future would
+    // lose the bytes it already consumed and desync the stream. The
+    // reader delivers complete frames — or its terminal outcome — over
+    // a channel; writes stay in this task.
+    let (frame_tx, mut frame_rx) =
+        tokio::sync::mpsc::channel::<Result<serde_json::Value, ReaderExit>>(1);
+    tokio::spawn(async move {
+        loop {
+            let frame = match tokio::time::timeout(
+                read_timeout,
+                read_json_frame_async::<_, serde_json::Value>(&mut read_half),
+            )
+            .await
+            {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(FrameError::Io(err))) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    let _ = frame_tx.send(Err(ReaderExit::Disconnected)).await;
+                    return;
+                }
+                Ok(Err(err)) => {
+                    let _ = frame_tx.send(Err(ReaderExit::Corrupt(err))).await;
+                    return;
+                }
+                Err(_) => {
+                    let _ = frame_tx.send(Err(ReaderExit::Idle)).await;
+                    return;
+                }
+            };
+            if frame_tx.send(Ok(frame)).await.is_err() {
+                return; // handler gone; nothing left to read for
+            }
+        }
+    });
+
     loop {
         tokio::select! {
             // An unsolicited event from the daemon-internal bus goes out
@@ -305,7 +345,7 @@ async fn handle_connection(
                     Ok(event) => {
                         tokio::time::timeout(
                             write_timeout,
-                            write_json_frame_async(&mut stream, &event),
+                            write_json_frame_async(&mut write_half, &event),
                         )
                         .await
                         .map_err(|_| ConnError::Stalled(write_timeout))?
@@ -323,48 +363,74 @@ async fn handle_connection(
                     }
                 }
             }
-            request_reply = async {
-                let request: Request =
-                    match tokio::time::timeout(read_timeout, read_json_frame_async(&mut stream)).await {
-                        Ok(Ok(request)) => request,
-                        Ok(Err(FrameError::Io(err)))
-                            if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-                        {
-                            return Ok(None); // client disconnected
-                        }
-                        Ok(Err(err)) => return Err(ConnError::Frame(err)),
-                        Err(_) => return Err(ConnError::Idle(read_timeout)),
-                    };
+            frame = frame_rx.recv() => {
+                let raw = match frame {
+                    Some(Ok(frame)) => frame,
+                    Some(Err(ReaderExit::Idle)) => return Err(ConnError::Idle(read_timeout)),
+                    Some(Err(ReaderExit::Disconnected)) => return Ok(()),
+                    Some(Err(ReaderExit::Corrupt(err))) => return Err(ConnError::Frame(err)),
+                    None => return Ok(()),
+                };
+                let request: Request = serde_json::from_value(raw)
+                    .map_err(|err| ConnError::Frame(FrameError::Json(err)))?;
                 let (response, stop) =
                     match dispatch::dispatch(&ctx, &request.method, &request.params) {
                     Ok(Dispatched::Reply(value)) => (Response::ok(request.id, value), false),
                     Ok(Dispatched::Stop(value)) => (Response::ok(request.id, value), true),
                     Err(err) => (Response::err(request.id, err), false),
                 };
-                Ok(Some((response, stop)))
-            } => {
-                let maybe_exchange = request_reply?;
-                match maybe_exchange {
-                    Some((response, stop)) => {
-                        match tokio::time::timeout(
-                            write_timeout,
-                            write_json_frame_async(&mut stream, &response),
-                        )
-                        .await
-                        {
-                            Ok(Ok(())) => {}
-                            Ok(Err(err)) => return Err(ConnError::Frame(err)),
-                            Err(_) => return Err(ConnError::Stalled(write_timeout)),
-                        }
-                        if stop {
-                            shutdown.notify_one();
-                            return Ok(());
-                        }
-                    }
-                    None => return Ok(()),
+                match tokio::time::timeout(
+                    write_timeout,
+                    write_json_frame_async(&mut write_half, &response),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => return Err(ConnError::Frame(err)),
+                    Err(_) => return Err(ConnError::Stalled(write_timeout)),
+                }
+                if stop {
+                    shutdown.notify_one();
+                    return Ok(());
                 }
             }
         }
+    }
+}
+
+/// Why the connection's reader task stopped.
+///
+/// The reader owns the read half; it reports its terminal outcome over
+/// the frame channel so the connection handler can surface the right
+/// [`ConnError`] (idle drop vs. protocol violation vs. clean EOF).
+#[cfg(unix)]
+#[derive(Debug)]
+enum ReaderExit {
+    /// The peer sent nothing within the read budget.
+    Idle,
+    /// The peer closed its side.
+    Disconnected,
+    /// The peer's bytes failed the frame codec.
+    Corrupt(FrameError),
+}
+
+/// Releases one connection-budget slot when dropped.
+///
+/// A spawned connection task that panics must not leak its slot: an
+/// unwinding task drops its locals, so the guard decrements the counter
+/// even then. A leaked slot would permanently shrink
+/// [`MAX_CONNECTIONS`].
+#[cfg(unix)]
+struct SlotRelease {
+    /// The shared counter this guard releases.
+    active: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(unix)]
+impl Drop for SlotRelease {
+    fn drop(&mut self) {
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -566,6 +632,83 @@ mod tests {
         let (first, second) = (a.recv().await.unwrap(), b.recv().await.unwrap());
         assert_eq!(first.event, "mail_new");
         assert_eq!(second.event, "mail_new");
+    }
+
+    /// An event frame delivered while a request frame is only partially
+    /// read must not lose the consumed bytes: the request still gets its
+    /// reply afterwards. Dropping the in-flight read future on the
+    /// event-arm win used to desync the stream (ARCHITECTURE.md §5.4:
+    /// events are delivered "before the next request", never instead of
+    /// it).
+    #[tokio::test]
+    async fn event_during_a_partial_request_frame_does_not_desync() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, server) = tokio::net::UnixStream::pair().expect("socket pair");
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let bus = EventBus::new();
+
+        tokio::spawn(handle_connection(
+            server,
+            shutdown,
+            Arc::clone(&bus),
+            test_ctx(),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        ));
+
+        // Half a ping request frame: the 4-byte length header plus the
+        // first payload bytes. The server's read side consumes these
+        // into its pending read before anything interrupts it.
+        let mut frame = Vec::new();
+        mailslate_protocol::write_json_frame(&mut frame, &Request::new(1, "ping"))
+            .expect("frame the request");
+        client.write_all(&frame[..6]).await.expect("partial write");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // An event published while the request is incomplete wins the
+        // select and must reach the client...
+        bus.publish(Event::new("sync_progress", serde_json::json!({"p": 1})));
+        let event: serde_json::Value =
+            tokio::time::timeout(Duration::from_secs(2), read_json_frame_async(&mut client))
+                .await
+                .expect("event must arrive")
+                .expect("event frame");
+        assert_eq!(event["event"], "sync_progress");
+
+        // ...and completing the request must still produce the reply
+        // for request id 1, not a dropped or garbled connection.
+        client.write_all(&frame[6..]).await.expect("remainder");
+        let reply: serde_json::Value =
+            tokio::time::timeout(Duration::from_secs(2), read_json_frame_async(&mut client))
+                .await
+                .expect("reply must survive the interleaved event")
+                .expect("reply frame");
+        assert_eq!(reply["id"], 1, "reply must answer the interrupted request");
+        assert_eq!(reply["ok"], true, "ping must have been dispatched");
+    }
+
+    /// The slot-release guard returns the connection slot on drop, so a
+    /// panicking connection task cannot leak budget (an unwind drops
+    /// the guard the same way a normal return does).
+    #[test]
+    fn slot_release_guard_returns_the_slot_on_drop() {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(3));
+        {
+            let _release = SlotRelease {
+                active: Arc::clone(&active),
+            };
+            assert_eq!(
+                active.load(std::sync::atomic::Ordering::Relaxed),
+                3,
+                "the guard itself must not change the count"
+            );
+        }
+        assert_eq!(
+            active.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "dropping the guard must release the slot"
+        );
     }
 
     /// Events published before a client subscribes are not delivered —
