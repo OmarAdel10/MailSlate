@@ -5,7 +5,7 @@
 
 use mailslate_core::domain::accounts::{
     AccountPatch, AuthKind, ImapAccountDraft, PENDING_ACCOUNT_ID, Security, add_imap_account,
-    add_oauth_account, get_accounts, remove_account, update_account,
+    add_oauth_account, get_account_connections, get_accounts, remove_account, update_account,
 };
 use mailslate_core::infra::db::pool::ReadPool;
 use mailslate_core::infra::db::writer::WriterActor;
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mailslate_core::domain::events::EventBus;
-use mailslate_core::domain::sync::actor::SyncHandle;
+use mailslate_core::domain::sync::actor::{AccountConfig, SyncHandle, spawn_actor};
 
 /// What the connection handler should do after replying.
 #[derive(Debug)]
@@ -122,11 +122,13 @@ fn conn_and_password(params: &Value) -> Result<(ImapAccountDraft, String), Bridg
 }
 
 /// Parses and applies `add_imap_account`, persisting the row and the
-/// secret before replying.
+/// secret before replying, then starts its sync actor so the initial
+/// sync begins immediately (USER_FLOW §3 step 7).
 fn add_imap_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
     let (draft, password) = conn_and_password(params)?;
     let account_id = add_imap_account(ctx.keystore.as_ref(), &ctx.writer, &draft, &password)
         .map_err(account_error)?;
+    ensure_sync_actor(ctx, account_id)?;
     Ok(json!({ "account_id": account_id }))
 }
 
@@ -165,10 +167,20 @@ fn probe_step(step: Result<(), ProbeError>) -> Value {
     }
 }
 
-/// Parses and applies `remove_account`, scrubbing the keyring first.
+/// Parses and applies `remove_account`, scrubbing the keyring first and
+/// stopping the account's sync actor so no stale task keeps writing
+/// rows for a deleted account.
 fn remove_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
     let account_id = account_id(params)?;
     remove_account(ctx.keystore.as_ref(), &ctx.writer, account_id).map_err(account_error)?;
+    if let Some(handle) = ctx
+        .sync
+        .lock()
+        .expect("sync handle lock")
+        .remove(&account_id)
+    {
+        handle.try_shutdown();
+    }
     Ok(json!({ "ok": true }))
 }
 
@@ -355,12 +367,61 @@ fn complete_oauth_account_dispatch(
         &staged,
     )
     .map_err(account_error)?;
+    ensure_sync_actor(ctx, account_id)?;
     Ok(json!({ "account_id": account_id }))
 }
 
 /// Maps an OAuth failure onto the wire error vocabulary.
 fn oauth_error(err: OAuthError) -> BridgeError {
     BridgeError::new(ErrorKind::Internal, err.to_string())
+}
+
+/// Spawns the sync actor for `account_id` unless one already runs.
+///
+/// main.rs only spawns actors for accounts that exist at startup, so
+/// every path that creates an account must call this to cover accounts
+/// added while the daemon is already serving. Idempotent: a second call
+/// for a live actor returns without touching it.
+fn ensure_sync_actor(ctx: &DispatchCtx, account_id: i64) -> Result<(), BridgeError> {
+    if ctx
+        .sync
+        .lock()
+        .expect("sync handle lock")
+        .contains_key(&account_id)
+    {
+        return Ok(());
+    }
+    let conn = ctx
+        .reader
+        .acquire()
+        .map_err(|err| BridgeError::new(ErrorKind::Internal, err.to_string()))?;
+    let account = get_account_connections(&conn)
+        .map_err(|err| BridgeError::new(ErrorKind::Internal, err.to_string()))?
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| {
+            BridgeError::new(ErrorKind::NotFound, format!("no account row {account_id}"))
+        })?;
+    let handle = spawn_actor(
+        AccountConfig {
+            id: account.id,
+            email: account.email,
+            imap_host: account.imap_host,
+            imap_port: account.imap_port,
+            imap_security: account.imap_security,
+            auth_type: account.auth_type,
+            provider: account.provider,
+        },
+        Arc::clone(&ctx.keystore),
+        Arc::clone(&ctx.writer),
+        Arc::clone(&ctx.bus),
+        Arc::clone(&ctx.token_poster),
+    );
+    ctx.sync
+        .lock()
+        .expect("sync handle lock")
+        .insert(account_id, handle);
+    Ok(())
 }
 
 /// Forwards a `sync_now` to the account's actor.
@@ -531,8 +592,11 @@ mod tests {
         assert!(err.message.contains("nope"));
     }
 
-    #[test]
-    fn add_imap_account_dispatch_creates_row_and_secret() {
+    // Multi-thread runtime: add_imap_account now spawns the sync actor,
+    // and tokio::spawn needs a runtime context (production dispatch
+    // always runs inside a server connection task).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_imap_account_dispatch_creates_row_and_secret() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(&dir);
         let Dispatched::Reply(value) =
@@ -561,8 +625,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn remove_account_dispatch_scrubs_secrets_and_row() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remove_account_dispatch_scrubs_secrets_and_row() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(&dir);
         let Dispatched::Reply(added) =
@@ -600,8 +664,8 @@ mod tests {
         assert_eq!(listing["accounts"].as_array().unwrap().len(), 0);
     }
 
-    #[test]
-    fn update_account_dispatch_applies_patch() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_account_dispatch_applies_patch() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(&dir);
         let Dispatched::Reply(added) =
@@ -630,8 +694,8 @@ mod tests {
         assert_eq!(account["sync_window_days"], json!(90));
     }
 
-    #[test]
-    fn get_accounts_dispatch_lists_rows() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_accounts_dispatch_lists_rows() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx(&dir);
         dispatch(&ctx, methods::ADD_IMAP_ACCOUNT, &add_params()).unwrap();
@@ -843,8 +907,8 @@ mod tests {
         assert!(failed.data["reason"].is_string());
     }
 
-    #[test]
-    fn complete_oauth_account_creates_oauth2_account() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn complete_oauth_account_creates_oauth2_account() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = test_ctx_with(&dir, Duration::from_secs(5));
 
@@ -1072,6 +1136,86 @@ mod tests {
             params["conn"]["security"] = json!("carrier-pigeon");
             let err = dispatch(&ctx, methods::TEST_CONNECTION, &params).unwrap_err();
             assert_eq!(err.kind, ErrorKind::Validation);
+        }
+    }
+
+    mod spawn_on_add {
+        use super::*;
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn add_imap_account_spawns_a_sync_actor() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let Dispatched::Reply(value) =
+                dispatch(&ctx, methods::ADD_IMAP_ACCOUNT, &add_params()).unwrap()
+            else {
+                panic!("add_imap_account must reply");
+            };
+            let account_id = value["account_id"].as_i64().expect("account_id");
+            assert!(
+                ctx.sync
+                    .lock()
+                    .expect("sync handle lock")
+                    .contains_key(&account_id),
+                "adding an account must spawn its sync actor"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn ensure_sync_actor_is_idempotent() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let Dispatched::Reply(value) =
+                dispatch(&ctx, methods::ADD_IMAP_ACCOUNT, &add_params()).unwrap()
+            else {
+                panic!("add_imap_account must reply");
+            };
+            let account_id = value["account_id"].as_i64().expect("account_id");
+            ensure_sync_actor(&ctx, account_id).unwrap();
+            ensure_sync_actor(&ctx, account_id).unwrap();
+            assert_eq!(ctx.sync.lock().expect("sync handle lock").len(), 1);
+        }
+
+        #[test]
+        fn ensure_sync_actor_reports_missing_rows() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = ensure_sync_actor(&ctx, 999).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::NotFound);
+            assert!(err.message.contains("999"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn remove_account_stops_the_sync_actor() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let Dispatched::Reply(added) =
+                dispatch(&ctx, methods::ADD_IMAP_ACCOUNT, &add_params()).unwrap()
+            else {
+                panic!("add_imap_account must reply");
+            };
+            let account_id = added["account_id"].as_i64().expect("account_id");
+            assert!(
+                ctx.sync
+                    .lock()
+                    .expect("sync handle lock")
+                    .contains_key(&account_id)
+            );
+
+            dispatch(
+                &ctx,
+                methods::REMOVE_ACCOUNT,
+                &json!({ "account_id": account_id }),
+            )
+            .unwrap();
+
+            assert!(
+                !ctx.sync
+                    .lock()
+                    .expect("sync handle lock")
+                    .contains_key(&account_id),
+                "removing an account must stop its sync actor"
+            );
         }
     }
 }
