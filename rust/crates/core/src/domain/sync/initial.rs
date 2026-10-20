@@ -63,6 +63,10 @@ const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// legitimately take minutes (PRD: 5k messages < 5 min on broadband).
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// How many UIDs one `UID FETCH` request may cover — keeps any single
+/// request bounded so a huge mailbox never blocks one request (QA#13).
+const FETCH_CHUNK: u32 = 500;
+
 /// Runs one protocol step under a deadline, mapping an elapsed timeout
 /// to a protocol error so the actor's backoff handles it like any
 /// other transient failure.
@@ -125,11 +129,24 @@ pub(crate) async fn initial_sync(
             highest_modseq: selected.highest_modseq,
         });
 
-        let rows = timed(
-            "envelope fetch",
-            FETCH_TIMEOUT,
-            fetch_envelope_chunk(session, "1:*"),
-        )
+        let rows = timed("envelope fetch", FETCH_TIMEOUT, async {
+            let mut all = Vec::new();
+            let max_uid = selected.uid_next.map(|n| n.saturating_sub(1)).unwrap_or(0);
+            if max_uid >= 1 {
+                // Chunked UID ranges: every chunk is its own bounded
+                // FETCH; a giant mailbox never stalls one request.
+                for start in (1..=max_uid).step_by(FETCH_CHUNK as usize) {
+                    let end = (start + FETCH_CHUNK - 1).min(max_uid);
+                    let chunk = fetch_envelope_chunk(session, &format!("{start}:{end}")).await?;
+                    all.extend(chunk);
+                }
+            } else {
+                // uid_next unavailable: one full-range fetch, the
+                // pre-chunking behavior.
+                all = fetch_envelope_chunk(session, "1:*").await?;
+            }
+            Ok(all)
+        })
         .await?;
         let now = now_unix();
         for row in rows {
@@ -370,5 +387,88 @@ mod tests {
             "expected an INBOX sync_progress event, got {progress:?}"
         );
         assert!(progress.iter().any(|e| e.data["mailbox"] == "Sent"));
+    }
+
+    #[tokio::test]
+    async fn envelope_fetch_is_chunked_at_500_uids() {
+        use std::sync::{Arc, Mutex};
+        let fetched: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let fetched_clone = Arc::clone(&fetched);
+        let call_count: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let count_clone = Arc::clone(&call_count);
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir);
+        let writer = crate::infra::db::writer::WriterActor::spawn(&db_path);
+
+        let port = spawn_fake(move |tag: &str, command: &str| {
+            if command.starts_with("LOGIN") {
+                vec![format!("{tag} OK logged in")]
+            } else if command.starts_with("LIST") {
+                vec![
+                    "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                    format!("{tag} OK list done"),
+                ]
+            } else if command.starts_with("SELECT") {
+                vec![
+                    "* 1200 EXISTS".to_string(),
+                    "* OK [UIDVALIDITY 10] UIDs valid".to_string(),
+                    "* OK [UIDNEXT 1201] Predicted".to_string(),
+                    format!("{tag} OK select done"),
+                ]
+            } else if command.starts_with("UID FETCH") {
+                let set = command
+                    .strip_prefix("UID FETCH ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .unwrap_or("?");
+                fetched_clone.lock().unwrap().push(set.to_string());
+                let call = *count_clone.lock().unwrap();
+                *count_clone.lock().unwrap() = call + 1;
+                let mut rows = (1..=2)
+                    .map(|uid| {
+                        fetch_line(
+                            uid,
+                            false,
+                            100,
+                            &format!("c{call}-{uid}@x"),
+                            "S",
+                            &format!("<c{call}-{uid}>"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                rows.push(format!("{tag} OK fetch done"));
+                rows
+            } else {
+                vec![format!("{tag} OK")]
+            }
+        })
+        .await;
+
+        let mut session = fake_session(port).await;
+        let bus = crate::domain::events::EventBus::new();
+        initial_sync(&mut session, &writer, &bus, 1)
+            .await
+            .expect("initial sync");
+        writer.flush();
+
+        let sets = fetched.lock().unwrap().clone();
+        assert_eq!(
+            sets,
+            vec!["1:500", "501:1000", "1001:1200"],
+            "expected three 500-UID chunks plus a trailing partial chunk, got {sets:?}"
+        );
+
+        let conn = crate::infra::db::open_readonly(&db_path).expect("readonly");
+        let messages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE account_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            messages, 6,
+            "2 rows per chunk x 3 chunks, all distinct message ids"
+        );
+        drop(conn);
     }
 }
