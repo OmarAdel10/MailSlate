@@ -328,7 +328,7 @@ fn daemon_unavailable(message: String) -> BridgeError {
 /// socket could be planted in a writable directory to hijack this
 /// session. Mirrors the server side of the same check: both ends of
 /// a connection must see a peer running as the effective user.
-fn check_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), BridgeError> {
+pub(crate) fn check_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), BridgeError> {
     let cred = stream
         .peer_cred()
         .map_err(|err| daemon_unavailable(format!("could not read peer credentials: {err}")))?;

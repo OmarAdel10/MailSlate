@@ -5,6 +5,8 @@
 //! `db` and `keyring` touch the outside world.
 
 pub mod db;
+#[cfg(unix)]
+pub mod events;
 pub mod imap;
 #[cfg(unix)]
 pub mod ipc;
