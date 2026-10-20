@@ -82,4 +82,34 @@ void main() {
     expect(subscriptions, 2);
     expect(active!.hasListener, isFalse);
   });
+
+  test(
+    'a failing source dial does not crash the listener and retries',
+    () async {
+      var calls = 0;
+      final client = FakeFfiClient()
+        ..eventStream = () {
+          calls += 1;
+          if (calls == 1) {
+            // The bridge can miss its dylib at first boot; the dial throws
+            // before a subscription exists.
+            throw StateError('bridge not ready');
+          }
+          return Stream.value(const AppEvent.other(name: 'late'));
+        };
+      final broadcast = appEventStream(client);
+
+      // The first dial fails: the broadcast stream must swallow the throw
+      // instead of crashing the listener that dialed it.
+      final first = broadcast.listen(null);
+      await Future<void>.delayed(Duration.zero);
+      await first.cancel();
+      await Future<void>.delayed(Duration.zero);
+
+      final events = await broadcast.toList();
+
+      expect(calls, 2);
+      expect(events, const [AppEvent.other(name: 'late')]);
+    },
+  );
 }

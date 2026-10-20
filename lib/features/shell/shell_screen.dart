@@ -6,6 +6,7 @@ import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/core/logging/daemon_log.dart';
 import 'package:mailslate/core/logging/log_opener.dart';
 import 'package:mailslate/core/theme/tokens.dart';
+import 'package:mailslate/features/accounts/wizard/account_wizard_screen.dart';
 
 import 'daemon_status_bloc.dart';
 
@@ -137,6 +138,17 @@ class _Sidebar extends StatelessWidget {
               selected: view == selectedView,
               onTap: () => onSelect(view),
             ),
+          const SizedBox(height: 8),
+          _AddAccountItem(
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => AccountWizardScreen(
+                  firstAccount: false,
+                  onDone: () => Navigator.of(context).pop(),
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -183,6 +195,44 @@ class _SidebarItem extends StatelessWidget {
                   Text(view.label, style: labelStyle),
                 ],
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The `+ Add account` affordance under the mail views (USER_FLOW §12):
+/// opens the wizard in second-account mode, which skips the welcome.
+class _AddAccountItem extends StatelessWidget {
+  const _AddAccountItem({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final labelStyle = Theme.of(context).textTheme.labelMedium
+        ?.copyWith(color: tokens.muted);
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        key: const Key('sidebar-add-account'),
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        hoverColor: tokens.surfaceCard,
+        child: SizedBox(
+          height: 32,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: [
+                Icon(Symbols.add, size: 16, color: tokens.muted),
+                const SizedBox(width: 8),
+                Text('Add account', style: labelStyle),
+              ],
             ),
           ),
         ),

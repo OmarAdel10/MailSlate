@@ -10,6 +10,7 @@ import 'package:mailslate/features/shell/shell_screen.dart';
 
 import 'support/fake_ffi_client.dart';
 import 'support/fake_log_opener.dart';
+import 'support/fake_url_opener.dart';
 
 const _running = DaemonStatus(
   state: DaemonState.running,
@@ -187,5 +188,24 @@ void main() {
     expect(button.onPressed, isNull);
     expect(find.byTooltip('No log file yet'), findsOneWidget);
     expect(opener.paths, isEmpty);
+  });
+
+  testWidgets('the sidebar offers adding another account', (tester) async {
+    configureDependencies(
+      client: FakeFfiClient(status: _running),
+      urlOpener: FakeUrlOpener(),
+    );
+
+    await tester.pumpWidget(shell());
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('sidebar-add-account')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('sidebar-add-account')));
+    await tester.pumpAndSettle();
+
+    // Additional accounts skip the welcome step (USER_FLOW §3).
+    expect(find.byKey(const Key('wizard-welcome')), findsNothing);
+    expect(find.text('Connect your mail'), findsOneWidget);
   });
 }

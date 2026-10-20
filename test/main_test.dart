@@ -22,6 +22,16 @@ void main() {
           daemonVersion: '0.4.0',
           protocolVersion: 1,
         ),
+        accounts: const [
+          AccountSummary(
+            id: 1,
+            displayName: 'Work',
+            email: 'work@example.com',
+            provider: 'imap',
+            authType: 'password',
+            syncWindowDays: 30,
+          ),
+        ],
       ),
     );
 
