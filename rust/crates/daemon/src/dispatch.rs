@@ -138,19 +138,21 @@ fn add_imap_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value,
 fn test_connection_dispatch(_ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
     let (draft, password) = conn_and_password(params)?;
     // The daemon runs a multi-thread runtime (main.rs), so blocking a worker
-    // here is legal; each probe enforces its own timeout inside core.
+    // here is legal; each probe enforces its own timeout inside core. The two
+    // probes run concurrently (tokio::join!) so a slow IMAP server cannot
+    // stall the SMTP reachability check — both steps always run (QA#19).
     let (imap, smtp) = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
-            let imap = probe_imap_login(
-                &draft.imap_host,
-                draft.imap_port,
-                draft.imap_security,
-                &draft.email,
-                &password,
+            tokio::join!(
+                probe_imap_login(
+                    &draft.imap_host,
+                    draft.imap_port,
+                    draft.imap_security,
+                    &draft.email,
+                    &password,
+                ),
+                probe_smtp(&draft.smtp_host, draft.smtp_port, draft.smtp_security),
             )
-            .await;
-            let smtp = probe_smtp(&draft.smtp_host, draft.smtp_port, draft.smtp_security).await;
-            (imap, smtp)
         })
     });
     Ok(json!({
