@@ -36,13 +36,26 @@ use std::future::Future;
 /// [`OAuthError::Network`].
 pub struct HttpTokenEndpoint;
 
+/// Shared HTTP client for token endpoints. Bounded to 15 s per
+/// request (QA round 1): a stuck token endpoint must not park the
+/// sync actor's refresh path forever.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("reqwest client builds")
+    })
+}
+
 impl TokenEndpoint for HttpTokenEndpoint {
     async fn post(
         &self,
         token_url: &str,
         form: &[(&str, &str)],
     ) -> Result<TokenResponse, OAuthError> {
-        let client = reqwest::Client::new();
+        let client = http_client();
         let response = client
             .post(token_url)
             .form(form)

@@ -144,6 +144,19 @@ pub(crate) async fn connect(
 }
 
 /// Authenticates with user and password (LOGIN).
+/// Classifies a login or authenticate failure: server rejections
+/// (NO / BAD) are auth failures — the actor parks in reauth; every
+/// other failure (connection reset, EOF, parse) is transient and the
+/// supervision loop retries it with backoff.
+fn login_error(err: async_imap::error::Error) -> ImapError {
+    match &err {
+        async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_) => {
+            ImapError::Auth(err.to_string())
+        }
+        _ => ImapError::Connect(err.to_string()),
+    }
+}
+
 pub(crate) async fn login_password(
     client: Client<Conn>,
     username: &str,
@@ -151,7 +164,7 @@ pub(crate) async fn login_password(
 ) -> Result<Session<Conn>, ImapError> {
     match client.login(username, password).await {
         Ok(session) => Ok(session),
-        Err((err, _)) => Err(ImapError::Auth(err.to_string())),
+        Err((err, _)) => Err(login_error(err)),
     }
 }
 
@@ -180,7 +193,7 @@ pub(crate) async fn login_xoauth2(
     };
     match client.authenticate("XOAUTH2", auth).await {
         Ok(session) => Ok(session),
-        Err((err, _)) => Err(ImapError::Auth(err.to_string())),
+        Err((err, _)) => Err(login_error(err)),
     }
 }
 

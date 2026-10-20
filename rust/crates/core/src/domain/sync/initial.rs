@@ -56,6 +56,26 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+/// Ceiling for one IMAP protocol step inside the initial sync (QA
+/// round 1: a hung server must not park the sync actor forever).
+const STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Ceiling for one mailbox's envelope fetch — large mailboxes
+/// legitimately take minutes (PRD: 5k messages < 5 min on broadband).
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Runs one protocol step under a deadline, mapping an elapsed timeout
+/// to a protocol error so the actor's backoff handles it like any
+/// other transient failure.
+async fn timed<T>(
+    label: &str,
+    limit: std::time::Duration,
+    step: impl std::future::Future<Output = Result<T, ImapError>>,
+) -> Result<T, ImapError> {
+    tokio::time::timeout(limit, step)
+        .await
+        .map_err(|_| ImapError::Protocol(format!("{label} timed out")))?
+}
+
 fn flag_set(flags: &[String], name: &str) -> bool {
     flags.iter().any(|f| f == name)
 }
@@ -70,7 +90,7 @@ pub(crate) async fn initial_sync(
     bus: &EventBus,
     account_id: i64,
 ) -> Result<(), ImapError> {
-    let mut mailboxes = list_mailboxes(session).await?;
+    let mut mailboxes = timed("list mailboxes", STEP_TIMEOUT, list_mailboxes(session)).await?;
     mailboxes.sort_by_key(|m| sync_rank(kind_for(&m.name, m.special_use.as_deref())));
     let total = mailboxes.len();
 
@@ -89,7 +109,12 @@ pub(crate) async fn initial_sync(
             highest_modseq: None,
         });
 
-        let selected = select_mailbox(session, &name).await?;
+        let selected = timed(
+            "select mailbox",
+            STEP_TIMEOUT,
+            select_mailbox(session, &name),
+        )
+        .await?;
         writer.enqueue(WriteOp::MailboxUpsert {
             account_id,
             name: name.clone(),
@@ -100,7 +125,12 @@ pub(crate) async fn initial_sync(
             highest_modseq: selected.highest_modseq,
         });
 
-        let rows = fetch_envelope_chunk(session, "1:*").await?;
+        let rows = timed(
+            "envelope fetch",
+            FETCH_TIMEOUT,
+            fetch_envelope_chunk(session, "1:*"),
+        )
+        .await?;
         let now = now_unix();
         for row in rows {
             let header = row.header.clone().unwrap_or_default();

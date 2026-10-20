@@ -47,6 +47,55 @@ pub(crate) async fn spawn_fake(
     port
 }
 
+/// A multi-connection IMAP wire fake with the same line protocol as
+/// [`spawn_fake`]: every accepted connection is served by the same
+/// `responder(tag, command)`. An empty reply vector closes that
+/// connection immediately, so stateful tests can drop early attempts
+/// and let the client retry (supervision-loop coverage).
+pub(crate) async fn spawn_fake_multi(
+    responder: impl Fn(&str, &str) -> Vec<String> + Send + Sync + 'static,
+) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fake imap bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let responder = std::sync::Arc::new(responder);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let responder = std::sync::Arc::clone(&responder);
+            tokio::spawn(async move {
+                let (reader, mut writer) = tokio::io::split(stream);
+                writer
+                    .write_all(b"* OK fake imap ready\r\n")
+                    .await
+                    .expect("greeting");
+                let mut last_tag = String::new();
+                let mut lines = BufReader::new(reader).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let (tag, command) = match line.split_once(' ') {
+                        Some((tag, command)) => {
+                            last_tag = tag.to_string();
+                            (tag, command)
+                        }
+                        None => (last_tag.as_str(), line.as_str()),
+                    };
+                    let replies = responder(tag, command);
+                    if replies.is_empty() {
+                        return;
+                    }
+                    for reply in replies {
+                        writer
+                            .write_all(format!("{reply}\r\n").as_bytes())
+                            .await
+                            .expect("fake reply");
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
 /// A logged-in plaintext session against the wire fake: convenience for
 /// slices that only care about post-authentication commands.
 pub(crate) async fn fake_session(port: u16) -> Session<Conn> {

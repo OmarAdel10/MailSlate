@@ -13,6 +13,7 @@ use crate::domain::events::EventBus;
 use crate::domain::sync::engine::SyncState;
 use crate::domain::sync::initial::initial_sync;
 use crate::infra::db::writer::WriterActor;
+use crate::infra::imap::ImapError;
 use crate::infra::imap::connect::{connect, login_password, login_xoauth2};
 use crate::infra::keyring::{KeyStore, imap_password_key};
 use crate::infra::oauth::OAuthError;
@@ -124,9 +125,165 @@ async fn refresh_oauth(
     Ok(refreshed)
 }
 
-/// Spawns the sync actor for one account. The task connects,
-/// authenticates, runs the initial sync once, then serves commands;
-/// every state change publishes an `account_status` event.
+/// Initial retry delay after a failed attempt (PRD F2.6).
+const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+/// Upper bound for retry delays (PRD F2.6: cap 60 s).
+const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+/// Ceiling for one IMAP connect or login step (QA round 1: no hang
+/// without a timeout).
+const IMAP_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Ceiling for a best-effort logout before reconnecting.
+const LOGOUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Doubles the previous delay and adds clock-derived jitter, capped at
+/// [`MAX_BACKOFF`] (PRD F2.6: exponential backoff with jitter, cap 60 s).
+fn next_backoff(prev: std::time::Duration) -> std::time::Duration {
+    let doubled = prev.saturating_mul(2).min(MAX_BACKOFF);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock before epoch")
+        .subsec_nanos() as u64;
+    let span = (doubled.as_nanos() as u64 / 4).max(1);
+    doubled
+        .saturating_add(std::time::Duration::from_nanos(nanos % span))
+        .min(MAX_BACKOFF)
+}
+
+/// How one connect → authenticate → initial-sync → serve cycle ended.
+enum CycleOutcome {
+    /// Shutdown requested, or every handle dropped.
+    Shutdown,
+    /// Re-authentication required: terminal, no retries (PRD F2.6).
+    Reauth,
+    /// Transient failure carrying the reason: retry after backoff.
+    Retry(String),
+}
+
+/// How a backoff wait ended.
+enum BackoffWait {
+    /// The delay elapsed, or a SyncNow command cut it short.
+    Proceed,
+    /// Shutdown requested, or every handle dropped.
+    Shutdown,
+}
+
+/// Waits out the backoff delay while staying responsive to commands:
+/// SyncNow cancels the wait (user-requested re-sync retries at once),
+/// Shutdown ends the actor (PRD F2.6).
+async fn wait_backoff(rx: &mut mpsc::Receiver<SyncCmd>, delay: std::time::Duration) -> BackoffWait {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    tokio::select! {
+        _ = &mut sleep => BackoffWait::Proceed,
+        cmd = rx.recv() => match cmd {
+            Some(SyncCmd::Shutdown) | None => BackoffWait::Shutdown,
+            // A user-requested re-sync cuts the backoff short.
+            Some(SyncCmd::SyncNow) => BackoffWait::Proceed,
+        },
+    }
+}
+
+/// Runs one full account cycle: connect, authenticate, initial sync,
+/// then serve SyncNow commands on the live session. Returns how the
+/// cycle ended; the supervision loop in [`spawn_actor`] decides what
+/// to do next.
+async fn run_account_cycle(
+    account: &AccountConfig,
+    keystore: &Arc<dyn KeyStore>,
+    writer: &Arc<WriterActor>,
+    bus: &Arc<EventBus>,
+    token_poster: &Arc<dyn TokenPoster>,
+    rx: &mut mpsc::Receiver<SyncCmd>,
+    set_state: &(dyn Fn(SyncState) + Send + Sync),
+) -> CycleOutcome {
+    set_state(SyncState::Connecting);
+    let client = match tokio::time::timeout(
+        IMAP_STEP_TIMEOUT,
+        connect(&account.imap_host, account.imap_port, account.imap_security),
+    )
+    .await
+    {
+        Ok(Ok(client)) => client,
+        Ok(Err(err)) => return CycleOutcome::Retry(err.to_string()),
+        Err(_) => return CycleOutcome::Retry("imap connect timed out".into()),
+    };
+
+    set_state(SyncState::Authenticating);
+    let mut session = if account.auth_type == "oauth2" {
+        let mut auth = match tokens::load(keystore.as_ref(), account.id) {
+            Ok(Some(snapshot)) => snapshot,
+            _ => return CycleOutcome::Reauth,
+        };
+        if !auth.is_fresh(now_unix()) {
+            auth = match refresh_oauth(account, keystore, token_poster).await {
+                Ok(snapshot) => snapshot,
+                Err(RefreshError::Reauth) => return CycleOutcome::Reauth,
+                Err(RefreshError::Transient(detail)) => return CycleOutcome::Retry(detail),
+            };
+        }
+        match tokio::time::timeout(
+            IMAP_STEP_TIMEOUT,
+            login_xoauth2(client, &account.email, &auth.access_token),
+        )
+        .await
+        {
+            Ok(Ok(session)) => session,
+            // Auth errors stop retrying and raise re-auth (PRD F2.6);
+            // transport failures stay transient.
+            Ok(Err(ImapError::Auth(_))) => return CycleOutcome::Reauth,
+            Ok(Err(err)) => return CycleOutcome::Retry(err.to_string()),
+            Err(_) => return CycleOutcome::Retry("xoauth2 login timed out".into()),
+        }
+    } else {
+        let password = match keystore.get(&imap_password_key(account.id)) {
+            Ok(Some(password)) => password,
+            _ => return CycleOutcome::Reauth,
+        };
+        match tokio::time::timeout(
+            IMAP_STEP_TIMEOUT,
+            login_password(client, &account.email, &password),
+        )
+        .await
+        {
+            Ok(Ok(session)) => session,
+            // Auth errors stop retrying and raise re-auth (PRD F2.6);
+            // transport failures stay transient.
+            Ok(Err(ImapError::Auth(_))) => return CycleOutcome::Reauth,
+            Ok(Err(err)) => return CycleOutcome::Retry(err.to_string()),
+            Err(_) => return CycleOutcome::Retry("imap login timed out".into()),
+        }
+    };
+
+    set_state(SyncState::InitialSync);
+    if let Err(err) = initial_sync(&mut session, writer, bus, account.id).await {
+        let _ = tokio::time::timeout(LOGOUT_TIMEOUT, session.logout()).await;
+        return CycleOutcome::Retry(err.to_string());
+    }
+    set_state(SyncState::Idle);
+
+    loop {
+        match rx.recv().await {
+            Some(SyncCmd::SyncNow) => {
+                set_state(SyncState::Busy);
+                if let Err(err) = initial_sync(&mut session, writer, bus, account.id).await {
+                    let _ = tokio::time::timeout(LOGOUT_TIMEOUT, session.logout()).await;
+                    return CycleOutcome::Retry(err.to_string());
+                }
+                set_state(SyncState::Idle);
+            }
+            Some(SyncCmd::Shutdown) | None => {
+                let _ = tokio::time::timeout(LOGOUT_TIMEOUT, session.logout()).await;
+                return CycleOutcome::Shutdown;
+            }
+        }
+    }
+}
+
+/// Spawns the sync actor for one account under a supervision loop:
+/// transient failures retry with exponential backoff and jitter
+/// (PRD F2.6), authentication failures park in `reauth_required` until
+/// shutdown, and every state change publishes an `account_status`
+/// event.
 pub fn spawn_actor(
     account: AccountConfig,
     keystore: Arc<dyn KeyStore>,
@@ -147,83 +304,40 @@ pub fn spawn_actor(
             ));
         };
 
-        set_state(SyncState::Connecting);
-        let client =
-            match connect(&account.imap_host, account.imap_port, account.imap_security).await {
-                Ok(client) => client,
-                Err(err) => {
-                    set_state(SyncState::Backoff(err.to_string()));
-                    return;
-                }
-            };
-
-        set_state(SyncState::Authenticating);
-        let mut session = if account.auth_type == "oauth2" {
-            let mut auth = match tokens::load(keystore.as_ref(), account.id) {
-                Ok(Some(snapshot)) => snapshot,
-                _ => {
+        let mut backoff = INITIAL_BACKOFF;
+        loop {
+            match run_account_cycle(
+                &account,
+                &keystore,
+                &writer,
+                &bus,
+                &token_poster,
+                &mut rx,
+                &set_state,
+            )
+            .await
+            {
+                CycleOutcome::Shutdown => break,
+                CycleOutcome::Reauth => {
                     set_state(SyncState::ReauthRequired);
-                    return;
-                }
-            };
-            if !auth.is_fresh(now_unix()) {
-                auth = match refresh_oauth(&account, &keystore, &token_poster).await {
-                    Ok(snapshot) => snapshot,
-                    Err(RefreshError::Reauth) => {
-                        set_state(SyncState::ReauthRequired);
-                        return;
+                    // Terminal: park until a shutdown arrives.
+                    while let Some(cmd) = rx.recv().await {
+                        if matches!(cmd, SyncCmd::Shutdown) {
+                            break;
+                        }
                     }
-                    Err(RefreshError::Transient(detail)) => {
-                        set_state(SyncState::Backoff(detail));
-                        return;
+                    break;
+                }
+                CycleOutcome::Retry(detail) => {
+                    set_state(SyncState::Backoff(detail));
+                    match wait_backoff(&mut rx, backoff).await {
+                        BackoffWait::Shutdown => break,
+                        BackoffWait::Proceed => {}
                     }
-                };
-            }
-            match login_xoauth2(client, &account.email, &auth.access_token).await {
-                Ok(session) => session,
-                Err(err) => {
-                    set_state(SyncState::Backoff(err.to_string()));
-                    return;
+                    backoff = next_backoff(backoff);
                 }
-            }
-        } else {
-            let password = match keystore.get(&imap_password_key(account.id)) {
-                Ok(Some(password)) => password,
-                _ => {
-                    set_state(SyncState::ReauthRequired);
-                    return;
-                }
-            };
-            match login_password(client, &account.email, &password).await {
-                Ok(session) => session,
-                Err(err) => {
-                    set_state(SyncState::Backoff(err.to_string()));
-                    return;
-                }
-            }
-        };
-
-        set_state(SyncState::InitialSync);
-        if let Err(err) = initial_sync(&mut session, &writer, &bus, account.id).await {
-            set_state(SyncState::Backoff(err.to_string()));
-            return;
-        }
-        set_state(SyncState::Idle);
-
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                SyncCmd::SyncNow => {
-                    set_state(SyncState::Busy);
-                    if let Err(err) = initial_sync(&mut session, &writer, &bus, account.id).await {
-                        set_state(SyncState::Backoff(err.to_string()));
-                        return;
-                    }
-                    set_state(SyncState::Idle);
-                }
-                SyncCmd::Shutdown => break,
             }
         }
-        let _ = session.logout().await;
         set_state(SyncState::Stopped);
     });
 
@@ -473,5 +587,606 @@ mod tests {
         // SAFETY: as above.
         unsafe { std::env::remove_var("MAILSLATE_GOOGLE_CLIENT_ID") };
         drop(guard);
+    }
+
+    // --- Supervision-loop coverage (PRD F2.6, QA round 1) ---
+
+    fn password_account(port: u16) -> AccountConfig {
+        AccountConfig {
+            id: 1,
+            email: "seed@example.com".into(),
+            imap_host: "127.0.0.1".into(),
+            imap_port: port,
+            imap_security: crate::domain::accounts::Security::Plaintext,
+            auth_type: "password".into(),
+            provider: "imap".into(),
+        }
+    }
+
+    fn oauth_account(port: u16) -> AccountConfig {
+        AccountConfig {
+            id: 1,
+            email: "me@gmail.com".into(),
+            imap_host: "127.0.0.1".into(),
+            imap_port: port,
+            imap_security: crate::domain::accounts::Security::Plaintext,
+            auth_type: "oauth2".into(),
+            provider: "gmail".into(),
+        }
+    }
+
+    /// Canned answers for a fully working password session.
+    fn happy_replies(tag: &str, command: &str) -> Vec<String> {
+        if command.starts_with("LOGIN") {
+            vec![format!("{tag} OK logged in")]
+        } else if command.starts_with("LIST") {
+            vec![
+                "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                format!("{tag} OK list done"),
+            ]
+        } else if command.starts_with("SELECT") {
+            vec![
+                "* 1 EXISTS".to_string(),
+                "* OK [UIDVALIDITY 100] UIDs valid".to_string(),
+                "* OK [UIDNEXT 2] Predicted".to_string(),
+                format!("{tag} OK select done"),
+            ]
+        } else if command.starts_with("UID FETCH") {
+            let headers = "Message-ID: <a@x>\r\nSubject: Hello\r\nFrom: A <a@x>\r\nDate: Mon, 19 Oct 2026 00:00:00 +0000\r\n\r\n";
+            vec![
+                format!(
+                    "* 1 FETCH (UID 1 FLAGS (\\Seen) RFC822.SIZE 100 INTERNALDATE \"17-Jul-1996 02:44:25 -0700\" BODY[HEADER.FIELDS (DATE FROM TO CC SUBJECT REPLY-TO MESSAGE-ID REFERENCES IN-REPLY-TO)] {{{}}}\r\n{})",
+                    headers.len(),
+                    headers
+                ),
+                format!("{tag} OK fetch done"),
+            ]
+        } else {
+            vec![format!("{tag} OK")]
+        }
+    }
+
+    /// A token endpoint that always refuses the refresh (revoked).
+    struct ReauthPoster;
+
+    impl crate::infra::oauth::grant::TokenPoster for ReauthPoster {
+        fn post<'a>(
+            &'a self,
+            _token_url: &'a str,
+            _form: &'a [(&'a str, &'a str)],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::infra::oauth::grant::TokenResponse,
+                            crate::infra::oauth::OAuthError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                Err(crate::infra::oauth::OAuthError::InvalidGrant(
+                    "revoked".into(),
+                ))
+            })
+        }
+    }
+
+    /// A token endpoint that is down (transient network failure).
+    struct NetworkPoster;
+
+    impl crate::infra::oauth::grant::TokenPoster for NetworkPoster {
+        fn post<'a>(
+            &'a self,
+            _token_url: &'a str,
+            _form: &'a [(&'a str, &'a str)],
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            crate::infra::oauth::grant::TokenResponse,
+                            crate::infra::oauth::OAuthError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                Err(crate::infra::oauth::OAuthError::Network(
+                    "endpoint down".into(),
+                ))
+            })
+        }
+    }
+
+    fn stage_snapshot(keystore: &std::sync::Arc<crate::infra::keyring::FakeKeyStore>) {
+        crate::infra::oauth::tokens::save(
+            keystore.as_ref(),
+            1,
+            &crate::infra::oauth::tokens::TokenSnapshot {
+                access_token: "stale-token".into(),
+                refresh_token: "rt-1".into(),
+                expires_at: 1, // long expired
+                scopes: String::new(),
+            },
+        )
+        .expect("stage stale snapshot");
+    }
+
+    /// A refused TCP port fails fast: 127.0.0.1:1 never listens.
+    #[tokio::test]
+    async fn connect_failure_backs_off_and_still_shuts_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        keystore
+            .store(&crate::infra::keyring::imap_password_key(1), "pass")
+            .expect("store password");
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            password_account(1),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(&handle, "backoff", std::time::Duration::from_secs(10)).await;
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn retries_after_a_dropped_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let logins = std::sync::Arc::new(AtomicUsize::new(0));
+        let logins_for_fake = std::sync::Arc::clone(&logins);
+        let port = crate::infra::imap::testing::spawn_fake_multi(move |tag, command| {
+            if command.starts_with("LOGIN") && logins_for_fake.fetch_add(1, Ordering::SeqCst) == 0 {
+                return vec![]; // drop the first connection
+            }
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        keystore
+            .store(&crate::infra::keyring::imap_password_key(1), "pass")
+            .expect("store password");
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            password_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
+        assert_eq!(logins.load(Ordering::SeqCst), 2, "second attempt logs in");
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn missing_password_raises_reauth_and_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = crate::infra::imap::testing::spawn_fake_multi(|tag, command| {
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            password_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(
+            &handle,
+            "reauth_required",
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(
+            handle.current_state().as_str(),
+            "reauth_required",
+            "reauth is terminal, not retried"
+        );
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn rejected_login_raises_reauth_and_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = crate::infra::imap::testing::spawn_fake_multi(|tag, command| {
+            if command.starts_with("LOGIN") {
+                return vec![format!("{tag} NO authentication failed")];
+            }
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        keystore
+            .store(&crate::infra::keyring::imap_password_key(1), "pass")
+            .expect("store password");
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            password_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(
+            &handle,
+            "reauth_required",
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(handle.current_state().as_str(), "reauth_required");
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn missing_oauth_snapshot_raises_reauth_and_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "oauth2", "gmail");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = crate::infra::imap::testing::spawn_fake_multi(|tag, command| {
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            oauth_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(
+            &handle,
+            "reauth_required",
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(handle.current_state().as_str(), "reauth_required");
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn revoked_refresh_token_raises_reauth_and_stays() {
+        let guard = crate::infra::oauth::providers::ENV_LOCK.lock().await;
+        // SAFETY: serialized by ENV_LOCK; no concurrent readers of this
+        // key in this test process.
+        unsafe { std::env::set_var("MAILSLATE_GOOGLE_CLIENT_ID", "google-app-id") };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "oauth2", "gmail");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = crate::infra::imap::testing::spawn_fake_multi(|tag, command| {
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        stage_snapshot(&keystore);
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            oauth_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(ReauthPoster),
+        );
+
+        wait_state(
+            &handle,
+            "reauth_required",
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(handle.current_state().as_str(), "reauth_required");
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("MAILSLATE_GOOGLE_CLIENT_ID") };
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn transient_refresh_failure_backs_off_and_keeps_retrying() {
+        let guard = crate::infra::oauth::providers::ENV_LOCK.lock().await;
+        // SAFETY: serialized by ENV_LOCK; no concurrent readers of this
+        // key in this test process.
+        unsafe { std::env::set_var("MAILSLATE_GOOGLE_CLIENT_ID", "google-app-id") };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "oauth2", "gmail");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = crate::infra::imap::testing::spawn_fake_multi(|tag, command| {
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        stage_snapshot(&keystore);
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            oauth_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(NetworkPoster),
+        );
+
+        // The refresh keeps failing transiently, so the actor must keep
+        // cycling through backoff without ever going reauth or stopped.
+        let mut saw_backoff = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if handle.current_state().as_str() == "backoff" {
+                saw_backoff += 1;
+            }
+            assert_ne!(handle.current_state().as_str(), "reauth_required");
+            assert_ne!(handle.current_state().as_str(), "stopped");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(saw_backoff >= 2, "backoff must repeat, saw {saw_backoff}");
+
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("MAILSLATE_GOOGLE_CLIENT_ID") };
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn rejected_xoauth2_login_raises_reauth_and_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "oauth2", "gmail");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let sasl = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sasl_for_fake = std::sync::Arc::clone(&sasl);
+        let port = crate::infra::imap::testing::spawn_fake_multi(move |tag, command| {
+            if command.starts_with("AUTHENTICATE") {
+                sasl_for_fake.store(true, Ordering::SeqCst);
+                return vec!["+ ".to_string()];
+            }
+            if sasl_for_fake.swap(false, Ordering::SeqCst) {
+                // SASL continuation answer: refuse it.
+                return vec![format!("{tag} NO authentication failed")];
+            }
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        crate::infra::oauth::tokens::save(
+            keystore.as_ref(),
+            1,
+            &crate::infra::oauth::tokens::TokenSnapshot {
+                access_token: "fresh-token".into(),
+                refresh_token: "rt-1".into(),
+                expires_at: now_unix() + 3600, // fresh: no refresh round-trip
+                scopes: String::new(),
+            },
+        )
+        .expect("stage fresh snapshot");
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            oauth_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(
+            &handle,
+            "reauth_required",
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(handle.current_state().as_str(), "reauth_required");
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn initial_sync_failure_backs_off_and_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let selects = std::sync::Arc::new(AtomicUsize::new(0));
+        let selects_for_fake = std::sync::Arc::clone(&selects);
+        let port = crate::infra::imap::testing::spawn_fake_multi(move |tag, command| {
+            if command.starts_with("SELECT") && selects_for_fake.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                return vec![format!("{tag} NO select refused")];
+            }
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        keystore
+            .store(&crate::infra::keyring::imap_password_key(1), "pass")
+            .expect("store password");
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            password_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
+        assert_eq!(selects.load(Ordering::SeqCst), 2, "second attempt selects");
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn sync_now_failure_reconnects_and_resyncs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let fetches = std::sync::Arc::new(AtomicUsize::new(0));
+        let fetches_for_fake = std::sync::Arc::clone(&fetches);
+        let selects = std::sync::Arc::new(AtomicUsize::new(0));
+        let selects_for_fake = std::sync::Arc::clone(&selects);
+        let port = crate::infra::imap::testing::spawn_fake_multi(move |tag, command| {
+            if command.starts_with("SELECT") {
+                // Second SELECT (the SyncNow re-sync) fails once.
+                if selects_for_fake.fetch_add(1, Ordering::SeqCst) == 1 {
+                    return vec![format!("{tag} NO select refused")];
+                }
+            }
+            if command.starts_with("UID FETCH") {
+                fetches_for_fake.fetch_add(1, Ordering::SeqCst);
+            }
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        keystore
+            .store(&crate::infra::keyring::imap_password_key(1), "pass")
+            .expect("store password");
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            password_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
+        handle.try_sync_now();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while fetches.load(Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "re-sync never completed"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
+        assert!(selects.load(Ordering::SeqCst) >= 3, "third cycle selects");
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn sync_now_during_backoff_retries_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let logins = std::sync::Arc::new(AtomicUsize::new(0));
+        let logins_for_fake = std::sync::Arc::clone(&logins);
+        let port = crate::infra::imap::testing::spawn_fake_multi(move |tag, command| {
+            if command.starts_with("LOGIN") && logins_for_fake.fetch_add(1, Ordering::SeqCst) == 0 {
+                return vec![]; // drop the first connection
+            }
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        keystore
+            .store(&crate::infra::keyring::imap_password_key(1), "pass")
+            .expect("store password");
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            password_account(port),
+            std::sync::Arc::clone(&keystore) as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        wait_state(&handle, "backoff", std::time::Duration::from_secs(10)).await;
+        let started = std::time::Instant::now();
+        handle.try_sync_now();
+        wait_state(&handle, "idle", std::time::Duration::from_secs(10)).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(800),
+            "sync_now must cut the backoff short, took {:?}",
+            started.elapsed()
+        );
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    #[test]
+    fn next_backoff_doubles_up_to_the_cap() {
+        let mut backoff = INITIAL_BACKOFF;
+        for _ in 0..10 {
+            backoff = next_backoff(backoff);
+            assert!(backoff <= MAX_BACKOFF);
+        }
+        assert_eq!(backoff, MAX_BACKOFF, "the delay must reach the cap");
+    }
+
+    #[test]
+    fn next_backoff_adds_jitter_within_bounds() {
+        for _ in 0..100 {
+            let next = next_backoff(std::time::Duration::from_secs(1));
+            assert!(next >= std::time::Duration::from_secs(2));
+            assert!(next <= std::time::Duration::from_millis(2500));
+        }
     }
 }
