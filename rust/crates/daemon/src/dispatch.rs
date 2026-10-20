@@ -167,12 +167,11 @@ fn probe_step(step: Result<(), ProbeError>) -> Value {
     }
 }
 
-/// Parses and applies `remove_account`, scrubbing the keyring first and
-/// stopping the account's sync actor so no stale task keeps writing
-/// rows for a deleted account.
+/// Parses and applies `remove_account`, stopping the sync actor first
+/// (so the running task can no longer write rows for an account whose
+/// rows are about to disappear) and scrubbing the keyring after.
 fn remove_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
     let account_id = account_id(params)?;
-    remove_account(ctx.keystore.as_ref(), &ctx.writer, account_id).map_err(account_error)?;
     if let Some(handle) = ctx
         .sync
         .lock()
@@ -181,6 +180,7 @@ fn remove_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, B
     {
         handle.try_shutdown();
     }
+    remove_account(ctx.keystore.as_ref(), &ctx.writer, account_id).map_err(account_error)?;
     Ok(json!({ "ok": true }))
 }
 

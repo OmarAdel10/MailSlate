@@ -74,8 +74,12 @@ fn run() -> Result<(), ServerError> {
 
     let keystore: std::sync::Arc<dyn mailslate_core::infra::keyring::KeyStore> =
         std::sync::Arc::new(mailslate_core::infra::keyring::OsKeyStore);
+    let writer = std::sync::Arc::new(db::writer::WriterActor::spawn_with_error_hook(
+        &db_path,
+        |error| tracing::warn!(error, "writer operation failed and was skipped"),
+    ));
     let ctx = std::sync::Arc::new(crate::dispatch::DispatchCtx {
-        writer: std::sync::Arc::new(db::writer::WriterActor::spawn(&db_path)),
+        writer,
         keystore,
         reader: std::sync::Arc::new(db::pool::ReadPool::open(&db_path)?),
         bus: mailslate_core::domain::events::EventBus::new(),

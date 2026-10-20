@@ -153,37 +153,72 @@ pub enum WriteOp {
     ThreadCountersRecompute { account_id: i64 },
 }
 
-/// Handle for enqueueing writes; `Drop` joins the actor after
-/// draining what is already queued.
+/// Handle for enqueueing writes; `Drop` closes the channel first
+/// (letting the actor drain, commit, and exit) and then joins, so
+/// dropping the last handle flushes and releases the SQLite
+/// connection deterministically. Joining before the last `Sender`
+/// is dropped would deadlock: the actor would wait forever on a
+/// channel that never disconnects.
 pub struct WriterActor {
-    tx: mpsc::Sender<WriteOp>,
+    tx: Option<mpsc::Sender<WriteOp>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for WriterActor {
+    fn drop(&mut self) {
+        // Drop the Sender BEFORE joining: the actor loop only
+        // observes Disconnected once the channel is closed, then
+        // flushes whatever is queued and exits.
+        drop(self.tx.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl WriterActor {
     /// Starts the actor thread against the database at `db_path`
-    /// (it must already exist and be migrated).
+    /// (it must already exist and be migrated). Failed operations
+    /// are silently skipped; prefer [`WriterActor::spawn_with_error_hook`].
     pub fn spawn(db_path: &Path) -> Self {
+        Self::spawn_with_error_hook(db_path, |_| {})
+    }
+
+    /// Like [`WriterActor::spawn`], but every skipped operation is
+    /// reported through `on_error` (the daemon pipes this into its
+    /// tracing log; tests record it). A failed op never kills the
+    /// single writer thread.
+    pub fn spawn_with_error_hook(
+        db_path: &Path,
+        on_error: impl Fn(String) + Send + Sync + 'static,
+    ) -> Self {
         let conn = open_writer(db_path);
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || writer_loop(conn, rx));
-        Self { tx }
+        let handle = std::thread::spawn(move || writer_loop(conn, rx, on_error));
+        Self {
+            tx: Some(tx),
+            handle: Some(handle),
+        }
     }
 
     /// Queues one operation; returns once the actor has buffered it
     /// (delivery, not durability, at this point).
     pub fn enqueue(&self, op: WriteOp) {
-        self.tx.send(op).expect("writer thread alive");
+        let tx = self.tx.as_ref().expect("writer channel open");
+        tx.send(op).expect("writer thread alive");
     }
 
     /// Blocks until every operation enqueued before this call has
     /// been committed (FIFO channel order guarantees the ack lands
     /// behind the ops it covers).
     pub fn flush(&self) {
-        let (tx, rx) = mpsc::channel();
-        self.tx
-            .send(WriteOp::Flush(tx))
+        let sender = self.tx.as_ref().expect("writer channel open");
+        let (ack, rx) = mpsc::channel();
+        sender
+            .send(WriteOp::Flush(ack))
             .expect("writer thread alive");
-        rx.recv().expect("writer acks its batches");
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("writer acks its batches");
     }
 }
 
@@ -193,9 +228,8 @@ fn open_writer(db_path: &Path) -> Connection {
     conn
 }
 
-/// Stolen from mod.rs — GLM PORTER: keep in sync with the real one so
-/// scratch does not drift.
-fn writer_loop(mut conn: Connection, rx: mpsc::Receiver<WriteOp>) {
+/// Batching loop for the single writer thread.
+fn writer_loop(mut conn: Connection, rx: mpsc::Receiver<WriteOp>, on_error: impl Fn(String)) {
     // Batched transactions: up to BATCH_OPS ops or BATCH_WINDOW,
     // whichever comes first, then one COMMIT. WAL readers see each
     // batch atomically.
@@ -205,7 +239,7 @@ fn writer_loop(mut conn: Connection, rx: mpsc::Receiver<WriteOp>) {
             Ok(op) => batch.push(op),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                flush_batch(&mut conn, &batch);
+                flush_batch(&mut conn, &batch, &on_error);
                 return;
             }
         }
@@ -216,32 +250,38 @@ fn writer_loop(mut conn: Connection, rx: mpsc::Receiver<WriteOp>) {
                 Ok(op) => batch.push(op),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    flush_batch(&mut conn, &batch);
+                    flush_batch(&mut conn, &batch, &on_error);
                     return;
                 }
             }
         }
-        flush_batch(&mut conn, &batch);
+        flush_batch(&mut conn, &batch, &on_error);
         batch.clear();
     }
 }
 
-/// Applies one batch inside a single transaction. Returns true when
-/// the batch contained a `Flush` marker (ack handled, loop continues).
-fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
+/// Applies one batch inside a single transaction per segment: a
+/// `Flush` marker commits everything before it, acks, and opens a
+/// fresh transaction for the rest of the batch — no operation is
+/// ever dropped for arriving after a marker, and every marker gets
+/// its own ack. Failed operations are reported through `on_error`
+/// and skipped; the writer keeps serving (one bad op must never
+/// kill the only SQLite writer).
+fn flush_batch(conn: &mut Connection, batch: &[WriteOp], on_error: &dyn Fn(String)) {
     if batch.is_empty() {
-        return false;
+        return;
     }
-    let tx = conn.transaction().expect("writer transaction");
+    let mut tx = conn.transaction().expect("writer transaction");
     for op in batch {
         match op {
             WriteOp::MetaPut { key, value } => {
-                tx.execute(
+                if let Err(err) = tx.execute(
                     "INSERT INTO meta(key, value) VALUES(?1, ?2)
                      ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     [key, value],
-                )
-                .expect("meta upsert");
+                ) {
+                    on_error(format!("meta upsert failed: {err}"));
+                }
             }
             WriteOp::AccountAdd {
                 id,
@@ -256,7 +296,7 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                 smtp_security,
                 auth_type,
             } => {
-                tx.execute(
+                if let Err(err) = tx.execute(
                     "INSERT INTO accounts(
                         id, display_name, email, provider,
                         imap_host, imap_port, imap_security,
@@ -275,14 +315,16 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                         smtp_security,
                         auth_type
                     ],
-                )
-                .expect("account insert");
+                ) {
+                    on_error(format!("account insert failed: {err}"));
+                }
             }
             WriteOp::AccountRemove { id } => {
                 // Children cascade via FK (mailboxes, messages,
                 // locations, bodies, attachments, tags, outbox).
-                tx.execute("DELETE FROM accounts WHERE id = ?1", [id])
-                    .expect("account delete");
+                if let Err(err) = tx.execute("DELETE FROM accounts WHERE id = ?1", [id]) {
+                    on_error(format!("account delete failed: {err}"));
+                }
             }
             WriteOp::AccountUpdate {
                 id,
@@ -293,7 +335,7 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                 // COALESCE keeps stored values for None; the color's
                 // outer None = untouched, inner None = clear to NULL
                 // (?3 marks presence, ?4 carries the value-or-NULL).
-                tx.execute(
+                if let Err(err) = tx.execute(
                     "UPDATE accounts SET
                         display_name = COALESCE(?2, display_name),
                         color = CASE WHEN ?3 THEN ?4 ELSE color END,
@@ -306,8 +348,9 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                         color.as_ref().cloned().flatten(),
                         sync_window_days
                     ],
-                )
-                .expect("account update");
+                ) {
+                    on_error(format!("account update failed: {err}"));
+                }
             }
             WriteOp::MailboxUpsert {
                 account_id,
@@ -318,7 +361,7 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                 uidnext,
                 highest_modseq,
             } => {
-                tx.execute(
+                if let Err(err) = tx.execute(
                     "INSERT INTO mailboxes(
                         account_id, name, kind, special_use,
                         uidvalidity, uidnext, highest_modseq
@@ -338,8 +381,9 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                         uidnext.map(|v| v as i64),
                         highest_modseq.map(|v| v as i64)
                     ],
-                )
-                .expect("mailbox upsert");
+                ) {
+                    on_error(format!("mailbox upsert failed: {err}"));
+                }
             }
             WriteOp::MessageUpsert {
                 account_id,
@@ -358,11 +402,15 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                 subject_norm,
                 location,
             } => {
-                // body_state is deliberately absent from the UPDATE:
-                // a header re-sync must never downgrade a fetched body.
-                // thread_id is resolved below, never taken from the wire.
-                tx.execute(
-                    "INSERT INTO messages(
+                // The whole upsert is one soft-failed unit: a bad op
+                // is reported and skipped, never allowed to kill the
+                // only writer thread.
+                let attempt = (|| -> Result<(), rusqlite::Error> {
+                    // body_state is deliberately absent from the UPDATE:
+                    // a header re-sync must never downgrade a fetched body.
+                    // thread_id is resolved below, never taken from the wire.
+                    tx.execute(
+                        "INSERT INTO messages(
                         account_id, dedupe_key, message_id_hdr,
                         subject, from_json, to_json, cc_json, reply_to_json,
                         date_utc, size_bytes, snippet
@@ -377,118 +425,114 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                         date_utc = excluded.date_utc,
                         size_bytes = excluded.size_bytes,
                         snippet = excluded.snippet",
-                    rusqlite::params![
-                        account_id,
-                        dedupe_key,
-                        message_id_hdr,
-                        subject,
-                        from_json,
-                        to_json,
-                        cc_json,
-                        reply_to_json,
-                        date_utc,
-                        size_bytes,
-                        snippet
-                    ],
-                )
-                .expect("message upsert");
+                        rusqlite::params![
+                            account_id,
+                            dedupe_key,
+                            message_id_hdr,
+                            subject,
+                            from_json,
+                            to_json,
+                            cc_json,
+                            reply_to_json,
+                            date_utc,
+                            size_bytes,
+                            snippet
+                        ],
+                    )?;
 
-                // Resolve (or create) the thread row and link the
-                // message: a Gmail thrid wins, else the generic
-                // (root_message_id OR subject_norm) cluster matches,
-                // else a fresh thread is inserted.
-                let thread_id: Option<i64> = if let Some(thrid) = gmail_thread_id.as_deref() {
-                    let existing: Option<i64> = tx
-                        .query_row(
-                            "SELECT id FROM threads
+                    // Resolve (or create) the thread row and link the
+                    // message: a Gmail thrid wins, else the generic
+                    // (root_message_id OR subject_norm) cluster matches,
+                    // else a fresh thread is inserted.
+                    let thread_id: Option<i64> = if let Some(thrid) = gmail_thread_id.as_deref() {
+                        let existing: Option<i64> = tx
+                            .query_row(
+                                "SELECT id FROM threads
                              WHERE account_id = ?1 AND gmail_thread_id = ?2",
-                            rusqlite::params![account_id, thrid],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .expect("gmail thread lookup");
-                    Some(existing.unwrap_or_else(|| {
-                        tx.execute(
-                            "INSERT INTO threads(
-                                account_id, gmail_thread_id, root_message_id,
-                                subject_norm, last_date
-                             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                            rusqlite::params![
-                                account_id,
-                                thrid,
-                                root_message_id,
-                                subject_norm,
-                                date_utc.unwrap_or(0)
-                            ],
-                        )
-                        .expect("gmail thread insert");
-                        tx.last_insert_rowid()
-                    }))
-                } else if root_message_id.is_some() || subject_norm.is_some() {
-                    let existing: Option<i64> = tx
-                        .query_row(
-                            "SELECT id FROM threads
+                                rusqlite::params![account_id, thrid],
+                                |row| row.get(0),
+                            )
+                            .optional()?;
+                        Some(match existing {
+                            Some(id) => id,
+                            None => {
+                                tx.execute(
+                                    "INSERT INTO threads(
+                                    account_id, gmail_thread_id, root_message_id,
+                                    subject_norm, last_date
+                                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                                    rusqlite::params![
+                                        account_id,
+                                        thrid,
+                                        root_message_id,
+                                        subject_norm,
+                                        date_utc.unwrap_or(0)
+                                    ],
+                                )?;
+                                tx.last_insert_rowid()
+                            }
+                        })
+                    } else if root_message_id.is_some() || subject_norm.is_some() {
+                        let existing: Option<i64> = tx
+                            .query_row(
+                                "SELECT id FROM threads
                              WHERE account_id = ?1
                                AND ((?2 IS NOT NULL AND root_message_id = ?2)
                                  OR (?3 IS NOT NULL AND subject_norm = ?3))
                              ORDER BY id
                              LIMIT 1",
-                            rusqlite::params![account_id, root_message_id, subject_norm],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .expect("generic thread lookup");
-                    Some(existing.unwrap_or_else(|| {
+                                rusqlite::params![account_id, root_message_id, subject_norm],
+                                |row| row.get(0),
+                            )
+                            .optional()?;
+                        Some(match existing {
+                            Some(id) => id,
+                            None => {
+                                tx.execute(
+                                    "INSERT INTO threads(
+                                    account_id, gmail_thread_id, root_message_id,
+                                    subject_norm, last_date
+                                 ) VALUES (?1, NULL, ?2, ?3, ?4)",
+                                    rusqlite::params![
+                                        account_id,
+                                        root_message_id,
+                                        subject_norm,
+                                        date_utc.unwrap_or(0)
+                                    ],
+                                )?;
+                                tx.last_insert_rowid()
+                            }
+                        })
+                    } else {
+                        // No threading signals: the message stays
+                        // unthreaded until a sibling upsert clusters it.
+                        None
+                    };
+                    if let Some(thread_id) = thread_id {
                         tx.execute(
-                            "INSERT INTO threads(
-                                account_id, gmail_thread_id, root_message_id,
-                                subject_norm, last_date
-                             ) VALUES (?1, NULL, ?2, ?3, ?4)",
-                            rusqlite::params![
-                                account_id,
-                                root_message_id,
-                                subject_norm,
-                                date_utc.unwrap_or(0)
-                            ],
-                        )
-                        .expect("generic thread insert");
-                        tx.last_insert_rowid()
-                    }))
-                } else {
-                    // No threading signals: the message stays
-                    // unthreaded until a sibling upsert clusters it.
-                    None
-                };
-                if let Some(thread_id) = thread_id {
-                    tx.execute(
-                        "UPDATE messages SET thread_id = ?1
+                            "UPDATE messages SET thread_id = ?1
                          WHERE account_id = ?2 AND dedupe_key = ?3",
-                        rusqlite::params![thread_id, account_id, dedupe_key],
-                    )
-                    .expect("thread link");
-                }
+                            rusqlite::params![thread_id, account_id, dedupe_key],
+                        )?;
+                    }
 
-                // Inline location: resolve both ids inside the same
-                // transaction (mailbox by name, message just upserted).
-                if let Some(loc) = location {
-                    let mailbox_id: i64 = tx
-                        .query_row(
+                    // Inline location: resolve both ids inside the same
+                    // transaction (mailbox by name, message just upserted).
+                    if let Some(loc) = location {
+                        let mailbox_id: i64 = tx.query_row(
                             "SELECT id FROM mailboxes
                              WHERE account_id = ?1 AND name = ?2",
                             rusqlite::params![account_id, loc.mailbox_name],
                             |row| row.get(0),
-                        )
-                        .expect("mailbox id for inline location");
-                    let message_id: i64 = tx
-                        .query_row(
+                        )?;
+                        let message_id: i64 = tx.query_row(
                             "SELECT id FROM messages
                              WHERE account_id = ?1 AND dedupe_key = ?2",
                             rusqlite::params![account_id, dedupe_key],
                             |row| row.get(0),
-                        )
-                        .expect("message id for inline location");
-                    tx.execute(
-                        "INSERT INTO message_locations(
+                        )?;
+                        tx.execute(
+                            "INSERT INTO message_locations(
                             message_id, mailbox_id, uid,
                             seen, flagged, answered, draft, deleted,
                             keywords_json, modseq
@@ -502,20 +546,24 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                             deleted = excluded.deleted,
                             keywords_json = excluded.keywords_json,
                             modseq = excluded.modseq",
-                        rusqlite::params![
-                            message_id,
-                            mailbox_id,
-                            loc.uid as i64,
-                            loc.seen,
-                            loc.flagged,
-                            loc.answered,
-                            loc.draft,
-                            loc.deleted,
-                            loc.keywords_json,
-                            loc.modseq.map(|v| v as i64)
-                        ],
-                    )
-                    .expect("inline location upsert");
+                            rusqlite::params![
+                                message_id,
+                                mailbox_id,
+                                loc.uid as i64,
+                                loc.seen,
+                                loc.flagged,
+                                loc.answered,
+                                loc.draft,
+                                loc.deleted,
+                                loc.keywords_json,
+                                loc.modseq.map(|v| v as i64)
+                            ],
+                        )?;
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = attempt {
+                    on_error(format!("message upsert failed: {err}"));
                 }
             }
             WriteOp::LocationUpsert {
@@ -530,7 +578,7 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                 keywords_json,
                 modseq,
             } => {
-                tx.execute(
+                if let Err(err) = tx.execute(
                     "INSERT INTO message_locations(
                         message_id, mailbox_id, uid,
                         seen, flagged, answered, draft, deleted,
@@ -557,8 +605,9 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                         keywords_json,
                         modseq.map(|v| v as i64)
                     ],
-                )
-                .expect("location upsert");
+                ) {
+                    on_error(format!("location upsert failed: {err}"))
+                }
             }
             WriteOp::ThreadUpsert {
                 account_id,
@@ -572,7 +621,7 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                     // conflict; last_date moves forward, identity
                     // fields keep their stored values on None.
                     Some(thrid) => {
-                        tx.execute(
+                        if let Err(err) = tx.execute(
                             "INSERT INTO threads(
                                 account_id, gmail_thread_id, root_message_id,
                                 subject_norm, last_date
@@ -590,24 +639,22 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                                 subject_norm,
                                 last_date
                             ],
-                        )
-                        .expect("gmail thread upsert");
+                        ) { on_error(format!("gmail thread upsert failed: {err}")) }
                     }
                     // No thrid: plain insert — clustering across
                     // references is decided by the sync engine.
                     None => {
-                        tx.execute(
+                        if let Err(err) = tx.execute(
                             "INSERT INTO threads(
                                 account_id, root_message_id, subject_norm, last_date
                              ) VALUES (?1, ?2, ?3, ?4)",
                             rusqlite::params![account_id, root_message_id, subject_norm, last_date],
-                        )
-                        .expect("generic thread insert");
+                        ) { on_error(format!("generic thread insert failed: {err}")) }
                     }
                 }
             }
             WriteOp::ThreadCountersRecompute { account_id } => {
-                tx.execute(
+                if let Err(err) = tx.execute(
                     "UPDATE threads SET
                         message_count = (SELECT COUNT(*) FROM messages
                                          WHERE thread_id = threads.id),
@@ -616,20 +663,23 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp]) -> bool {
                                         WHERE m.thread_id = threads.id AND l.seen = 0)
                      WHERE account_id = ?1",
                     rusqlite::params![account_id],
-                )
-                .expect("thread counters recompute");
+                ) {
+                    on_error(format!("thread counters recompute failed: {err}"))
+                }
             }
             WriteOp::Flush(ack) => {
                 // Commit what precedes the marker, then ack: the ack
-                // sender only observes the batch boundary it asked for.
+                // sender only observes the batch boundary it asked
+                // for. The rest of the batch continues in a fresh
+                // transaction so nothing queued behind the marker is
+                // lost.
                 tx.commit().expect("writer commit");
                 let _ = ack.send(());
-                return true;
+                tx = conn.transaction().expect("writer transaction");
             }
         }
     }
     tx.commit().expect("writer commit");
-    false
 }
 
 #[cfg(test)]
@@ -1038,5 +1088,174 @@ mod tests {
             .expect("locations row");
         assert_eq!(locations, 2);
         assert_eq!(seen_sum, 1);
+    }
+
+    /// A migrated scratch connection for white-box `flush_batch`
+    /// calls.
+    fn scratch_conn(dir: &tempfile::TempDir) -> Connection {
+        let path = dir.path().join(super::super::DB_FILE_NAME);
+        let mut conn = crate::infra::db::open_rw(&path).expect("open scratch");
+        migrations::run(&mut conn).expect("migrate scratch");
+        conn
+    }
+
+    fn meta_count(conn: &Connection, key: &str) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM meta WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .expect("meta count")
+    }
+
+    /// Operations queued behind a Flush marker inside one drained
+    /// batch must still be applied (the ack must not cost the tail).
+    #[test]
+    fn flush_batch_applies_operations_after_a_flush_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = scratch_conn(&dir);
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let batch = vec![
+            WriteOp::MetaPut {
+                key: "before".into(),
+                value: "1".into(),
+            },
+            WriteOp::Flush(ack_tx),
+            WriteOp::MetaPut {
+                key: "after".into(),
+                value: "2".into(),
+            },
+        ];
+        flush_batch(&mut conn, &batch, &|_| {});
+        ack_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("ack");
+        assert_eq!(meta_count(&conn, "before"), 1);
+        assert_eq!(
+            meta_count(&conn, "after"),
+            1,
+            "ops queued after a flush marker must still land"
+        );
+    }
+
+    /// Every Flush marker in one batch gets its own commit and ack.
+    #[test]
+    fn flush_batch_acks_every_flush_marker_in_one_batch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = scratch_conn(&dir);
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+        let batch = vec![
+            WriteOp::MetaPut {
+                key: "one".into(),
+                value: "1".into(),
+            },
+            WriteOp::Flush(first_tx),
+            WriteOp::MetaPut {
+                key: "two".into(),
+                value: "2".into(),
+            },
+            WriteOp::Flush(second_tx),
+            WriteOp::MetaPut {
+                key: "three".into(),
+                value: "3".into(),
+            },
+        ];
+        flush_batch(&mut conn, &batch, &|_| {});
+        first_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("first flush acked");
+        second_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("second flush acked");
+        assert_eq!(meta_count(&conn, "one"), 1);
+        assert_eq!(meta_count(&conn, "two"), 1);
+        assert_eq!(meta_count(&conn, "three"), 1);
+    }
+
+    /// A failing operation is reported through the error hook and
+    /// skipped; the writer keeps serving later operations.
+    #[test]
+    fn flush_batch_skips_failing_operations_and_keeps_going() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = scratch_conn(&dir);
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let reported: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let on_error = |msg: String| {
+            reported.lock().expect("report lock").push(msg);
+        };
+        let batch = vec![
+            WriteOp::MailboxUpsert {
+                account_id: 999,
+                name: "INBOX".into(),
+                kind: "mail".into(),
+                special_use: None,
+                uidvalidity: None,
+                uidnext: None,
+                highest_modseq: None,
+            },
+            WriteOp::MetaPut {
+                key: "survivor".into(),
+                value: "yes".into(),
+            },
+            WriteOp::Flush(ack_tx),
+        ];
+        flush_batch(&mut conn, &batch, &on_error);
+        ack_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("ack");
+        assert_eq!(
+            meta_count(&conn, "survivor"),
+            1,
+            "the writer must keep serving after a failed op"
+        );
+        assert!(
+            !reported.lock().expect("report lock").is_empty(),
+            "the failed op must be reported through the error hook"
+        );
+    }
+
+    /// The public actor surface reports failed ops and keeps the
+    /// thread alive for subsequent flushes.
+    #[test]
+    fn writer_actor_survives_a_failing_operation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(super::super::DB_FILE_NAME);
+        let mut seed = crate::infra::db::open_rw(&path).expect("open seed");
+        migrations::run(&mut seed).expect("migrate seed");
+        drop(seed);
+
+        let reported: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&reported);
+        let writer = WriterActor::spawn_with_error_hook(&path, move |msg| {
+            recorder.lock().expect("report lock").push(msg);
+        });
+        writer.enqueue(WriteOp::MailboxUpsert {
+            account_id: 999,
+            name: "INBOX".into(),
+            kind: "mail".into(),
+            special_use: None,
+            uidvalidity: None,
+            uidnext: None,
+            highest_modseq: None,
+        });
+        writer.enqueue(WriteOp::MetaPut {
+            key: "after-failure".into(),
+            value: "ok".into(),
+        });
+        writer.flush();
+
+        assert_eq!(
+            meta_count(&conn_of(&path), "after-failure"),
+            1,
+            "ops after a failed op must still land"
+        );
+        assert!(
+            !reported.lock().expect("report lock").is_empty(),
+            "failure must reach the error hook"
+        );
+    }
+
+    fn conn_of(path: &std::path::Path) -> Connection {
+        crate::infra::db::open_readonly(path).expect("re-open")
     }
 }
