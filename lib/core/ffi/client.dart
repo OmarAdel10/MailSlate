@@ -3,7 +3,7 @@ import 'package:mailslate/src/rust/api/system.dart' as rust;
 import 'package:mailslate/src/rust/frb_generated.dart';
 
 export 'package:mailslate/src/rust/api/system.dart'
-    show DaemonState, DaemonStatus, PingInfo;
+    show AppEvent, DaemonState, DaemonStatus, PingInfo;
 
 /// Thin façade over the generated Rust bindings.
 ///
@@ -35,11 +35,13 @@ class FfiClient {
   /// Pure path lookup on the Rust side; works while the daemon is down.
   Future<String> daemonLogDir() => _guard(rust.daemonLogDir);
 
-  /// Daemon push events (new mail, sync progress, …).
+  /// Daemon push events as a single-subscription typed stream.
   ///
-  /// The daemon event channel ships with the M2 sync engine; until then the
-  /// stream is empty and stays open.
-  Stream<Object?> events() => const Stream<Object?>.empty();
+  /// Never errors and never ends on its own: the Rust loop heartbeats
+  /// past the daemon's idle timeout and reconnects with backoff while
+  /// the daemon is down (ARCHITECTURE §5). Cancelling the subscription
+  /// tears the event connection down; listening again dials it back up.
+  Stream<rust.AppEvent> events() => rust.appEvents();
 
   Future<T> _guard<T>(Future<T> Function() call) async {
     try {

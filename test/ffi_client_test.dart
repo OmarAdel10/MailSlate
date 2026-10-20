@@ -112,8 +112,17 @@ void main() {
     expect(info.protocolVersion, 1);
   });
 
-  test('events stays open and empty', () async {
+  test('events forwards the FRB AppEvent stream', () async {
+    api.eventStream = Stream<AppEvent>.fromIterable([
+      const AppEvent.accountStatus(account: 1, state: 'syncing'),
+      const AppEvent.other(name: 'future_thing'),
+    ]);
+
     final events = await const FfiClient().events().toList();
-    expect(events, isEmpty);
+
+    expect(events, [
+      const AppEvent.accountStatus(account: 1, state: 'syncing'),
+      const AppEvent.other(name: 'future_thing'),
+    ]);
   });
 }

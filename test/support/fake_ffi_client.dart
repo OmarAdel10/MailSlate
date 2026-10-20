@@ -15,6 +15,7 @@ class FakeFfiClient extends FfiClient {
     this.statusFailure,
     this.statusThrow,
     this.logDir = '',
+    this.eventStream = _emptyEvents,
   });
 
   /// Returned by [daemonStatus] when [statusFailure] is null.
@@ -34,6 +35,12 @@ class FakeFfiClient extends FfiClient {
 
   /// Returned by [daemonLogDir].
   String logDir;
+
+  /// Builds the stream returned by [FfiClient.events]; fresh per call,
+  /// like the real bridge (each `appEvents()` call dials a new Rust sink).
+  Stream<AppEvent> Function() eventStream;
+
+  static Stream<AppEvent> _emptyEvents() => const Stream<AppEvent>.empty();
 
   /// How often [startDaemon] was called.
   int startCalls = 0;
@@ -77,6 +84,9 @@ class FakeFfiClient extends FfiClient {
 
   @override
   Future<String> daemonLogDir() async => logDir;
+
+  @override
+  Stream<AppEvent> events() => eventStream();
 
   @override
   Future<PingInfo> ping() async => pingResult;
