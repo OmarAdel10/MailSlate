@@ -69,7 +69,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -134512186;
+  int get rustContentHash => -1144336506;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -81,6 +81,8 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  Stream<AppEvent> crateApiSystemAppEvents();
+
   Future<String> crateApiSystemDaemonLogDir();
 
   Future<DaemonStatus> crateApiSystemDaemonStatus();
@@ -101,6 +103,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  Stream<AppEvent> crateApiSystemAppEvents() {
+    final sink = RustStreamSink<AppEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_StreamSink_app_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 1,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_daemon_error,
+          ),
+          constMeta: kCrateApiSystemAppEventsConstMeta,
+          argValues: [sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiSystemAppEventsConstMeta =>
+      const TaskConstMeta(debugName: "app_events", argNames: ["sink"]);
+
+  @override
   Future<String> crateApiSystemDaemonLogDir() {
     return handler.executeNormal(
       NormalTask(
@@ -109,7 +143,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 1,
+            funcId: 2,
             port: port_,
           );
         },
@@ -136,7 +170,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 2,
+            funcId: 3,
             port: port_,
           );
         },
@@ -163,7 +197,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 4,
             port: port_,
           );
         },
@@ -190,7 +224,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -217,7 +251,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 6,
             port: port_,
           );
         },
@@ -236,9 +270,51 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "start_daemon", argNames: []);
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AnyhowException(raw as String);
+  }
+
+  @protected
+  RustStreamSink<AppEvent> dco_decode_StreamSink_app_event_Sse(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
+  @protected
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as String;
+  }
+
+  @protected
+  AppEvent dco_decode_app_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    switch (raw[0]) {
+      case 0:
+        return AppEvent_AccountStatus(
+          account: dco_decode_i_64(raw[1]),
+          state: dco_decode_String(raw[2]),
+        );
+      case 1:
+        return AppEvent_SyncProgress(
+          account: dco_decode_i_64(raw[1]),
+          mailbox: dco_decode_String(raw[2]),
+          phase: dco_decode_String(raw[3]),
+          done: dco_decode_u_32(raw[4]),
+          total: dco_decode_u_32(raw[5]),
+        );
+      case 2:
+        return AppEvent_OauthUrlReady(url: dco_decode_String(raw[1]));
+      case 3:
+        return AppEvent_OauthCompleted(email: dco_decode_String(raw[1]));
+      case 4:
+        return AppEvent_OauthFailed(reason: dco_decode_String(raw[1]));
+      case 5:
+        return AppEvent_Other(name: dco_decode_String(raw[1]));
+      default:
+        throw Exception("unreachable");
+    }
   }
 
   @protected
@@ -292,6 +368,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeI64(raw);
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
@@ -340,10 +422,65 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_String(deserializer);
+    return AnyhowException(inner);
+  }
+
+  @protected
+  RustStreamSink<AppEvent> sse_decode_StreamSink_app_event_Sse(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_list_prim_u_8_strict(deserializer);
     return utf8.decoder.convert(inner);
+  }
+
+  @protected
+  AppEvent sse_decode_app_event(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var tag_ = sse_decode_i_32(deserializer);
+    switch (tag_) {
+      case 0:
+        var var_account = sse_decode_i_64(deserializer);
+        var var_state = sse_decode_String(deserializer);
+        return AppEvent_AccountStatus(account: var_account, state: var_state);
+      case 1:
+        var var_account = sse_decode_i_64(deserializer);
+        var var_mailbox = sse_decode_String(deserializer);
+        var var_phase = sse_decode_String(deserializer);
+        var var_done = sse_decode_u_32(deserializer);
+        var var_total = sse_decode_u_32(deserializer);
+        return AppEvent_SyncProgress(
+          account: var_account,
+          mailbox: var_mailbox,
+          phase: var_phase,
+          done: var_done,
+          total: var_total,
+        );
+      case 2:
+        var var_url = sse_decode_String(deserializer);
+        return AppEvent_OauthUrlReady(url: var_url);
+      case 3:
+        var var_email = sse_decode_String(deserializer);
+        return AppEvent_OauthCompleted(email: var_email);
+      case 4:
+        var var_reason = sse_decode_String(deserializer);
+        return AppEvent_OauthFailed(reason: var_reason);
+      case 5:
+        var var_name = sse_decode_String(deserializer);
+        return AppEvent_Other(name: var_name);
+      default:
+        throw UnimplementedError('');
+    }
   }
 
   @protected
@@ -395,6 +532,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int sse_decode_i_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getInt32();
+  }
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getPlatformInt64();
   }
 
   @protected
@@ -455,9 +598,71 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_StreamSink_app_event_Sse(
+    RustStreamSink<AppEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_app_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
+  }
+
+  @protected
   void sse_encode_String(String self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer);
+  }
+
+  @protected
+  void sse_encode_app_event(AppEvent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    switch (self) {
+      case AppEvent_AccountStatus(account: final account, state: final state):
+        sse_encode_i_32(0, serializer);
+        sse_encode_i_64(account, serializer);
+        sse_encode_String(state, serializer);
+      case AppEvent_SyncProgress(
+        account: final account,
+        mailbox: final mailbox,
+        phase: final phase,
+        done: final done,
+        total: final total,
+      ):
+        sse_encode_i_32(1, serializer);
+        sse_encode_i_64(account, serializer);
+        sse_encode_String(mailbox, serializer);
+        sse_encode_String(phase, serializer);
+        sse_encode_u_32(done, serializer);
+        sse_encode_u_32(total, serializer);
+      case AppEvent_OauthUrlReady(url: final url):
+        sse_encode_i_32(2, serializer);
+        sse_encode_String(url, serializer);
+      case AppEvent_OauthCompleted(email: final email):
+        sse_encode_i_32(3, serializer);
+        sse_encode_String(email, serializer);
+      case AppEvent_OauthFailed(reason: final reason):
+        sse_encode_i_32(4, serializer);
+        sse_encode_String(reason, serializer);
+      case AppEvent_Other(name: final name):
+        sse_encode_i_32(5, serializer);
+        sse_encode_String(name, serializer);
+    }
   }
 
   @protected
@@ -498,6 +703,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_i_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putInt32(self);
+  }
+
+  @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putPlatformInt64(self);
   }
 
   @protected

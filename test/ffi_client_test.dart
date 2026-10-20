@@ -15,12 +15,19 @@ class FakeRustLibApi extends RustLibApi {
 
   int pingCalls = 0;
 
+  /// Stream the fake [FfiClient.events] can subscribe to in tests.
+  Stream<AppEvent> eventStream = const Stream<AppEvent>.empty();
+
   void reset() {
     status = null;
     pingResult = null;
     error = null;
     pingCalls = 0;
+    eventStream = const Stream<AppEvent>.empty();
   }
+
+  @override
+  Stream<AppEvent> crateApiSystemAppEvents() => eventStream;
 
   @override
   Future<DaemonStatus> crateApiSystemDaemonStatus() async {

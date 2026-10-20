@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -134512186;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1144336506;
 
 // Section: executor
 
@@ -47,6 +47,45 @@ flutter_rust_bridge::frb_generated_default_handler!();
 
 // Section: wire_funcs
 
+fn wire__crate__api__system__app_events_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "app_events",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_sink = <StreamSink<
+                crate::api::system::AppEvent,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::system::DaemonError>(
+                    (move || async move {
+                        let output_ok = crate::api::system::app_events(api_sink).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__system__daemon_log_dir_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -221,11 +260,79 @@ fn wire__crate__api__system__start_daemon_impl(
 
 // Section: dart2rust
 
+impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::anyhow::anyhow!("{}", inner);
+    }
+}
+
+impl SseDecode
+    for StreamSink<crate::api::system::AppEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
 impl SseDecode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <Vec<u8>>::sse_decode(deserializer);
         return String::from_utf8(inner).unwrap();
+    }
+}
+
+impl SseDecode for crate::api::system::AppEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_account = <i64>::sse_decode(deserializer);
+                let mut var_state = <String>::sse_decode(deserializer);
+                return crate::api::system::AppEvent::AccountStatus {
+                    account: var_account,
+                    state: var_state,
+                };
+            }
+            1 => {
+                let mut var_account = <i64>::sse_decode(deserializer);
+                let mut var_mailbox = <String>::sse_decode(deserializer);
+                let mut var_phase = <String>::sse_decode(deserializer);
+                let mut var_done = <u32>::sse_decode(deserializer);
+                let mut var_total = <u32>::sse_decode(deserializer);
+                return crate::api::system::AppEvent::SyncProgress {
+                    account: var_account,
+                    mailbox: var_mailbox,
+                    phase: var_phase,
+                    done: var_done,
+                    total: var_total,
+                };
+            }
+            2 => {
+                let mut var_url = <String>::sse_decode(deserializer);
+                return crate::api::system::AppEvent::OauthUrlReady { url: var_url };
+            }
+            3 => {
+                let mut var_email = <String>::sse_decode(deserializer);
+                return crate::api::system::AppEvent::OauthCompleted { email: var_email };
+            }
+            4 => {
+                let mut var_reason = <String>::sse_decode(deserializer);
+                return crate::api::system::AppEvent::OauthFailed { reason: var_reason };
+            }
+            5 => {
+                let mut var_name = <String>::sse_decode(deserializer);
+                return crate::api::system::AppEvent::Other { name: var_name };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 
@@ -280,6 +387,13 @@ impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_i32::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for i64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_i64::<NativeEndian>().unwrap()
     }
 }
 
@@ -357,11 +471,12 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__system__daemon_log_dir_impl(port, ptr, rust_vec_len, data_len),
-        2 => wire__crate__api__system__daemon_status_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__system__init_app_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__system__ping_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__system__start_daemon_impl(port, ptr, rust_vec_len, data_len),
+        1 => wire__crate__api__system__app_events_impl(port, ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__system__daemon_log_dir_impl(port, ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__system__daemon_status_impl(port, ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__system__init_app_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__system__ping_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__system__start_daemon_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -380,6 +495,57 @@ fn pde_ffi_dispatcher_sync_impl(
 
 // Section: rust2dart
 
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::system::AppEvent {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::api::system::AppEvent::AccountStatus { account, state } => [
+                0.into_dart(),
+                account.into_into_dart().into_dart(),
+                state.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::system::AppEvent::SyncProgress {
+                account,
+                mailbox,
+                phase,
+                done,
+                total,
+            } => [
+                1.into_dart(),
+                account.into_into_dart().into_dart(),
+                mailbox.into_into_dart().into_dart(),
+                phase.into_into_dart().into_dart(),
+                done.into_into_dart().into_dart(),
+                total.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::system::AppEvent::OauthUrlReady { url } => {
+                [2.into_dart(), url.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::system::AppEvent::OauthCompleted { email } => {
+                [3.into_dart(), email.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::system::AppEvent::OauthFailed { reason } => {
+                [4.into_dart(), reason.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::system::AppEvent::Other { name } => {
+                [5.into_dart(), name.into_into_dart().into_dart()].into_dart()
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::system::AppEvent {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::system::AppEvent>
+    for crate::api::system::AppEvent
+{
+    fn into_into_dart(self) -> crate::api::system::AppEvent {
+        self
+    }
+}
 // Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::system::DaemonError {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
@@ -464,10 +630,72 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::system::PingInfo>
     }
 }
 
+impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(format!("{:?}", self), serializer);
+    }
+}
+
+impl SseEncode
+    for StreamSink<crate::api::system::AppEvent, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Vec<u8>>::sse_encode(self.into_bytes(), serializer);
+    }
+}
+
+impl SseEncode for crate::api::system::AppEvent {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::system::AppEvent::AccountStatus { account, state } => {
+                <i32>::sse_encode(0, serializer);
+                <i64>::sse_encode(account, serializer);
+                <String>::sse_encode(state, serializer);
+            }
+            crate::api::system::AppEvent::SyncProgress {
+                account,
+                mailbox,
+                phase,
+                done,
+                total,
+            } => {
+                <i32>::sse_encode(1, serializer);
+                <i64>::sse_encode(account, serializer);
+                <String>::sse_encode(mailbox, serializer);
+                <String>::sse_encode(phase, serializer);
+                <u32>::sse_encode(done, serializer);
+                <u32>::sse_encode(total, serializer);
+            }
+            crate::api::system::AppEvent::OauthUrlReady { url } => {
+                <i32>::sse_encode(2, serializer);
+                <String>::sse_encode(url, serializer);
+            }
+            crate::api::system::AppEvent::OauthCompleted { email } => {
+                <i32>::sse_encode(3, serializer);
+                <String>::sse_encode(email, serializer);
+            }
+            crate::api::system::AppEvent::OauthFailed { reason } => {
+                <i32>::sse_encode(4, serializer);
+                <String>::sse_encode(reason, serializer);
+            }
+            crate::api::system::AppEvent::Other { name } => {
+                <i32>::sse_encode(5, serializer);
+                <String>::sse_encode(name, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
     }
 }
 
@@ -516,6 +744,13 @@ impl SseEncode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for i64 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_i64::<NativeEndian>(self).unwrap();
     }
 }
 

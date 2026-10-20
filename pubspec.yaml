@@ -38,6 +38,7 @@ dependencies:
     path: rust_builder
   flutter_rust_bridge: 2.13.0
   flutter_bloc: ^9.1.1
+  freezed_annotation: ^3.0.0
   get_it: ^9.3.0
   material_symbols_icons: ^4.2960.0
 
@@ -53,6 +54,12 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+
+  # freezed generates Dart classes for flutter_rust_bridge enums with
+  # fields (e.g. AppEvent). Run after every FRB codegen:
+  #   dart run build_runner build --delete-conflicting-outputs
+  build_runner: ^2.4.4
+  freezed: ^3.0.6
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
