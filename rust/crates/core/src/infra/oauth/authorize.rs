@@ -5,7 +5,8 @@ use crate::infra::oauth::providers::ProviderProfile;
 /// Builds the consent-screen URL: `response_type=code`, the PKCE S256
 /// challenge, the loopback redirect, and the provider's scope. The
 /// URL builder percent-encodes the scope's spaces for the multi-scope
-/// providers.
+/// providers. Google additionally carries `access_type=offline` so
+/// the consent grants a refresh token (ARCHITECTURE §8 token refresh).
 pub fn authorize_url(
     profile: &ProviderProfile,
     client_id: &str,
@@ -13,19 +14,20 @@ pub fn authorize_url(
     state: &str,
     code_challenge: &str,
 ) -> String {
-    let url = reqwest::Url::parse_with_params(
-        profile.auth_url,
-        [
-            ("response_type", "code"),
-            ("client_id", client_id),
-            ("redirect_uri", redirect_uri),
-            ("state", state),
-            ("code_challenge", code_challenge),
-            ("code_challenge_method", "S256"),
-            ("scope", profile.scope),
-        ],
-    )
-    .expect("profile auth_url is a valid url");
+    let mut params: Vec<(&str, &str)> = vec![
+        ("response_type", "code"),
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+        ("state", state),
+        ("code_challenge", code_challenge),
+        ("code_challenge_method", "S256"),
+        ("scope", profile.scope),
+    ];
+    if profile.access_type_offline {
+        params.push(("access_type", "offline"));
+    }
+    let url = reqwest::Url::parse_with_params(profile.auth_url, params)
+        .expect("profile auth_url is a valid url");
     url.to_string()
 }
 
@@ -65,6 +67,41 @@ mod tests {
         assert_eq!(get("code_challenge"), "challenge-1");
         assert_eq!(get("code_challenge_method"), "S256");
         assert_eq!(get("scope"), "https://mail.google.com/");
+    }
+
+    #[test]
+    fn authorize_url_requests_offline_access_for_google() {
+        let url = authorize_url(
+            profile(Provider::Google),
+            "client-id",
+            "http://127.0.0.1:53123/callback",
+            "st-1",
+            "challenge-1",
+        );
+        let parsed = reqwest::Url::parse(&url).expect("built url parses");
+        let pairs: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
+        let access_type = pairs
+            .iter()
+            .find(|(key, _)| key == "access_type")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| panic!("missing access_type"));
+        assert_eq!(access_type, "offline");
+    }
+
+    #[test]
+    fn authorize_url_omits_access_type_for_microsoft() {
+        let url = authorize_url(
+            profile(Provider::Microsoft),
+            "ms-id",
+            "http://127.0.0.1:53124/callback",
+            "st-2",
+            "challenge-2",
+        );
+        let parsed = reqwest::Url::parse(&url).expect("built url parses");
+        assert!(
+            parsed.query_pairs().all(|(key, _)| key != "access_type"),
+            "Microsoft must not carry access_type (offline_access scope covers it)"
+        );
     }
 
     #[test]

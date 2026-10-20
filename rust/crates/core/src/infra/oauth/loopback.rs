@@ -104,19 +104,21 @@ fn recv_one(
     let _ = tx.send(result);
 }
 
-/// Extracts `(code, state)` from a callback URL's query string, or
-/// `None` when either parameter is missing.
+/// Extracts `(code, state)` from a `/callback` request's query
+/// string, percent-decoding both values, or `None` when the path is
+/// not `/callback` or either parameter is missing.
 fn parse_query(url: &str) -> Option<(String, String)> {
-    let query = url.split_once('?')?.1;
+    let (path, query) = url.split_once('?')?;
+    if path != "/callback" {
+        return None;
+    }
     let mut code = None;
     let mut state = None;
-    for pair in query.split('&') {
-        if let Some((key, value)) = pair.split_once('=') {
-            match key {
-                "code" => code = Some(value.to_string()),
-                "state" => state = Some(value.to_string()),
-                _ => {}
-            }
+    for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            _ => {}
         }
     }
     Some((code?, state?))
@@ -127,6 +129,25 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::time::Duration;
+
+    /// Query values must be percent-decoded before use (providers may
+    /// encode punctuation in codes and states).
+    #[test]
+    fn parse_query_percent_decodes_values() {
+        let (code, state) =
+            parse_query("/callback?code=cd%209%2Fx&state=st%2D1").expect("decoded pair");
+        assert_eq!(code, "cd 9/x");
+        assert_eq!(state, "st-1");
+    }
+
+    /// Only `/callback` resolves the flow; anything else keeps waiting
+    /// (defensive path check against probes hitting the port).
+    #[test]
+    fn parse_query_rejects_paths_other_than_callback() {
+        assert!(parse_query("/evil?code=a&state=b").is_none());
+        assert!(parse_query("/?code=a&state=b").is_none());
+        assert!(parse_query("/callback?code=a&state=b").is_some());
+    }
 
     /// A successful redirect hands back both parameters.
     #[test]

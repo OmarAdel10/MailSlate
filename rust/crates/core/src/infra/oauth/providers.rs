@@ -53,6 +53,9 @@ pub struct ProviderProfile {
     pub token_url: &'static str,
     /// Space-separated OAuth scopes requested at the authorize step.
     pub scope: &'static str,
+    /// Google refresh tokens require `access_type=offline` on the
+    /// authorize URL; Microsoft covers offline access via its scope.
+    pub access_type_offline: bool,
     pub imap_host: &'static str,
     pub imap_port: u16,
     pub imap_security: Security,
@@ -68,6 +71,7 @@ pub fn profile(provider: Provider) -> &'static ProviderProfile {
         auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
         token_url: "https://oauth2.googleapis.com/token",
         scope: "https://mail.google.com/",
+        access_type_offline: true,
         imap_host: "imap.gmail.com",
         imap_port: 993,
         imap_security: Security::Tls,
@@ -80,6 +84,7 @@ pub fn profile(provider: Provider) -> &'static ProviderProfile {
         auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
         token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
         scope: "offline_access IMAP.AccessAsUser.All SMTP.Send",
+        access_type_offline: false,
         imap_host: "outlook.office365.com",
         imap_port: 993,
         imap_security: Security::Tls,
@@ -119,6 +124,10 @@ mod tests {
         assert_eq!(p.auth_url, "https://accounts.google.com/o/oauth2/v2/auth");
         assert_eq!(p.token_url, "https://oauth2.googleapis.com/token");
         assert_eq!(p.scope, "https://mail.google.com/");
+        assert!(
+            p.access_type_offline,
+            "Google grants refresh tokens only with access_type=offline"
+        );
         assert_eq!(p.imap_host, "imap.gmail.com");
         assert_eq!(p.imap_port, 993);
         assert_eq!(p.imap_security, Security::Tls);
@@ -140,6 +149,10 @@ mod tests {
             "https://login.microsoftonline.com/common/oauth2/v2.0/token"
         );
         assert_eq!(p.scope, "offline_access IMAP.AccessAsUser.All SMTP.Send");
+        assert!(
+            !p.access_type_offline,
+            "Microsoft requests offline access via the scope, not access_type"
+        );
         assert_eq!(p.imap_host, "outlook.office365.com");
         assert_eq!(p.imap_port, 993);
         assert_eq!(p.imap_security, Security::Tls);
