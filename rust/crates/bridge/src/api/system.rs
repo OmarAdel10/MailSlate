@@ -269,7 +269,7 @@ async fn status_for(socket: &Path) -> DaemonStatus {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
     use mailslate_protocol::message::{Request, Response};
@@ -281,8 +281,9 @@ mod tests {
     /// (`MAILSLATE_DATA_DIR`, `MAILSLATE_DAEMON_PATH`,
     /// `XDG_RUNTIME_DIR`); sibling tests in this binary run in
     /// parallel. Async-aware because the guarded tests hold it across
-    /// await points.
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// await points. Shared with the accounts API tests: one lock, one
+    /// environment.
+    pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn serve(listener: UnixListener) {
         while let Ok((mut stream, _)) = listener.accept().await {
