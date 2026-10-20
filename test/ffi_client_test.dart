@@ -36,6 +36,10 @@ class FakeRustLibApi extends RustLibApi {
   AccountPatch? lastPatch;
   int? lastRemoveId;
 
+  /// Captured test-connection arguments.
+  ImapDraft? lastTestDraft;
+  String? lastTestPassword;
+
   int pingCalls = 0;
 
   /// Stream the fake [FfiClient.events] can subscribe to in tests.
@@ -56,6 +60,8 @@ class FakeRustLibApi extends RustLibApi {
     lastUpdateId = null;
     lastPatch = null;
     lastRemoveId = null;
+    lastTestDraft = null;
+    lastTestPassword = null;
     pingCalls = 0;
     eventStream = const Stream<AppEvent>.empty();
   }
@@ -132,6 +138,23 @@ class FakeRustLibApi extends RustLibApi {
       throw failure;
     }
     lastRemoveId = accountId;
+  }
+
+  @override
+  Future<ConnectionTest> crateApiAccountsTestConnection({
+    required ImapDraft draft,
+    required String password,
+  }) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    lastTestDraft = draft;
+    lastTestPassword = password;
+    return const ConnectionTest(
+      imap: ConnectionStep(ok: true),
+      smtp: ConnectionStep(ok: true),
+    );
   }
 
   @override
@@ -347,4 +370,56 @@ void main() {
       expect(api.lastRemoveId, 9);
     },
   );
+
+  test('testConnection forwards the draft and password', () async {
+    const draft = ImapDraft(
+      email: 'private@example.test',
+      imapHost: 'imap.example.test',
+      imapPort: 993,
+      imapSecurity: 'ssl',
+      smtpHost: 'smtp.example.test',
+      smtpPort: 465,
+      smtpSecurity: 'ssl',
+    );
+
+    final test = await const FfiClient().testConnection(
+      draft: draft,
+      password: 'secret',
+    );
+
+    expect(test.imap.ok, isTrue);
+    expect(test.smtp.ok, isTrue);
+    expect(api.lastTestDraft, draft);
+    expect(api.lastTestPassword, 'secret');
+  });
+
+  test('testConnection maps DaemonError to an AppFailure', () async {
+    api.accountsError = DaemonError(
+      kind: 'validation',
+      message: 'bad account',
+      retryable: false,
+    );
+
+    await expectLater(
+      const FfiClient().testConnection(
+        draft: ImapDraft(
+          email: 'private@example.test',
+          imapHost: 'imap.example.test',
+          imapPort: 993,
+          imapSecurity: 'ssl',
+          smtpHost: 'smtp.example.test',
+          smtpPort: 465,
+          smtpSecurity: 'ssl',
+        ),
+        password: 'secret',
+      ),
+      throwsA(
+        isA<ValidationFailure>().having(
+          (failure) => failure.message,
+          'message',
+          'bad account',
+        ),
+      ),
+    );
+  });
 }

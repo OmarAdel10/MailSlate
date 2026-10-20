@@ -9,6 +9,7 @@ use mailslate_core::domain::accounts::{
 };
 use mailslate_core::infra::db::pool::ReadPool;
 use mailslate_core::infra::db::writer::WriterActor;
+use mailslate_core::infra::imap::probe::{ProbeError, probe_imap_login, probe_smtp};
 use mailslate_core::infra::keyring::KeyStore;
 use mailslate_core::infra::oauth::authorize;
 use mailslate_core::infra::oauth::grant::{self, TokenPoster};
@@ -83,6 +84,7 @@ pub fn dispatch(
         methods::PING => Ok(Dispatched::Reply(ping_result())),
         methods::SHUTDOWN => Ok(Dispatched::Stop(json!({ "ok": true }))),
         methods::ADD_IMAP_ACCOUNT => add_imap_account_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::TEST_CONNECTION => test_connection_dispatch(ctx, params).map(Dispatched::Reply),
         methods::REMOVE_ACCOUNT => remove_account_dispatch(ctx, params).map(Dispatched::Reply),
         methods::UPDATE_ACCOUNT => update_account_dispatch(ctx, params).map(Dispatched::Reply),
         methods::GET_ACCOUNTS => get_accounts_dispatch(ctx).map(Dispatched::Reply),
@@ -99,9 +101,9 @@ pub fn dispatch(
     }
 }
 
-/// Parses and applies `add_imap_account`, persisting the row and the
-/// secret before replying.
-fn add_imap_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+/// Parses the shared `{conn, creds}` payload accepted by
+/// `add_imap_account` and `test_connection`.
+fn conn_and_password(params: &Value) -> Result<(ImapAccountDraft, String), BridgeError> {
     let conn = required(params, "conn")?;
     let password = string(required(params, "creds")?, "password")?;
     let email = string(conn, "email")?;
@@ -116,9 +118,51 @@ fn add_imap_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value,
         smtp_security: security(&string(conn, "smtp_security")?)?,
         auth: AuthKind::Password,
     };
+    Ok((draft, password))
+}
+
+/// Parses and applies `add_imap_account`, persisting the row and the
+/// secret before replying.
+fn add_imap_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let (draft, password) = conn_and_password(params)?;
     let account_id = add_imap_account(ctx.keystore.as_ref(), &ctx.writer, &draft, &password)
         .map_err(account_error)?;
     Ok(json!({ "account_id": account_id }))
+}
+
+/// Runs the `test_connection` probes without touching the database. Both
+/// steps always run so the wizard can report IMAP and SMTP separately
+/// (USER_FLOW §3 steps 4-5).
+fn test_connection_dispatch(_ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let (draft, password) = conn_and_password(params)?;
+    // The daemon runs a multi-thread runtime (main.rs), so blocking a worker
+    // here is legal; each probe enforces its own timeout inside core.
+    let (imap, smtp) = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            let imap = probe_imap_login(
+                &draft.imap_host,
+                draft.imap_port,
+                draft.imap_security,
+                &draft.email,
+                &password,
+            )
+            .await;
+            let smtp = probe_smtp(&draft.smtp_host, draft.smtp_port, draft.smtp_security).await;
+            (imap, smtp)
+        })
+    });
+    Ok(json!({
+        "imap": probe_step(imap),
+        "smtp": probe_step(smtp),
+    }))
+}
+
+/// Serializes one probe outcome as `{ok:true}` or `{ok:false,error}`.
+fn probe_step(step: Result<(), ProbeError>) -> Value {
+    match step {
+        Ok(()) => json!({ "ok": true }),
+        Err(err) => json!({ "ok": false, "error": err.to_string() }),
+    }
 }
 
 /// Parses and applies `remove_account`, scrubbing the keyring first.
@@ -887,5 +931,147 @@ mod tests {
             panic!("get_status must reply");
         };
         assert_eq!(value["accounts"], json!([]));
+    }
+
+    /// Fake-server plumbing for the `test_connection` dispatch tests.
+    mod test_connection {
+        use super::*;
+
+        /// A minimal IMAP speaker: greets, then answers every line; LOGIN
+        /// gets `NO` unless `login_ok`.
+        async fn spawn_fake_imap(login_ok: bool) -> u16 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                        let (reader, mut writer) = tokio::io::split(stream);
+                        let _ = writer.write_all(b"* OK fake imap ready\r\n").await;
+                        let mut lines = BufReader::new(reader).lines();
+                        // async-imap writes the tag and command in separate
+                        // writes; only a line-buffered fake sees them joined.
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            let tag = line.split_whitespace().next().unwrap_or("A1");
+                            let answer = if line.to_lowercase().contains("login") {
+                                if login_ok {
+                                    format!("{tag} OK logged in")
+                                } else {
+                                    format!("{tag} NO invalid credentials")
+                                }
+                            } else {
+                                format!("{tag} OK done")
+                            };
+                            let _ = writer.write_all(format!("{answer}\r\n").as_bytes()).await;
+                        }
+                    });
+                }
+            });
+            port
+        }
+
+        /// A minimal SMTP speaker: greets with `greeting`, answers EHLO with a
+        /// final `250 ` line, closes on QUIT.
+        async fn spawn_fake_smtp(greeting: &'static str) -> u16 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = [0u8; 1024];
+                        let _ = stream.write_all(format!("{greeting}\r\n").as_bytes()).await;
+                        loop {
+                            let Ok(n) = stream.read(&mut buf).await else {
+                                return;
+                            };
+                            if n == 0 {
+                                return;
+                            }
+                            let line = String::from_utf8_lossy(&buf[..n]).to_uppercase();
+                            if line.contains("EHLO") {
+                                let _ =
+                                    stream.write_all(b"250-fake.local\r\n250 SIZE 42\r\n").await;
+                            } else if line.contains("QUIT") {
+                                let _ = stream.write_all(b"221 bye\r\n").await;
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            port
+        }
+
+        /// The `test_connection` payload aimed at the fake servers.
+        fn conn_params(imap_port: u16, smtp_port: u16) -> Value {
+            json!({
+                "conn": {
+                    "email": "work@example.com",
+                    "imap_host": "127.0.0.1",
+                    "imap_port": imap_port,
+                    "security": "plaintext",
+                    "smtp_host": "127.0.0.1",
+                    "smtp_port": smtp_port,
+                    "smtp_security": "plaintext"
+                },
+                "creds": { "password": "secret-pw" }
+            })
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_connection_reports_both_steps_ok() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let imap = spawn_fake_imap(true).await;
+            let smtp = spawn_fake_smtp("220 fake smtp ready").await;
+            let Dispatched::Reply(value) =
+                dispatch(&ctx, methods::TEST_CONNECTION, &conn_params(imap, smtp)).unwrap()
+            else {
+                panic!("test_connection must reply");
+            };
+            assert_eq!(value["imap"]["ok"], json!(true));
+            assert_eq!(value["smtp"]["ok"], json!(true));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_connection_reports_imap_failure_and_smtp_ok() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let imap = spawn_fake_imap(false).await;
+            let smtp = spawn_fake_smtp("220 fake smtp ready").await;
+            let Dispatched::Reply(value) =
+                dispatch(&ctx, methods::TEST_CONNECTION, &conn_params(imap, smtp)).unwrap()
+            else {
+                panic!("test_connection must reply");
+            };
+            assert_eq!(value["imap"]["ok"], json!(false));
+            assert!(value["imap"]["error"].as_str().unwrap().contains("auth"));
+            assert_eq!(value["smtp"]["ok"], json!(true));
+        }
+
+        #[test]
+        fn test_connection_requires_conn_and_creds() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = dispatch(&ctx, methods::TEST_CONNECTION, &json!({})).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+        }
+
+        #[test]
+        fn test_connection_rejects_unknown_security() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let mut params = conn_params(1, 1);
+            params["conn"]["security"] = json!("carrier-pigeon");
+            let err = dispatch(&ctx, methods::TEST_CONNECTION, &params).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+        }
     }
 }

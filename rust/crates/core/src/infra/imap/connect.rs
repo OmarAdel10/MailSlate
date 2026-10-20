@@ -77,11 +77,10 @@ async fn tcp(host: &str, port: u16) -> Result<TcpStream, ImapError> {
         .map_err(|err| ImapError::Connect(err.to_string()))
 }
 
-fn server_name(host: &str) -> Result<ServerName<'static>, ImapError> {
+pub(crate) fn server_name(host: &str) -> Result<ServerName<'static>, ImapError> {
     ServerName::try_from(host.to_string())
         .map_err(|err| ImapError::Tls(format!("invalid server name {host}: {err}")))
 }
-
 /// Reads and discards the server greeting. `Client::new` does not
 /// consume it, and the crate docs make greeting consumption the
 /// caller's job: a pending greeting poisons the SASL handshake

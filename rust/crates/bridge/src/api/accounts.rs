@@ -67,6 +67,25 @@ pub struct AccountPatch {
     pub sync_window_days: Option<i64>,
 }
 
+/// One leg of a connection probe, as the wizard's progress row shows.
+#[derive(Debug, Clone)]
+pub struct ConnectionStep {
+    /// Whether the step succeeded.
+    pub ok: bool,
+    /// Why the step failed, when it did.
+    pub error: Option<String>,
+}
+
+/// Result of [`test_connection`]: the IMAP login probe and the SMTP
+/// reachability probe, both always present.
+#[derive(Debug, Clone)]
+pub struct ConnectionTest {
+    /// The IMAP connect-and-login probe.
+    pub imap: ConnectionStep,
+    /// The SMTP reachability probe.
+    pub smtp: ConnectionStep,
+}
+
 /// Lists every configured account.
 pub async fn list_accounts() -> Result<Vec<AccountSummary>, DaemonError> {
     let mut client = connect().await?;
@@ -135,6 +154,23 @@ pub async fn remove_account(account_id: i64) -> Result<(), DaemonError> {
         .await
         .map_err(DaemonError::from)?;
     Ok(())
+}
+
+/// Probes a would-be IMAP/SMTP account before the wizard saves it:
+/// the daemon attempts the real IMAP login and an SMTP reachability
+/// check against the draft's servers (USER_FLOW §3).
+///
+/// Both steps always come back — one failing does not hide the other.
+pub async fn test_connection(
+    draft: ImapDraft,
+    password: String,
+) -> Result<ConnectionTest, DaemonError> {
+    let mut client = connect().await?;
+    let reply = client
+        .test_connection(wire_conn(&draft), json!({ "password": password }))
+        .await
+        .map_err(DaemonError::from)?;
+    parse_connection_test(&reply)
 }
 
 /// Opens a client to the daemon for `data_dir`, spawning one on demand
@@ -224,6 +260,33 @@ fn account_id(reply: &Value, source: &str) -> Result<i64, DaemonError> {
         .ok_or_else(|| internal(format!("{source} reply carries no account_id")))
 }
 
+/// Parses the `test_connection` reply; a malformed reply is an
+/// internal error, never a panic.
+fn parse_connection_test(reply: &Value) -> Result<ConnectionTest, DaemonError> {
+    Ok(ConnectionTest {
+        imap: parse_connection_step(reply, "imap")?,
+        smtp: parse_connection_step(reply, "smtp")?,
+    })
+}
+
+/// Parses one `{ ok, error? }` step object out of the reply.
+fn parse_connection_step(reply: &Value, step: &str) -> Result<ConnectionStep, DaemonError> {
+    let object = reply
+        .get(step)
+        .ok_or_else(|| internal(format!("test_connection reply carries no {step} step")))?;
+    let ok = object
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| internal(format!("test_connection {step} step carries no ok flag")))?;
+    Ok(ConnectionStep {
+        ok,
+        error: object
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 /// A malformed daemon reply, mapped like a wire `internal` error.
 fn internal(message: impl Into<String>) -> DaemonError {
     DaemonError {
@@ -253,6 +316,10 @@ mod tests {
         Normal,
         /// `get_accounts` replies without an `accounts` array.
         MalformedAccounts,
+        /// `test_connection` replies without the step objects.
+        MalformedConnection,
+        /// `test_connection` reports the IMAP step as failed.
+        ImapFails,
     }
 
     /// The canned result payload for one request.
@@ -283,6 +350,10 @@ mod tests {
                 },
             ]}),
             methods::ADD_IMAP_ACCOUNT => json!({ "account_id": 7 }),
+            methods::TEST_CONNECTION => json!({
+                "imap": { "ok": true },
+                "smtp": { "ok": true },
+            }),
             methods::START_OAUTH => json!({ "url": "https://accounts.example.test/auth" }),
             methods::COMPLETE_OAUTH_ACCOUNT => json!({ "account_id": 11 }),
             methods::UPDATE_ACCOUNT | methods::REMOVE_ACCOUNT => json!({ "ok": true }),
@@ -309,9 +380,21 @@ mod tests {
                         Behavior::MalformedAccounts if request.method == methods::GET_ACCOUNTS => {
                             json!({ "nope": true })
                         }
+                        Behavior::MalformedConnection
+                            if request.method == methods::TEST_CONNECTION =>
+                        {
+                            json!({ "nope": true })
+                        }
+                        Behavior::ImapFails if request.method == methods::TEST_CONNECTION => {
+                            json!({
+                                "imap": { "ok": false, "error": "auth failed (rejected credentials)" },
+                                "smtp": { "ok": true },
+                            })
+                        }
                         _ => canned(&request.method),
                     };
-                    let response = if request.method == methods::ADD_IMAP_ACCOUNT
+                    let response = if (request.method == methods::ADD_IMAP_ACCOUNT
+                        || request.method == methods::TEST_CONNECTION)
                         && request.params["creds"]["password"] == json!("reject-me")
                     {
                         Response::err(
@@ -615,5 +698,80 @@ mod tests {
         assert_eq!(value["smtp_port"], json!(465));
         assert_eq!(value["security"], json!("tls"));
         assert!(value.get("imap_security").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_connection_sends_conn_and_creds_and_parses_both_steps() {
+        let _guard = ENV_LOCK.lock().await;
+        let recorded = Recorded::default();
+        let daemon = fake_daemon(&recorded, Behavior::Normal).await;
+
+        let test = test_connection(draft(), "secret-pw".to_string())
+            .await
+            .expect("test connection");
+
+        assert!(test.imap.ok);
+        assert_eq!(test.imap.error, None);
+        assert!(test.smtp.ok);
+        assert_eq!(test.smtp.error, None);
+        let params = recorded_request(&recorded, methods::TEST_CONNECTION);
+        assert_eq!(params["conn"]["email"], json!("work@example.com"));
+        assert_eq!(params["conn"]["imap_host"], json!("imap.example.com"));
+        assert_eq!(params["conn"]["security"], json!("tls"));
+        assert_eq!(params["conn"]["smtp_port"], json!(465));
+        assert_eq!(params["creds"]["password"], json!("secret-pw"));
+
+        daemon.restore();
+    }
+
+    #[tokio::test]
+    async fn test_connection_parses_a_failed_step_with_its_error() {
+        let _guard = ENV_LOCK.lock().await;
+        let recorded = Recorded::default();
+        let daemon = fake_daemon(&recorded, Behavior::ImapFails).await;
+
+        let test = test_connection(draft(), "secret-pw".to_string())
+            .await
+            .expect("test connection parses a failed step");
+
+        assert!(!test.imap.ok);
+        assert_eq!(
+            test.imap.error.as_deref(),
+            Some("auth failed (rejected credentials)")
+        );
+        assert!(test.smtp.ok);
+        assert_eq!(test.smtp.error, None);
+
+        daemon.restore();
+    }
+
+    #[tokio::test]
+    async fn test_connection_maps_daemon_errors() {
+        let _guard = ENV_LOCK.lock().await;
+        let recorded = Recorded::default();
+        let daemon = fake_daemon(&recorded, Behavior::Normal).await;
+
+        let error = test_connection(draft(), "reject-me".to_string())
+            .await
+            .expect_err("rejected password must fail");
+        assert_eq!(error.kind, "validation");
+        assert_eq!(error.message, "bad account");
+        assert!(!error.retryable);
+
+        daemon.restore();
+    }
+
+    #[tokio::test]
+    async fn test_connection_maps_malformed_replies_to_internal() {
+        let _guard = ENV_LOCK.lock().await;
+        let recorded = Recorded::default();
+        let daemon = fake_daemon(&recorded, Behavior::MalformedConnection).await;
+
+        let error = test_connection(draft(), "secret-pw".to_string())
+            .await
+            .expect_err("malformed reply must fail");
+        assert_eq!(error.kind, "internal");
+
+        daemon.restore();
     }
 }

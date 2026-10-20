@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod connect;
 pub mod mailbox;
+pub mod probe;
 pub mod quirks;
 pub mod tls;
 

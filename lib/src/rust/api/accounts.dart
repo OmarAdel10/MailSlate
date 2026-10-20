@@ -9,8 +9,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'system.dart';
 
-// These functions are ignored because they are not marked as `pub`: `account_id`, `connect`, `field_i64`, `field_str`, `internal`, `parse_accounts`, `wire_conn`, `wire_patch`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `account_id`, `connect`, `field_i64`, `field_str`, `internal`, `parse_accounts`, `parse_connection_step`, `parse_connection_test`, `wire_conn`, `wire_patch`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Lists every configured account.
 Future<List<AccountSummary>> listAccounts() =>
@@ -57,6 +57,19 @@ Future<void> updateAccount({
 /// Removes an account; the daemon scrubs its keyring secrets and row.
 Future<void> removeAccount({required PlatformInt64 accountId}) =>
     RustLib.instance.api.crateApiAccountsRemoveAccount(accountId: accountId);
+
+/// Probes a would-be IMAP/SMTP account before the wizard saves it:
+/// the daemon attempts the real IMAP login and an SMTP reachability
+/// check against the draft's servers (USER_FLOW §3).
+///
+/// Both steps always come back — one failing does not hide the other.
+Future<ConnectionTest> testConnection({
+  required ImapDraft draft,
+  required String password,
+}) => RustLib.instance.api.crateApiAccountsTestConnection(
+  draft: draft,
+  password: password,
+);
 
 /// Mutable account fields for [`update_account`].
 ///
@@ -155,6 +168,51 @@ class AccountSummary {
           authType == other.authType &&
           color == other.color &&
           syncWindowDays == other.syncWindowDays;
+}
+
+/// One leg of a connection probe, as the wizard's progress row shows.
+class ConnectionStep {
+  /// Whether the step succeeded.
+  final bool ok;
+
+  /// Why the step failed, when it did.
+  final String? error;
+
+  const ConnectionStep({required this.ok, this.error});
+
+  @override
+  int get hashCode => ok.hashCode ^ error.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConnectionStep &&
+          runtimeType == other.runtimeType &&
+          ok == other.ok &&
+          error == other.error;
+}
+
+/// Result of [`test_connection`]: the IMAP login probe and the SMTP
+/// reachability probe, both always present.
+class ConnectionTest {
+  /// The IMAP connect-and-login probe.
+  final ConnectionStep imap;
+
+  /// The SMTP reachability probe.
+  final ConnectionStep smtp;
+
+  const ConnectionTest({required this.imap, required this.smtp});
+
+  @override
+  int get hashCode => imap.hashCode ^ smtp.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConnectionTest &&
+          runtimeType == other.runtimeType &&
+          imap == other.imap &&
+          smtp == other.smtp;
 }
 
 /// Connection details for a generic IMAP/SMTP account

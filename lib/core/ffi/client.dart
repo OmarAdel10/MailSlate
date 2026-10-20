@@ -4,7 +4,12 @@ import 'package:mailslate/src/rust/api/system.dart' as rust;
 import 'package:mailslate/src/rust/frb_generated.dart';
 
 export 'package:mailslate/src/rust/api/accounts.dart'
-    show AccountPatch, AccountSummary, ImapDraft;
+    show
+        AccountPatch,
+        AccountSummary,
+        ConnectionStep,
+        ConnectionTest,
+        ImapDraft;
 export 'package:mailslate/src/rust/api/system.dart'
     show AppEvent, DaemonState, DaemonStatus, PingInfo;
 
@@ -102,6 +107,17 @@ class FfiClient {
   /// Local synced data is kept (daemon `delete_data` is not wired yet).
   Future<void> removeAccount({required int accountId}) =>
       _guard(() => rust_accounts.removeAccount(accountId: accountId));
+
+  /// Probes a would-be account before the wizard saves it.
+  ///
+  /// Both steps always come back, so the wizard can show the
+  /// `IMAP ✓ / SMTP ✓` row even when one leg fails (USER_FLOW §3).
+  Future<rust_accounts.ConnectionTest> testConnection({
+    required rust_accounts.ImapDraft draft,
+    required String password,
+  }) => _guard(
+    () => rust_accounts.testConnection(draft: draft, password: password),
+  );
 
   Future<T> _guard<T>(Future<T> Function() call) async {
     try {

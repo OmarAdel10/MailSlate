@@ -13,6 +13,10 @@ pub const SHUTDOWN: &str = "shutdown";
 /// Creates a generic IMAP/SMTP account (Settings → Accounts, M2).
 pub const ADD_IMAP_ACCOUNT: &str = "add_imap_account";
 
+/// `test_connection`: probes IMAP login and SMTP reachability without
+/// persisting anything. Used by the M2 account wizard (USER_FLOW §3).
+pub const TEST_CONNECTION: &str = "test_connection";
+
 /// Removes an account and scrubs its secrets from the keyring (M2).
 pub const REMOVE_ACCOUNT: &str = "remove_account";
 

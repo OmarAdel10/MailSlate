@@ -24,6 +24,11 @@ class FakeFfiClient extends FfiClient {
     this.startOauthFailure,
     this.completeOauthResult = 11,
     this.completeOauthFailure,
+    this.testConnectionResult = const ConnectionTest(
+      imap: ConnectionStep(ok: true),
+      smtp: ConnectionStep(ok: true),
+    ),
+    this.testConnectionFailure,
   });
 
   /// Returned by [daemonStatus] when [statusFailure] is null.
@@ -74,6 +79,12 @@ class FakeFfiClient extends FfiClient {
   /// When set, [FfiClient.completeOauthAccount] throws it.
   AppFailure? completeOauthFailure;
 
+  /// Returned by [FfiClient.testConnection] when null failure.
+  ConnectionTest testConnectionResult;
+
+  /// When set, [FfiClient.testConnection] throws it.
+  AppFailure? testConnectionFailure;
+
   /// How often [FfiClient.listAccounts] was called.
   int listAccountsCalls = 0;
 
@@ -110,6 +121,13 @@ class FakeFfiClient extends FfiClient {
 
   /// Captured [FfiClient.removeAccount] argument.
   int? lastRemoveId;
+
+  /// How often [FfiClient.testConnection] was called.
+  int testConnectionCalls = 0;
+
+  /// Captured [FfiClient.testConnection] arguments.
+  ImapDraft? lastTestDraft;
+  String? lastTestPassword;
 
   /// How often [startDaemon] was called.
   int startCalls = 0;
@@ -235,5 +253,20 @@ class FakeFfiClient extends FfiClient {
     if (failure != null) {
       throw failure;
     }
+  }
+
+  @override
+  Future<ConnectionTest> testConnection({
+    required ImapDraft draft,
+    required String password,
+  }) async {
+    testConnectionCalls += 1;
+    lastTestDraft = draft;
+    lastTestPassword = password;
+    final failure = testConnectionFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    return testConnectionResult;
   }
 }

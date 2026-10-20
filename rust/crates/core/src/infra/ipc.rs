@@ -169,6 +169,20 @@ impl Client {
         self.request(methods::GET_ACCOUNTS, json!({})).await
     }
 
+    /// Probes a would-be account: IMAP login plus SMTP reachability.
+    /// The reply carries one `{ ok, error? }` object per step.
+    pub async fn test_connection(
+        &mut self,
+        conn: Value,
+        creds: Value,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::TEST_CONNECTION,
+            json!({ "conn": conn, "creds": creds }),
+        )
+        .await
+    }
+
     /// Removes an account and scrubs its keyring secrets.
     pub async fn remove_account(&mut self, account_id: i64) -> Result<Value, BridgeError> {
         self.request(methods::REMOVE_ACCOUNT, json!({ "account_id": account_id }))

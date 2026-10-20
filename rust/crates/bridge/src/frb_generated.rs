@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -107775424;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 390392562;
 
 // Section: executor
 
@@ -446,6 +446,44 @@ fn wire__crate__api__accounts__start_oauth_impl(
         },
     )
 }
+fn wire__crate__api__accounts__test_connection_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "test_connection",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_draft = <crate::api::accounts::ImapDraft>::sse_decode(&mut deserializer);
+            let api_password = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::system::DaemonError>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::accounts::test_connection(api_draft, api_password).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__accounts__update_account_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -605,6 +643,30 @@ impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_u8().unwrap() != 0
+    }
+}
+
+impl SseDecode for crate::api::accounts::ConnectionStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_ok = <bool>::sse_decode(deserializer);
+        let mut var_error = <Option<String>>::sse_decode(deserializer);
+        return crate::api::accounts::ConnectionStep {
+            ok: var_ok,
+            error: var_error,
+        };
+    }
+}
+
+impl SseDecode for crate::api::accounts::ConnectionTest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_imap = <crate::api::accounts::ConnectionStep>::sse_decode(deserializer);
+        let mut var_smtp = <crate::api::accounts::ConnectionStep>::sse_decode(deserializer);
+        return crate::api::accounts::ConnectionTest {
+            imap: var_imap,
+            smtp: var_smtp,
+        };
     }
 }
 
@@ -808,7 +870,8 @@ fn pde_ffi_dispatcher_primary_impl(
         9 => wire__crate__api__accounts__remove_account_impl(port, ptr, rust_vec_len, data_len),
         10 => wire__crate__api__system__start_daemon_impl(port, ptr, rust_vec_len, data_len),
         11 => wire__crate__api__accounts__start_oauth_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__accounts__update_account_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__accounts__test_connection_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__accounts__update_account_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -924,6 +987,48 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::system::AppEvent>
     for crate::api::system::AppEvent
 {
     fn into_into_dart(self) -> crate::api::system::AppEvent {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::accounts::ConnectionStep {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.ok.into_into_dart().into_dart(),
+            self.error.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::accounts::ConnectionStep
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::accounts::ConnectionStep>
+    for crate::api::accounts::ConnectionStep
+{
+    fn into_into_dart(self) -> crate::api::accounts::ConnectionStep {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::accounts::ConnectionTest {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.imap.into_into_dart().into_dart(),
+            self.smtp.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::accounts::ConnectionTest
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::accounts::ConnectionTest>
+    for crate::api::accounts::ConnectionTest
+{
+    fn into_into_dart(self) -> crate::api::accounts::ConnectionTest {
         self
     }
 }
@@ -1134,6 +1239,22 @@ impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::accounts::ConnectionStep {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.ok, serializer);
+        <Option<String>>::sse_encode(self.error, serializer);
+    }
+}
+
+impl SseEncode for crate::api::accounts::ConnectionTest {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::accounts::ConnectionStep>::sse_encode(self.imap, serializer);
+        <crate::api::accounts::ConnectionStep>::sse_encode(self.smtp, serializer);
     }
 }
 

@@ -56,6 +56,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
+  ConnectionStep dco_decode_connection_step(dynamic raw);
+
+  @protected
+  ConnectionTest dco_decode_connection_test(dynamic raw);
+
+  @protected
   DaemonError dco_decode_daemon_error(dynamic raw);
 
   @protected
@@ -139,6 +145,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  ConnectionStep sse_decode_connection_step(SseDeserializer deserializer);
+
+  @protected
+  ConnectionTest sse_decode_connection_test(SseDeserializer deserializer);
 
   @protected
   DaemonError sse_decode_daemon_error(SseDeserializer deserializer);
@@ -240,6 +252,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_connection_step(
+    ConnectionStep self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_connection_test(
+    ConnectionTest self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_daemon_error(DaemonError self, SseSerializer serializer);
