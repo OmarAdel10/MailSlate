@@ -11,7 +11,17 @@ export 'package:mailslate/src/rust/api/accounts.dart'
         ConnectionTest,
         ImapDraft;
 export 'package:mailslate/src/rust/api/system.dart'
-    show AppEvent, DaemonState, DaemonStatus, PingInfo;
+    show
+        AppEvent,
+        AppEvent_AccountStatus,
+        AppEvent_OauthCompleted,
+        AppEvent_OauthFailed,
+        AppEvent_OauthUrlReady,
+        AppEvent_Other,
+        AppEvent_SyncProgress,
+        DaemonState,
+        DaemonStatus,
+        PingInfo;
 
 /// Thin façade over the generated Rust bindings.
 ///
