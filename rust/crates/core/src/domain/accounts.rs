@@ -6,7 +6,7 @@
 
 use rusqlite::OptionalExtension;
 
-use crate::infra::db::writer::{WriteOp, WriterActor};
+use crate::infra::db::writer::{WriteError, WriteOp, WriterActor};
 use crate::infra::keyring::{KeyStore, KeyStoreError, imap_password_key, oauth_key};
 use crate::infra::oauth::tokens;
 
@@ -76,8 +76,8 @@ pub struct ImapAccountDraft {
 pub enum AccountError {
     #[error("key store rejected the secret: {0}")]
     KeyStore(#[from] KeyStoreError),
-    #[error("writer thread is gone")]
-    WriterClosed,
+    #[error("account write failed: {0}")]
+    Writer(#[from] WriteError),
 }
 
 /// Creates the account row and stores its password secret in the key
@@ -110,10 +110,10 @@ pub fn add_imap_account(
         smtp_port: draft.smtp_port,
         smtp_security: draft.smtp_security.as_str().into(),
         auth_type: draft.auth.as_str().into(),
-    });
+    })?;
     // Account creation is a UI-visible operation: when it returns, the
     // row must be durable (batch window otherwise delays it up to 50ms).
-    writer.flush();
+    writer.flush()?;
     Ok(account_id)
 }
 
@@ -157,16 +157,16 @@ pub fn add_oauth_account(
         smtp_port: smtp.1,
         smtp_security: smtp.2.as_str().into(),
         auth_type: AuthKind::OAuth2.as_str().into(),
-    });
+    })?;
     if let Some(color) = color {
         writer.enqueue(WriteOp::AccountUpdate {
             id: account_id,
             display_name: None,
             color: Some(Some(color)),
             sync_window_days: None,
-        });
+        })?;
     }
-    writer.flush();
+    writer.flush()?;
     Ok(account_id)
 }
 
@@ -181,7 +181,7 @@ fn next_account_id(writer: &WriterActor) -> Result<i64, AccountError> {
     writer.enqueue(WriteOp::MetaPut {
         key: "accounts.next_id".into(),
         value: (id + 1).to_string(),
-    });
+    })?;
     Ok(id)
 }
 
@@ -306,8 +306,8 @@ pub fn update_account(
         display_name: patch.display_name,
         color: patch.color,
         sync_window_days: patch.sync_window_days,
-    });
-    writer.flush();
+    })?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -323,10 +323,10 @@ pub fn remove_account(
     // already clean and a retry cannot leave a live orphan secret.
     let _ = keystore.delete(&imap_password_key(account_id));
     let _ = keystore.delete(&oauth_key(account_id));
-    writer.enqueue(WriteOp::AccountRemove { id: account_id });
+    writer.enqueue(WriteOp::AccountRemove { id: account_id })?;
     // Removal is UI-visible: the row (and cascaded children) must be
     // durable by the time this returns.
-    writer.flush();
+    writer.flush()?;
     Ok(())
 }
 
@@ -604,7 +604,7 @@ mod tests {
         )
         .expect("oauth account created");
 
-        writer.flush();
+        writer.flush().expect("flush");
         let moved = keystore
             .get(&oauth_key(account_id))
             .expect("keystore readable")

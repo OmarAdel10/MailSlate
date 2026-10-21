@@ -21,6 +21,14 @@ use async_imap::Session;
 use mailslate_protocol::message::Event;
 use serde_json::json;
 
+/// Hands one operation to the single writer; a dead or failed writer
+/// aborts the cycle instead of being silently ignored.
+fn write(writer: &WriterActor, op: WriteOp) -> Result<(), ImapError> {
+    writer
+        .enqueue(op)
+        .map_err(|err| ImapError::Writer(err.to_string()))
+}
+
 /// Maps a discovered mailbox to its canonical `mailboxes.kind` value
 /// (schema CHECK). Special-use flags win; INBOX is its own kind; the
 /// rest are user folders.
@@ -103,15 +111,18 @@ pub(crate) async fn initial_sync(
         let special_use = mailbox.special_use.clone();
         let name = mailbox.name.clone();
 
-        writer.enqueue(WriteOp::MailboxUpsert {
-            account_id,
-            name: name.clone(),
-            kind: kind.into(),
-            special_use: special_use.clone(),
-            uidvalidity: None,
-            uidnext: None,
-            highest_modseq: None,
-        });
+        write(
+            writer,
+            WriteOp::MailboxUpsert {
+                account_id,
+                name: name.clone(),
+                kind: kind.into(),
+                special_use: special_use.clone(),
+                uidvalidity: None,
+                uidnext: None,
+                highest_modseq: None,
+            },
+        )?;
 
         let selected = match timed(
             "select mailbox",
@@ -126,15 +137,18 @@ pub(crate) async fn initial_sync(
             // the other mailboxes' sync.
             Err(_) => continue,
         };
-        writer.enqueue(WriteOp::MailboxUpsert {
-            account_id,
-            name: name.clone(),
-            kind: kind.into(),
-            special_use,
-            uidvalidity: selected.uid_validity,
-            uidnext: selected.uid_next,
-            highest_modseq: selected.highest_modseq,
-        });
+        write(
+            writer,
+            WriteOp::MailboxUpsert {
+                account_id,
+                name: name.clone(),
+                kind: kind.into(),
+                special_use,
+                uidvalidity: selected.uid_validity,
+                uidnext: selected.uid_next,
+                highest_modseq: selected.highest_modseq,
+            },
+        )?;
 
         let rows = timed("envelope fetch", FETCH_TIMEOUT, async {
             let mut all = Vec::new();
@@ -175,25 +189,28 @@ pub(crate) async fn initial_sync(
                 keywords_json: "[]".into(),
                 modseq: None,
             };
-            writer.enqueue(WriteOp::MessageUpsert {
-                account_id,
-                dedupe_key,
-                message_id_hdr: record.message_id_hdr.clone(),
-                gmail_thread_id: None,
-                root_message_id: record.root_message_id.clone(),
-                subject_norm: mime::subject_norm(record.subject.as_deref()),
-                subject: record.subject.clone(),
-                from_json: record.from_json.clone(),
-                to_json: record.to_json.clone(),
-                cc_json: record.cc_json.clone(),
-                reply_to_json: record.reply_to_json.clone(),
-                date_utc: Some(mime::resolve_date_utc(row.internal_date, &record, now)),
-                size_bytes: row.size.map(i64::from),
-                snippet: None,
-                location: Some(location),
-            });
+            write(
+                writer,
+                WriteOp::MessageUpsert {
+                    account_id,
+                    dedupe_key,
+                    message_id_hdr: record.message_id_hdr.clone(),
+                    gmail_thread_id: None,
+                    root_message_id: record.root_message_id.clone(),
+                    subject_norm: mime::subject_norm(record.subject.as_deref()),
+                    subject: record.subject.clone(),
+                    from_json: record.from_json.clone(),
+                    to_json: record.to_json.clone(),
+                    cc_json: record.cc_json.clone(),
+                    reply_to_json: record.reply_to_json.clone(),
+                    date_utc: Some(mime::resolve_date_utc(row.internal_date, &record, now)),
+                    size_bytes: row.size.map(i64::from),
+                    snippet: None,
+                    location: Some(location),
+                },
+            )?;
         }
-        writer.enqueue(WriteOp::ThreadCountersRecompute { account_id });
+        write(writer, WriteOp::ThreadCountersRecompute { account_id })?;
 
         bus.publish(Event::new(
             "sync_progress",
@@ -328,7 +345,7 @@ mod tests {
         initial_sync(&mut session, &writer, &bus, 1)
             .await
             .expect("one unselectable mailbox must not abort the sync");
-        writer.flush();
+        writer.flush().expect("flush");
         drop(session);
 
         assert_eq!(
@@ -408,7 +425,7 @@ mod tests {
             .await
             .expect("initial sync");
 
-        writer.flush();
+        writer.flush().expect("flush");
         drop(session);
 
         let conn = crate::infra::db::open_readonly(&db_path).expect("readonly");
@@ -545,7 +562,7 @@ mod tests {
         initial_sync(&mut session, &writer, &bus, 1)
             .await
             .expect("initial sync");
-        writer.flush();
+        writer.flush().expect("flush");
 
         let sets = fetched.lock().unwrap().clone();
         assert_eq!(

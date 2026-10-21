@@ -607,7 +607,7 @@ mod tests {
             panic!("add_imap_account must reply");
         };
         let account_id = value["account_id"].as_i64().expect("account_id");
-        ctx.writer.flush();
+        ctx.writer.flush().expect("flush");
         let reader = ctx.reader.acquire().unwrap();
         let stored: String = reader
             .query_row(
@@ -941,7 +941,7 @@ mod tests {
             panic!("complete_oauth_account must reply");
         };
         let account_id = value["account_id"].as_i64().expect("account_id");
-        ctx.writer.flush();
+        ctx.writer.flush().expect("flush");
 
         let reader = ctx.reader.acquire().unwrap();
         let (provider, auth_type, imap_host): (String, String, String) = reader

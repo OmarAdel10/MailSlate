@@ -48,6 +48,9 @@ impl From<ImapError> for ProbeError {
             ImapError::Tls(detail) => ProbeError::Tls(detail),
             ImapError::Auth(detail) => ProbeError::Auth(detail),
             ImapError::Protocol(detail) => ProbeError::Greeting(detail),
+            // A probe never writes to the database; the catch-all keeps
+            // the conversion complete if the error set grows.
+            other => ProbeError::Connect(other.to_string()),
         }
     }
 }

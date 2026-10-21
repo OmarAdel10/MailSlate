@@ -32,4 +32,8 @@ pub enum ImapError {
     Auth(String),
     #[error("imap protocol error: {0}")]
     Protocol(String),
+    /// The sync engine could not hand an operation to the database
+    /// writer (writer thread gone, commit failed, or ack timed out).
+    #[error("sync write failed: {0}")]
+    Writer(String),
 }

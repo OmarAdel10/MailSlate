@@ -35,6 +35,26 @@ pub struct LocationInline {
     pub modseq: Option<u64>,
 }
 
+/// Failure of the writer surface: the caller learns that the operation
+/// may not be durable instead of the actor panicking and taking the
+/// single SQLite writer down with it.
+#[derive(Debug, thiserror::Error)]
+pub enum WriteError {
+    /// The writer thread has exited; the op was not queued.
+    #[error("the writer thread has stopped")]
+    Closed,
+    /// The batch behind a flush marker did not commit in time.
+    #[error("the writer did not acknowledge the flush in time")]
+    Timeout,
+    /// The batched transaction could not be committed.
+    #[error("the writer failed to commit: {0}")]
+    Failed(String),
+}
+
+/// Outcome of committing the batch segment that ends at a
+/// [`WriteOp::Flush`] marker.
+pub type FlushResult = Result<(), String>;
+
 /// Operations the writer applies. The set grows with upcoming
 /// phases (accounts, messages, mutations); meta writes cover the
 /// first behavior slice: enqueue → durable, in order.
@@ -56,7 +76,7 @@ pub enum WriteOp {
         auth_type: String,
     },
     /// Internal: ack after every queued op before it is committed.
-    Flush(mpsc::Sender<()>),
+    Flush(mpsc::Sender<FlushResult>),
     /// Deletes one account row (children cascade via FK).
     AccountRemove { id: i64 },
     /// Patches one account's mutable fields; `None` fields keep the
@@ -203,22 +223,26 @@ impl WriterActor {
 
     /// Queues one operation; returns once the actor has buffered it
     /// (delivery, not durability, at this point).
-    pub fn enqueue(&self, op: WriteOp) {
-        let tx = self.tx.as_ref().expect("writer channel open");
-        tx.send(op).expect("writer thread alive");
+    pub fn enqueue(&self, op: WriteOp) -> Result<(), WriteError> {
+        let tx = self.tx.as_ref().ok_or(WriteError::Closed)?;
+        tx.send(op).map_err(|_| WriteError::Closed)
     }
 
     /// Blocks until every operation enqueued before this call has
     /// been committed (FIFO channel order guarantees the ack lands
     /// behind the ops it covers).
-    pub fn flush(&self) {
-        let sender = self.tx.as_ref().expect("writer channel open");
+    pub fn flush(&self) -> Result<(), WriteError> {
+        let sender = self.tx.as_ref().ok_or(WriteError::Closed)?;
         let (ack, rx) = mpsc::channel();
         sender
             .send(WriteOp::Flush(ack))
-            .expect("writer thread alive");
-        rx.recv_timeout(Duration::from_secs(30))
-            .expect("writer acks its batches");
+            .map_err(|_| WriteError::Closed)?;
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(detail)) => Err(WriteError::Failed(detail)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(WriteError::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(WriteError::Closed),
+        }
     }
 }
 
@@ -271,8 +295,19 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp], on_error: &dyn Fn(Strin
     if batch.is_empty() {
         return;
     }
-    let mut tx = conn.transaction().expect("writer transaction");
-    for op in batch {
+    let mut tx = match conn.transaction() {
+        Ok(tx) => tx,
+        Err(err) => {
+            // The connection is unusable for this batch: report once
+            // and fail every marker so no caller waits out the ack
+            // deadline. The writer thread keeps running.
+            let detail = format!("writer transaction failed: {err}");
+            on_error(detail.clone());
+            fail_pending_flushes(batch, &detail);
+            return;
+        }
+    };
+    for (index, op) in batch.iter().enumerate() {
         match op {
             WriteOp::MetaPut { key, value } => {
                 if let Err(err) = tx.execute(
@@ -672,18 +707,53 @@ fn flush_batch(conn: &mut Connection, batch: &[WriteOp], on_error: &dyn Fn(Strin
                 // sender only observes the batch boundary it asked
                 // for. The rest of the batch continues in a fresh
                 // transaction so nothing queued behind the marker is
-                // lost.
-                tx.commit().expect("writer commit");
-                let _ = ack.send(());
-                tx = conn.transaction().expect("writer transaction");
+                // lost. A failed commit is reported and acked as a
+                // failure; it never panics the only writer.
+                match tx.commit() {
+                    Ok(()) => {
+                        let _ = ack.send(Ok(()));
+                    }
+                    Err(err) => {
+                        let detail = format!("writer commit failed: {err}");
+                        on_error(detail.clone());
+                        let _ = ack.send(Err(detail));
+                    }
+                }
+                match conn.transaction() {
+                    Ok(fresh) => tx = fresh,
+                    Err(err) => {
+                        let detail = format!("writer transaction failed: {err}");
+                        on_error(detail.clone());
+                        fail_pending_flushes(&batch[index + 1..], &detail);
+                        return;
+                    }
+                }
             }
         }
     }
-    tx.commit().expect("writer commit");
+    if let Err(err) = tx.commit() {
+        on_error(format!("writer commit failed: {err}"));
+    }
+}
+
+/// Fails every flush marker in `batch` with `detail`; used when the
+/// writer cannot even open the transaction that would commit them, so
+/// callers learn immediately instead of waiting out the ack deadline.
+fn fail_pending_flushes(batch: &[WriteOp], detail: &str) {
+    for op in batch {
+        if let WriteOp::Flush(ack) = op {
+            let _ = ack.send(Err(detail.to_string()));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Enqueues an operation, failing the test when the writer is gone.
+    fn enqueue(writer: &WriterActor, op: WriteOp) {
+        writer.enqueue(op).expect("enqueue");
+    }
     use super::*;
 
     /// Hundreds of queued operations all land durably, in enqueue
@@ -700,12 +770,15 @@ mod tests {
 
         let writer = WriterActor::spawn(&path);
         for i in 0..1000 {
-            writer.enqueue(WriteOp::MetaPut {
-                key: format!("key-{i}"),
-                value: format!("value-{i}"),
-            });
+            enqueue(
+                &writer,
+                WriteOp::MetaPut {
+                    key: format!("key-{i}"),
+                    value: format!("value-{i}"),
+                },
+            );
         }
-        writer.flush();
+        writer.flush().expect("flush");
 
         let conn = crate::infra::db::open_readonly(&path).expect("re-open");
         for i in 0..1000 {
@@ -745,26 +818,32 @@ mod tests {
         seed_account(&path, 1);
 
         let writer = WriterActor::spawn(&path);
-        writer.enqueue(WriteOp::MailboxUpsert {
-            account_id: 1,
-            name: "INBOX".into(),
-            kind: "inbox".into(),
-            special_use: None,
-            uidvalidity: Some(42),
-            uidnext: Some(10),
-            highest_modseq: Some(7),
-        });
-        writer.flush();
-        writer.enqueue(WriteOp::MailboxUpsert {
-            account_id: 1,
-            name: "INBOX".into(),
-            kind: "inbox".into(),
-            special_use: Some("\\Sent".into()),
-            uidvalidity: Some(42),
-            uidnext: Some(11),
-            highest_modseq: Some(9),
-        });
-        writer.flush();
+        enqueue(
+            &writer,
+            WriteOp::MailboxUpsert {
+                account_id: 1,
+                name: "INBOX".into(),
+                kind: "inbox".into(),
+                special_use: None,
+                uidvalidity: Some(42),
+                uidnext: Some(10),
+                highest_modseq: Some(7),
+            },
+        );
+        writer.flush().expect("flush");
+        enqueue(
+            &writer,
+            WriteOp::MailboxUpsert {
+                account_id: 1,
+                name: "INBOX".into(),
+                kind: "inbox".into(),
+                special_use: Some("\\Sent".into()),
+                uidvalidity: Some(42),
+                uidnext: Some(11),
+                highest_modseq: Some(9),
+            },
+        );
+        writer.flush().expect("flush");
 
         let conn = crate::infra::db::open_readonly(&path).expect("re-open");
         let (count, uidnext, highest, special): (i64, i64, i64, Option<String>) = conn
@@ -788,23 +867,29 @@ mod tests {
         seed_account(&path, 1);
 
         let writer = WriterActor::spawn(&path);
-        writer.enqueue(WriteOp::MailboxUpsert {
-            account_id: 1,
-            name: "INBOX".into(),
-            kind: "inbox".into(),
-            special_use: None,
-            uidvalidity: None,
-            uidnext: None,
-            highest_modseq: None,
-        });
-        writer.enqueue(WriteOp::ThreadUpsert {
-            account_id: 1,
-            gmail_thread_id: Some("gm-1".into()),
-            root_message_id: None,
-            subject_norm: Some("hello".into()),
-            last_date: 100,
-        });
-        writer.flush();
+        enqueue(
+            &writer,
+            WriteOp::MailboxUpsert {
+                account_id: 1,
+                name: "INBOX".into(),
+                kind: "inbox".into(),
+                special_use: None,
+                uidvalidity: None,
+                uidnext: None,
+                highest_modseq: None,
+            },
+        );
+        enqueue(
+            &writer,
+            WriteOp::ThreadUpsert {
+                account_id: 1,
+                gmail_thread_id: Some("gm-1".into()),
+                root_message_id: None,
+                subject_norm: Some("hello".into()),
+                last_date: 100,
+            },
+        );
+        writer.flush().expect("flush");
 
         let conn = crate::infra::db::open_readonly(&path).expect("re-open");
         let thread_id: i64 = conn
@@ -833,10 +918,10 @@ mod tests {
             subject_norm: None,
             location: None,
         };
-        writer.enqueue(message("Hello", 500));
-        writer.flush();
-        writer.enqueue(message("Hello v2", 600));
-        writer.flush();
+        enqueue(&writer, message("Hello", 500));
+        writer.flush().expect("flush");
+        enqueue(&writer, message("Hello v2", 600));
+        writer.flush().expect("flush");
 
         let conn = crate::infra::db::open_readonly(&path).expect("re-open");
         let (count, subject, date_utc, thread, body_state): (i64, String, i64, i64, String) = conn
@@ -869,33 +954,39 @@ mod tests {
         seed_account(&path, 1);
 
         let writer = WriterActor::spawn(&path);
-        writer.enqueue(WriteOp::MailboxUpsert {
-            account_id: 1,
-            name: "INBOX".into(),
-            kind: "inbox".into(),
-            special_use: None,
-            uidvalidity: None,
-            uidnext: None,
-            highest_modseq: None,
-        });
-        writer.enqueue(WriteOp::MessageUpsert {
-            account_id: 1,
-            dedupe_key: "mid:loc@example.com".into(),
-            message_id_hdr: Some("loc@example.com".into()),
-            subject: None,
-            from_json: "[]".into(),
-            to_json: "[]".into(),
-            cc_json: "[]".into(),
-            reply_to_json: "[]".into(),
-            date_utc: None,
-            size_bytes: None,
-            snippet: None,
-            gmail_thread_id: None,
-            root_message_id: None,
-            subject_norm: None,
-            location: None,
-        });
-        writer.flush();
+        enqueue(
+            &writer,
+            WriteOp::MailboxUpsert {
+                account_id: 1,
+                name: "INBOX".into(),
+                kind: "inbox".into(),
+                special_use: None,
+                uidvalidity: None,
+                uidnext: None,
+                highest_modseq: None,
+            },
+        );
+        enqueue(
+            &writer,
+            WriteOp::MessageUpsert {
+                account_id: 1,
+                dedupe_key: "mid:loc@example.com".into(),
+                message_id_hdr: Some("loc@example.com".into()),
+                subject: None,
+                from_json: "[]".into(),
+                to_json: "[]".into(),
+                cc_json: "[]".into(),
+                reply_to_json: "[]".into(),
+                date_utc: None,
+                size_bytes: None,
+                snippet: None,
+                gmail_thread_id: None,
+                root_message_id: None,
+                subject_norm: None,
+                location: None,
+            },
+        );
+        writer.flush().expect("flush");
 
         let conn = crate::infra::db::open_readonly(&path).expect("re-open");
         let mailbox_id: i64 = conn
@@ -924,10 +1015,10 @@ mod tests {
             keywords_json: "[]".into(),
             modseq: Some(modseq),
         };
-        writer.enqueue(location(true, false, 10));
-        writer.flush();
-        writer.enqueue(location(false, true, 11));
-        writer.flush();
+        enqueue(&writer, location(true, false, 10));
+        writer.flush().expect("flush");
+        enqueue(&writer, location(false, true, 11));
+        writer.flush().expect("flush");
 
         let conn = crate::infra::db::open_readonly(&path).expect("re-open");
         let (count, seen, flagged, modseq): (i64, i64, i64, i64) = conn
@@ -951,30 +1042,39 @@ mod tests {
         seed_account(&path, 1);
 
         let writer = WriterActor::spawn(&path);
-        writer.enqueue(WriteOp::ThreadUpsert {
-            account_id: 1,
-            gmail_thread_id: Some("gm-9".into()),
-            root_message_id: Some("<r1>".into()),
-            subject_norm: Some("s".into()),
-            last_date: 100,
-        });
-        writer.flush();
-        writer.enqueue(WriteOp::ThreadUpsert {
-            account_id: 1,
-            gmail_thread_id: Some("gm-9".into()),
-            root_message_id: None,
-            subject_norm: None,
-            last_date: 200,
-        });
-        writer.flush();
-        writer.enqueue(WriteOp::ThreadUpsert {
-            account_id: 1,
-            gmail_thread_id: None,
-            root_message_id: Some("<r2>".into()),
-            subject_norm: Some("t".into()),
-            last_date: 50,
-        });
-        writer.flush();
+        enqueue(
+            &writer,
+            WriteOp::ThreadUpsert {
+                account_id: 1,
+                gmail_thread_id: Some("gm-9".into()),
+                root_message_id: Some("<r1>".into()),
+                subject_norm: Some("s".into()),
+                last_date: 100,
+            },
+        );
+        writer.flush().expect("flush");
+        enqueue(
+            &writer,
+            WriteOp::ThreadUpsert {
+                account_id: 1,
+                gmail_thread_id: Some("gm-9".into()),
+                root_message_id: None,
+                subject_norm: None,
+                last_date: 200,
+            },
+        );
+        writer.flush().expect("flush");
+        enqueue(
+            &writer,
+            WriteOp::ThreadUpsert {
+                account_id: 1,
+                gmail_thread_id: None,
+                root_message_id: Some("<r2>".into()),
+                subject_norm: Some("t".into()),
+                last_date: 50,
+            },
+        );
+        writer.flush().expect("flush");
 
         let conn = crate::infra::db::open_readonly(&path).expect("re-open");
         let (count, last_date, root): (i64, i64, Option<String>) = conn
@@ -1010,15 +1110,18 @@ mod tests {
         seed_account(&path, 1);
 
         let writer = WriterActor::spawn(&path);
-        writer.enqueue(WriteOp::MailboxUpsert {
-            account_id: 1,
-            name: "INBOX".into(),
-            kind: "inbox".into(),
-            special_use: None,
-            uidvalidity: Some(11),
-            uidnext: Some(6),
-            highest_modseq: Some(4),
-        });
+        enqueue(
+            &writer,
+            WriteOp::MailboxUpsert {
+                account_id: 1,
+                name: "INBOX".into(),
+                kind: "inbox".into(),
+                special_use: None,
+                uidvalidity: Some(11),
+                uidnext: Some(6),
+                highest_modseq: Some(4),
+            },
+        );
         let message = |dedupe_key: &str, root: &str, seen: bool, uid: u32| WriteOp::MessageUpsert {
             account_id: 1,
             dedupe_key: dedupe_key.into(),
@@ -1046,10 +1149,10 @@ mod tests {
                 modseq: Some(4),
             }),
         };
-        writer.enqueue(message("mid:1@example.com", "<r1>", true, 5));
-        writer.enqueue(message("mid:2@example.com", "<r2>", false, 6));
-        writer.enqueue(WriteOp::ThreadCountersRecompute { account_id: 1 });
-        writer.flush();
+        enqueue(&writer, message("mid:1@example.com", "<r1>", true, 5));
+        enqueue(&writer, message("mid:2@example.com", "<r2>", false, 6));
+        enqueue(&writer, WriteOp::ThreadCountersRecompute { account_id: 1 });
+        writer.flush().expect("flush");
 
         let conn = crate::infra::db::open_readonly(&path).expect("re-open");
         let (thread_count, message_count, unread_count): (i64, i64, i64) = conn
@@ -1127,7 +1230,8 @@ mod tests {
         flush_batch(&mut conn, &batch, &|_| {});
         ack_rx
             .recv_timeout(Duration::from_millis(500))
-            .expect("ack");
+            .expect("ack")
+            .expect("commit ok");
         assert_eq!(meta_count(&conn, "before"), 1);
         assert_eq!(
             meta_count(&conn, "after"),
@@ -1162,10 +1266,12 @@ mod tests {
         flush_batch(&mut conn, &batch, &|_| {});
         first_rx
             .recv_timeout(Duration::from_millis(500))
-            .expect("first flush acked");
+            .expect("first flush acked")
+            .expect("commit ok");
         second_rx
             .recv_timeout(Duration::from_millis(500))
-            .expect("second flush acked");
+            .expect("second flush acked")
+            .expect("commit ok");
         assert_eq!(meta_count(&conn, "one"), 1);
         assert_eq!(meta_count(&conn, "two"), 1);
         assert_eq!(meta_count(&conn, "three"), 1);
@@ -1201,7 +1307,8 @@ mod tests {
         flush_batch(&mut conn, &batch, &on_error);
         ack_rx
             .recv_timeout(Duration::from_millis(500))
-            .expect("ack");
+            .expect("ack")
+            .expect("commit ok");
         assert_eq!(
             meta_count(&conn, "survivor"),
             1,
@@ -1211,6 +1318,42 @@ mod tests {
             !reported.lock().expect("report lock").is_empty(),
             "the failed op must be reported through the error hook"
         );
+    }
+
+    /// When the writer cannot even open a transaction, every flush
+    /// marker in the batch learns about it immediately instead of
+    /// timing out, and the failure reaches the error hook.
+    #[test]
+    fn flush_batch_fails_markers_when_a_transaction_cannot_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = scratch_conn(&dir);
+        // Holding an outer transaction makes `conn.transaction()`
+        // fail exactly like a wedged connection would.
+        conn.execute_batch("BEGIN").expect("outer begin");
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let reported: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let on_error = |msg: String| {
+            reported.lock().expect("report lock").push(msg);
+        };
+        let batch = vec![
+            WriteOp::MetaPut {
+                key: "never".into(),
+                value: "1".into(),
+            },
+            WriteOp::Flush(ack_tx),
+        ];
+
+        flush_batch(&mut conn, &batch, &on_error);
+
+        let outcome = ack_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("marker must be failed, not ignored");
+        assert!(outcome.is_err(), "the marker must report the failure");
+        assert!(
+            !reported.lock().expect("report lock").is_empty(),
+            "the failure must reach the error hook"
+        );
+        conn.execute_batch("ROLLBACK").expect("outer rollback");
     }
 
     /// The public actor surface reports failed ops and keeps the
@@ -1229,20 +1372,26 @@ mod tests {
         let writer = WriterActor::spawn_with_error_hook(&path, move |msg| {
             recorder.lock().expect("report lock").push(msg);
         });
-        writer.enqueue(WriteOp::MailboxUpsert {
-            account_id: 999,
-            name: "INBOX".into(),
-            kind: "mail".into(),
-            special_use: None,
-            uidvalidity: None,
-            uidnext: None,
-            highest_modseq: None,
-        });
-        writer.enqueue(WriteOp::MetaPut {
-            key: "after-failure".into(),
-            value: "ok".into(),
-        });
-        writer.flush();
+        enqueue(
+            &writer,
+            WriteOp::MailboxUpsert {
+                account_id: 999,
+                name: "INBOX".into(),
+                kind: "mail".into(),
+                special_use: None,
+                uidvalidity: None,
+                uidnext: None,
+                highest_modseq: None,
+            },
+        );
+        enqueue(
+            &writer,
+            WriteOp::MetaPut {
+                key: "after-failure".into(),
+                value: "ok".into(),
+            },
+        );
+        writer.flush().expect("flush");
 
         assert_eq!(
             meta_count(&conn_of(&path), "after-failure"),
