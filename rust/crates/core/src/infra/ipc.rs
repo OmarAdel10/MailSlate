@@ -197,6 +197,13 @@ impl Client {
             .await
     }
 
+    /// Re-authorizes an existing OAuth account; the reply carries the
+    /// provider's authorize URL.
+    pub async fn start_reauth(&mut self, account_id: i64) -> Result<Value, BridgeError> {
+        self.request(methods::START_REAUTH, json!({ "account_id": account_id }))
+            .await
+    }
+
     /// Completes a started OAuth flow: names the account and files it.
     pub async fn complete_oauth_account(
         &mut self,

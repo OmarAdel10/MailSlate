@@ -92,7 +92,7 @@ fn run() -> Result<(), ServerError> {
         oauth: std::sync::Mutex::new(None),
         token_poster: std::sync::Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
         oauth_deadline: std::time::Duration::from_secs(300),
-        sync: std::sync::Mutex::new(std::collections::HashMap::new()),
+        sync: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

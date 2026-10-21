@@ -48,6 +48,9 @@ pub struct PendingAuth {
     pub verifier: String,
     pub state: String,
     pub redirect_uri: String,
+    /// `Some(account_id)` when the flow re-authorizes an existing
+    /// account instead of creating a new one.
+    pub reauth_account: Option<i64>,
 }
 
 /// State shared by every dispatched call: the single-writer handle,
@@ -69,7 +72,10 @@ pub struct DispatchCtx {
     /// How long the callback waiter waits before giving up.
     pub oauth_deadline: Duration,
     /// Running sync actors by account id (daemon spawns one each).
-    pub sync: std::sync::Mutex<std::collections::HashMap<i64, SyncHandle>>,
+    ///
+    /// `Arc` so the OAuth waiter thread can restart an account's actor
+    /// after a successful reconnect.
+    pub sync: Arc<std::sync::Mutex<std::collections::HashMap<i64, SyncHandle>>>,
 }
 
 /// Dispatches one method call against shared daemon state.
@@ -89,6 +95,7 @@ pub fn dispatch(
         methods::UPDATE_ACCOUNT => update_account_dispatch(ctx, params).map(Dispatched::Reply),
         methods::GET_ACCOUNTS => get_accounts_dispatch(ctx).map(Dispatched::Reply),
         methods::START_OAUTH => start_oauth_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::START_REAUTH => start_reauth_dispatch(ctx, params).map(Dispatched::Reply),
         methods::COMPLETE_OAUTH_ACCOUNT => {
             complete_oauth_account_dispatch(ctx, params).map(Dispatched::Reply)
         }
@@ -233,10 +240,9 @@ fn get_accounts_dispatch(ctx: &DispatchCtx) -> Result<Value, BridgeError> {
     Ok(json!({ "accounts": accounts }))
 }
 
-/// Starts an OAuth authorization-code flow: binds a loopback listener,
-/// builds the provider authorize URL, publishes `oauth_url_ready`, and
-/// spawns the callback waiter that stages tokens for
-/// [`complete_oauth_account_dispatch`].
+/// Starts the wizard's OAuth flow: no account exists yet, so the
+/// tokens are staged under [`PENDING_ACCOUNT_ID`] until
+/// [`complete_oauth_account_dispatch`] names the row.
 fn start_oauth_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
     let provider = match string(params, "provider")?.as_str() {
         "google" => Provider::Google,
@@ -245,6 +251,52 @@ fn start_oauth_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, Brid
             return Err(validation(format!("unknown oauth provider: {other}")));
         }
     };
+    start_flow(ctx, provider, None)
+}
+
+/// Re-authorizes an existing OAuth account (PRD F1.6): its refresh
+/// token was rejected and the sync actor parked in `reauth_required`.
+/// The callback saves the new snapshot directly to that account and
+/// restarts its actor; nothing is staged for a new row.
+fn start_reauth_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let conn = ctx
+        .reader
+        .acquire()
+        .map_err(|err| BridgeError::new(ErrorKind::Internal, format!("read pool: {err}")))?;
+    let account = get_account_connections(&conn)
+        .map_err(|err| BridgeError::new(ErrorKind::Internal, err.to_string()))?
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| {
+            BridgeError::new(ErrorKind::NotFound, format!("no account row {account_id}"))
+        })?;
+    drop(conn);
+    if account.auth_type != "oauth2" {
+        return Err(validation(
+            "only oauth2 accounts reconnect; password accounts use their saved password",
+        ));
+    }
+    let provider = match account.provider.as_str() {
+        "gmail" => Provider::Google,
+        "outlook" => Provider::Microsoft,
+        other => {
+            return Err(validation(format!(
+                "account {account_id} uses provider {other}, which has no oauth flow"
+            )));
+        }
+    };
+    start_flow(ctx, provider, Some(account_id))
+}
+
+/// Binds the loopback listener, builds the authorize URL, records the
+/// session (only one may be pending, so a stray second browser flow can
+/// never overwrite the first) and spawns the callback waiter.
+fn start_flow(
+    ctx: &DispatchCtx,
+    provider: Provider,
+    reauth_account: Option<i64>,
+) -> Result<Value, BridgeError> {
     let client_id = providers::client_id(provider).map_err(oauth_error)?;
     let profile = providers::profile(provider);
 
@@ -261,25 +313,54 @@ fn start_oauth_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, Brid
         &pkce::challenge_for(&verifier),
     );
 
-    *ctx.oauth.lock().expect("oauth session lock") = Some(PendingAuth {
-        provider,
-        verifier: verifier.clone(),
-        state: state.clone(),
-        redirect_uri: redirect_uri.clone(),
-    });
+    {
+        let mut session = ctx.oauth.lock().expect("oauth session lock");
+        if session.is_some() {
+            return Err(validation(
+                "an oauth flow is already waiting; finish it or let it time out first",
+            ));
+        }
+        *session = Some(PendingAuth {
+            provider,
+            verifier: verifier.clone(),
+            state: state.clone(),
+            redirect_uri: redirect_uri.clone(),
+            reauth_account,
+        });
+    }
 
-    ctx.bus
-        .publish(Event::new("oauth_url_ready", json!({ "url": url })));
+    ctx.bus.publish(Event::new(
+        "oauth_url_ready",
+        json!({
+            "url": url,
+            "provider": provider.db_name(),
+            "account": reauth_account,
+        }),
+    ));
     spawn_oauth_waiter(
         ctx,
         listener,
-        provider,
-        client_id,
-        verifier,
-        state,
-        redirect_uri,
+        OauthFlow {
+            provider,
+            client_id,
+            verifier,
+            state,
+            redirect_uri,
+            reauth_account,
+        },
+        tokio::runtime::Handle::try_current().ok(),
     );
     Ok(json!({ "url": url }))
+}
+
+/// The per-flow values the waiter thread needs after the session is stored.
+struct OauthFlow {
+    provider: Provider,
+    client_id: String,
+    verifier: String,
+    state: String,
+    redirect_uri: String,
+    reauth_account: Option<i64>,
 }
 
 /// Waits for the browser callback out-of-band: when it arrives the flow
@@ -288,18 +369,26 @@ fn start_oauth_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, Brid
 fn spawn_oauth_waiter(
     ctx: &DispatchCtx,
     listener: LoopbackListener,
-    provider: Provider,
-    client_id: String,
-    verifier: String,
-    state: String,
-    redirect_uri: String,
+    flow: OauthFlow,
+    runtime: Option<tokio::runtime::Handle>,
 ) {
     let waiter = listener.for_waiter();
     let keystore = Arc::clone(&ctx.keystore);
     let poster = Arc::clone(&ctx.token_poster);
     let bus = Arc::clone(&ctx.bus);
+    let writer = Arc::clone(&ctx.writer);
+    let reader = Arc::clone(&ctx.reader);
+    let sync = Arc::clone(&ctx.sync);
     let deadline = ctx.oauth_deadline;
     std::thread::spawn(move || {
+        let OauthFlow {
+            provider,
+            client_id,
+            verifier,
+            state,
+            redirect_uri,
+            reauth_account,
+        } = flow;
         let outcome: Result<Option<String>, String> = (|| {
             let (code, _) = waiter
                 .wait_for_code(&state, deadline)
@@ -319,21 +408,113 @@ fn spawn_oauth_waiter(
                     now_unix(),
                 ))
                 .map_err(|err| err.to_string())?;
-            tokens::save(keystore.as_ref(), PENDING_ACCOUNT_ID, &snapshot)
-                .map_err(|err| err.to_string())?;
+            // A reconnect refreshes the account's own snapshot; the
+            // wizard path stages tokens for a row that does not exist
+            // yet.
+            let target = reauth_account.unwrap_or(PENDING_ACCOUNT_ID);
+            tokens::save(keystore.as_ref(), target, &snapshot).map_err(|err| err.to_string())?;
             Ok(email)
         })();
         match outcome {
-            Ok(email) => bus.publish(Event::new(
-                "oauth_completed",
+            Ok(email) => match reauth_account {
+                Some(account_id) => {
+                    bus.publish(Event::new(
+                        "oauth_reconnected",
+                        json!({
+                            "account": account_id,
+                            "email": email,
+                            "provider": provider.db_name(),
+                        }),
+                    ));
+                    if let Err(err) = restart_actor(
+                        &runtime, &keystore, &writer, &reader, &bus, &poster, &sync, account_id,
+                    ) {
+                        bus.publish(Event::new(
+                            "oauth_failed",
+                            json!({
+                                "reason": format!("reconnected, but the sync actor could not restart: {err}"),
+                                "provider": provider.db_name(),
+                                "account": account_id,
+                            }),
+                        ));
+                    }
+                }
+                None => bus.publish(Event::new(
+                    "oauth_completed",
+                    json!({
+                        "account_pending": PENDING_ACCOUNT_ID,
+                        "email": email,
+                        "provider": provider.db_name(),
+                    }),
+                )),
+            },
+            Err(reason) => bus.publish(Event::new(
+                "oauth_failed",
                 json!({
-                    "account_pending": PENDING_ACCOUNT_ID,
-                    "email": email,
+                    "reason": reason,
+                    "provider": provider.db_name(),
+                    "account": reauth_account,
                 }),
             )),
-            Err(reason) => bus.publish(Event::new("oauth_failed", json!({ "reason": reason }))),
         }
     });
+}
+
+/// Replaces the parked actor of a freshly reconnected account: the old
+/// handle is shut down (it sits in `reauth_required` until then) and a
+/// new actor starts from the stored row.
+#[allow(clippy::too_many_arguments)]
+fn restart_actor(
+    runtime: &Option<tokio::runtime::Handle>,
+    keystore: &Arc<dyn KeyStore>,
+    writer: &Arc<WriterActor>,
+    reader: &Arc<ReadPool>,
+    bus: &Arc<EventBus>,
+    poster: &Arc<dyn TokenPoster>,
+    sync: &Arc<std::sync::Mutex<std::collections::HashMap<i64, SyncHandle>>>,
+    account_id: i64,
+) -> Result<(), BridgeError> {
+    let runtime = runtime.as_ref().ok_or_else(|| {
+        BridgeError::new(
+            ErrorKind::Internal,
+            "no async runtime available to restart the sync actor",
+        )
+    })?;
+    let conn = reader
+        .acquire()
+        .map_err(|err| BridgeError::new(ErrorKind::Internal, format!("read pool: {err}")))?;
+    let account = get_account_connections(&conn)
+        .map_err(|err| BridgeError::new(ErrorKind::Internal, err.to_string()))?
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| {
+            BridgeError::new(ErrorKind::NotFound, format!("no account row {account_id}"))
+        })?;
+    drop(conn);
+
+    if let Some(handle) = sync.lock().expect("sync handle lock").remove(&account_id) {
+        handle.try_shutdown();
+    }
+    let _entered = runtime.enter();
+    let handle = spawn_actor(
+        AccountConfig {
+            id: account.id,
+            email: account.email,
+            imap_host: account.imap_host,
+            imap_port: account.imap_port,
+            imap_security: account.imap_security,
+            auth_type: account.auth_type,
+            provider: account.provider,
+        },
+        Arc::clone(keystore),
+        Arc::clone(writer),
+        Arc::clone(bus),
+        Arc::clone(poster),
+    );
+    sync.lock()
+        .expect("sync handle lock")
+        .insert(account_id, handle);
+    Ok(())
 }
 
 /// Turns the staged OAuth tokens into a real account: consumes the
@@ -343,12 +524,18 @@ fn complete_oauth_account_dispatch(
     ctx: &DispatchCtx,
     params: &Value,
 ) -> Result<Value, BridgeError> {
-    let session = ctx
-        .oauth
-        .lock()
-        .expect("oauth session lock")
-        .take()
-        .ok_or_else(|| validation("no pending oauth session"))?;
+    let session = {
+        let mut pending = ctx.oauth.lock().expect("oauth session lock");
+        match pending.as_ref() {
+            Some(session) if session.reauth_account.is_some() => {
+                return Err(validation(
+                    "the pending flow reconnects an existing account; it completes on its own",
+                ));
+            }
+            Some(_) => pending.take().expect("checked above"),
+            None => return Err(validation("no pending oauth session")),
+        }
+    };
     let display_name = string(params, "display_name")?;
     let email = string(params, "email")?;
     let color = optional(params, "color")?;
@@ -792,7 +979,7 @@ mod tests {
             oauth: std::sync::Mutex::new(None),
             token_poster: Arc::new(FakePoster),
             oauth_deadline,
-            sync: std::sync::Mutex::new(std::collections::HashMap::new()),
+            sync: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         })
     }
 
@@ -919,6 +1106,7 @@ mod tests {
             verifier: "verifier".into(),
             state: "state".into(),
             redirect_uri: "http://127.0.0.1:1/callback".into(),
+            reauth_account: None,
         });
         tokens::save(
             ctx.keystore.as_ref(),
@@ -977,6 +1165,192 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Validation);
         assert!(err.message.contains("pending"));
+    }
+
+    /// Seeds an oauth2 account row so a reconnect has a target row.
+    fn seed_oauth_account(dir: &tempfile::TempDir, email: &str) -> i64 {
+        let db_path = dir.path().join(DB_FILE_NAME);
+        let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+        migrations::run(&mut conn).unwrap();
+        drop(conn);
+        let writer = WriterActor::spawn(&db_path);
+        let keystore = FakeKeyStore::new();
+        let snapshot = mailslate_core::infra::oauth::tokens::TokenSnapshot {
+            access_token: "at-old".into(),
+            refresh_token: "rt-old".into(),
+            expires_at: 4_000_000_000,
+            scopes: String::new(),
+        };
+        let id = add_oauth_account(
+            &keystore,
+            &writer,
+            "gmail",
+            "Gmail",
+            email,
+            None,
+            ("127.0.0.1", 1, Security::Tls),
+            ("127.0.0.1", 1, Security::Tls),
+            &snapshot,
+        )
+        .unwrap();
+        writer.flush().unwrap();
+        id
+    }
+
+    /// Plays the browser: hits the loopback callback with the pending
+    /// state so the waiter thread can finish the flow.
+    fn deliver_oauth_callback(ctx: &DispatchCtx, code: &str) {
+        let session = ctx.oauth.lock().unwrap().clone().expect("pending session");
+        let port: u16 = session
+            .redirect_uri
+            .trim_start_matches("http://127.0.0.1:")
+            .trim_end_matches("/callback")
+            .parse()
+            .expect("loopback port in redirect_uri");
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(
+            stream,
+            "GET /callback?code={code}&state={} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            session.state
+        )
+        .unwrap();
+        let mut scratch = [0u8; 256];
+        let _ = stream.read(&mut scratch);
+    }
+
+    #[test]
+    fn start_oauth_rejects_a_second_pending_flow() {
+        let _env = OAUTH_ENV_LOCK.lock().unwrap();
+        let _id = ClientIdGuard::set("google-app-id");
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx_with(&dir, Duration::from_secs(1));
+        dispatch(&ctx, methods::START_OAUTH, &json!({ "provider": "google" })).unwrap();
+
+        let err =
+            dispatch(&ctx, methods::START_OAUTH, &json!({ "provider": "google" })).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert!(err.message.contains("already waiting"));
+    }
+
+    #[test]
+    fn start_reauth_rejects_unknown_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx_with(&dir, Duration::from_secs(1));
+        let err = dispatch(&ctx, methods::START_REAUTH, &json!({ "account_id": 42 })).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotFound);
+        assert!(err.message.contains("42"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_reauth_rejects_password_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        dispatch(&ctx, methods::ADD_IMAP_ACCOUNT, &add_params()).unwrap();
+        ctx.writer.flush().unwrap();
+        let account_id = {
+            let conn = ctx.reader.acquire().unwrap();
+            get_account_connections(&conn).unwrap()[0].id
+        };
+
+        let err = dispatch(
+            &ctx,
+            methods::START_REAUTH,
+            &json!({ "account_id": account_id }),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert!(err.message.contains("password"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reauth_saves_tokens_to_the_account_and_restarts_the_actor() {
+        let _env = OAUTH_ENV_LOCK.lock().unwrap();
+        let _id = ClientIdGuard::set("google-app-id");
+        let dir = tempfile::tempdir().unwrap();
+        let account_id = seed_oauth_account(&dir, "old@example.com");
+        let ctx = test_ctx_with(&dir, Duration::from_secs(5));
+        tokens::save(
+            ctx.keystore.as_ref(),
+            account_id,
+            &mailslate_core::infra::oauth::tokens::TokenSnapshot {
+                access_token: "at-old".into(),
+                refresh_token: "rt-old".into(),
+                expires_at: 4_000_000_000,
+                scopes: String::new(),
+            },
+        )
+        .unwrap();
+        let mut events = ctx.bus.subscribe();
+
+        dispatch(
+            &ctx,
+            methods::START_REAUTH,
+            &json!({ "account_id": account_id }),
+        )
+        .unwrap();
+        let _ready = wait_event(&mut events, "oauth_url_ready");
+        deliver_oauth_callback(&ctx, "cd-9");
+
+        let reconnected = wait_event(&mut events, "oauth_reconnected");
+        assert_eq!(reconnected.data["account"], json!(account_id));
+        assert_eq!(reconnected.data["email"], json!("user@example.com"));
+
+        let saved = ctx
+            .keystore
+            .get(&oauth_key(account_id))
+            .unwrap()
+            .expect("reconnected tokens");
+        assert!(saved.contains("at-1"), "saved snapshot: {saved}");
+        assert!(!saved.contains("at-old"), "stale tokens replaced");
+        assert!(
+            ctx.sync.lock().unwrap().contains_key(&account_id),
+            "the parked actor must be respawned"
+        );
+    }
+
+    #[test]
+    fn complete_oauth_account_rejects_a_reauth_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx_with(&dir, Duration::from_secs(1));
+        ctx.oauth.lock().unwrap().replace(PendingAuth {
+            provider: Provider::Google,
+            verifier: "verifier".into(),
+            state: "state".into(),
+            redirect_uri: "http://127.0.0.1:1/callback".into(),
+            reauth_account: Some(7),
+        });
+
+        let err = dispatch(
+            &ctx,
+            methods::COMPLETE_OAUTH_ACCOUNT,
+            &json!({ "display_name": "Gmail", "email": "me@gmail.com" }),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert!(err.message.contains("reconnect"));
+        assert!(ctx.oauth.lock().unwrap().is_some(), "session survives");
+    }
+
+    #[test]
+    fn complete_oauth_account_requires_staged_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx_with(&dir, Duration::from_secs(1));
+        ctx.oauth.lock().unwrap().replace(PendingAuth {
+            provider: Provider::Google,
+            verifier: "verifier".into(),
+            state: "state".into(),
+            redirect_uri: "http://127.0.0.1:1/callback".into(),
+            reauth_account: None,
+        });
+
+        let err = dispatch(
+            &ctx,
+            methods::COMPLETE_OAUTH_ACCOUNT,
+            &json!({ "display_name": "Gmail", "email": "me@gmail.com" }),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert!(err.message.contains("missing from the keyring"));
     }
 
     #[test]

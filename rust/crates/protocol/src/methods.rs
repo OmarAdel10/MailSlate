@@ -30,6 +30,11 @@ pub const GET_ACCOUNTS: &str = "get_accounts";
 /// the authorize URL the GUI must open in a browser (M2).
 pub const START_OAUTH: &str = "start_oauth";
 
+/// Re-authorizes an existing OAuth account after its refresh token was
+/// rejected (PRD F1.6); the daemon saves the new snapshot to that
+/// account and restarts its sync actor.
+pub const START_REAUTH: &str = "start_reauth";
+
 /// Finalizes a finished OAuth flow with the user-provided profile
 /// (name, email, color); creates the account row (M2).
 pub const COMPLETE_OAUTH_ACCOUNT: &str = "complete_oauth_account";
