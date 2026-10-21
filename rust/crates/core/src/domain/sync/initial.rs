@@ -113,12 +113,19 @@ pub(crate) async fn initial_sync(
             highest_modseq: None,
         });
 
-        let selected = timed(
+        let selected = match timed(
             "select mailbox",
             STEP_TIMEOUT,
             select_mailbox(session, &name),
         )
-        .await?;
+        .await
+        {
+            Ok(selected) => selected,
+            // A mailbox the server refuses to SELECT (ACL, vanished,
+            // or unselectable despite the attributes) must not abort
+            // the other mailboxes' sync.
+            Err(_) => continue,
+        };
         writer.enqueue(WriteOp::MailboxUpsert {
             account_id,
             name: name.clone(),
@@ -256,6 +263,96 @@ mod tests {
         let mut kinds = ["user", "trash", "archive", "inbox", "spam", "sent"];
         kinds.sort_by_key(|k| sync_rank(k));
         assert_eq!(kinds, ["inbox", "archive", "sent", "user", "trash", "spam"]);
+    }
+
+    #[tokio::test]
+    async fn initial_sync_skips_unselectable_mailboxes_and_keeps_going() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir);
+        let writer = crate::infra::db::writer::WriterActor::spawn(&db_path);
+
+        let selected = Cell::new("");
+        let gmail_selects = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let selects = std::sync::Arc::clone(&gmail_selects);
+        let port = spawn_fake(move |tag: &str, command: &str| {
+            if command.starts_with("LOGIN") {
+                vec![format!("{tag} OK logged in")]
+            } else if command.starts_with("LIST") {
+                vec![
+                    "* LIST (\\HasChildren \\Noselect) \"/\" \"[Gmail]\"".to_string(),
+                    "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                    "* LIST (\\HasNoChildren) \"/\" \"Broken\"".to_string(),
+                    "* LIST (\\HasNoChildren \\Archive) \"/\" \"Archive\"".to_string(),
+                    format!("{tag} OK list done"),
+                ]
+            } else if command.starts_with("SELECT") {
+                if command.contains("[Gmail]") {
+                    selects.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                if command.contains("Broken") {
+                    // ACL-denied or vanished mailbox: the sync must skip
+                    // it instead of aborting every other mailbox.
+                    vec![format!("{tag} NO [CANNOT] not selectable")]
+                } else {
+                    selected.set(if command.contains("Archive") {
+                        "Archive"
+                    } else {
+                        "INBOX"
+                    });
+                    vec![
+                        "* 1 EXISTS".to_string(),
+                        "* OK [UIDVALIDITY 100] UIDs valid".to_string(),
+                        "* OK [UIDNEXT 2] Predicted".to_string(),
+                        format!("{tag} OK select done"),
+                    ]
+                }
+            } else if command.starts_with("UID FETCH") {
+                let (uid, id) = if selected.get() == "Archive" {
+                    (7, "s1")
+                } else {
+                    (1, "r1")
+                };
+                vec![
+                    fetch_line(uid, false, 500, id, "Subject", ""),
+                    format!("{tag} OK fetch done"),
+                ]
+            } else {
+                vec![format!("{tag} OK")]
+            }
+        })
+        .await;
+
+        let mut session = fake_session(port).await;
+        let bus = crate::domain::events::EventBus::new();
+
+        initial_sync(&mut session, &writer, &bus, 1)
+            .await
+            .expect("one unselectable mailbox must not abort the sync");
+        writer.flush();
+        drop(session);
+
+        assert_eq!(
+            gmail_selects.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the \\Noselect container must never be selected"
+        );
+        let conn = crate::infra::db::open_readonly(&db_path).expect("readonly");
+        let messages: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE account_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(messages, 2, "both selectable mailboxes must be imported");
+        let gmail_rows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM mailboxes WHERE account_id = 1 AND name = '[Gmail]'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(gmail_rows, 0, "the container is not a mailbox row");
     }
 
     #[tokio::test]

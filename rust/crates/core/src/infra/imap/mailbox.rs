@@ -62,6 +62,16 @@ pub(crate) async fn list_mailboxes(
     let mut stream = std::pin::pin!(stream);
     while let Some(item) = futures_util::StreamExt::next(&mut stream).await {
         let name = item.map_err(|err| ImapError::Protocol(err.to_string()))?;
+        // `\Noselect` marks a hierarchy container (Gmail's `[Gmail]`,
+        // Outlook's `IPF.Note`), never a mailbox: SELECTing it fails and
+        // would abort the whole initial sync.
+        if name
+            .attributes()
+            .iter()
+            .any(|attr| matches!(attr, NameAttribute::NoSelect))
+        {
+            continue;
+        }
         mailboxes.push(MailboxSummary {
             name: name.name().to_string(),
             delimiter: name.delimiter().map(str::to_string),
@@ -177,6 +187,28 @@ mod tests {
         assert_eq!(mailboxes[0].special_use.as_deref(), Some("\\Sent"));
         assert_eq!(mailboxes[1].name, "INBOX");
         assert_eq!(mailboxes[1].special_use, None);
+    }
+
+    #[tokio::test]
+    async fn list_skips_noselect_containers() {
+        let port = spawn_fake(|tag, command| {
+            if command.starts_with("LIST") {
+                vec![
+                    r#"* LIST (\HasChildren \Noselect) "/" "[Gmail]""#.to_string(),
+                    r#"* LIST (\HasNoChildren) "/" INBOX"#.to_string(),
+                    format!("{tag} OK list done"),
+                ]
+            } else {
+                vec![format!("{tag} OK")]
+            }
+        })
+        .await;
+        let mut session = fake_session(port).await;
+
+        let mailboxes = list_mailboxes(&mut session).await.expect("list");
+
+        let names: Vec<&str> = mailboxes.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["INBOX"], "unselectable containers must be dropped");
     }
 
     #[tokio::test]

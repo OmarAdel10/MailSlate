@@ -1047,7 +1047,10 @@ mod tests {
         let port = crate::infra::imap::testing::spawn_fake_multi(move |tag, command| {
             if command.starts_with("SELECT") && selects_for_fake.fetch_add(1, Ordering::SeqCst) == 0
             {
-                return vec![format!("{tag} NO select refused")];
+                // Drop the connection while SELECT is in flight: a
+                // transport failure must back off and retry. (A `NO`
+                // refusal is skipped per mailbox instead - initial.rs.)
+                return vec![];
             }
             happy_replies(tag, command)
         })
@@ -1084,11 +1087,11 @@ mod tests {
         let selects = std::sync::Arc::new(AtomicUsize::new(0));
         let selects_for_fake = std::sync::Arc::clone(&selects);
         let port = crate::infra::imap::testing::spawn_fake_multi(move |tag, command| {
-            if command.starts_with("SELECT") {
-                // Second SELECT (the SyncNow re-sync) fails once.
-                if selects_for_fake.fetch_add(1, Ordering::SeqCst) == 1 {
-                    return vec![format!("{tag} NO select refused")];
-                }
+            if command.starts_with("SELECT") && selects_for_fake.fetch_add(1, Ordering::SeqCst) == 1
+            {
+                // Second SELECT (the SyncNow re-sync) loses its
+                // connection; the actor must reconnect and try again.
+                return vec![];
             }
             if command.starts_with("UID FETCH") {
                 fetches_for_fake.fetch_add(1, Ordering::SeqCst);
