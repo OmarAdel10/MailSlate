@@ -77,7 +77,9 @@ fn run() -> Result<(), ServerError> {
     tracing::info!(schema, "database ready");
 
     let keystore: std::sync::Arc<dyn mailslate_core::infra::keyring::KeyStore> =
-        std::sync::Arc::new(mailslate_core::infra::keyring::OsKeyStore);
+        std::sync::Arc::new(mailslate_core::infra::keyring::OsKeyStore::for_data_dir(
+            &data_dir,
+        ));
     let writer = std::sync::Arc::new(db::writer::WriterActor::spawn_with_error_hook(
         &db_path,
         |error| tracing::warn!(error, "writer operation failed and was skipped"),

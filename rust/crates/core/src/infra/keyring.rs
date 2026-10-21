@@ -6,9 +6,10 @@
 //! the real platform store.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
-/// Keyring service name for all MailSlate secrets.
+/// Keyring service name for the packaged app profile.
 pub const KEYRING_SERVICE: &str = "mailslate";
 
 /// Key name for an account's OAuth token bundle (JSON).
@@ -44,9 +45,38 @@ pub trait KeyStore: Send + Sync {
 
 /// Real OS keyring implementation (Linux secret-service, macOS Keychain,
 /// Windows Credential Manager).
-pub struct OsKeyStore;
+///
+/// The service namespace is scoped to the data directory: account ids
+/// restart at 1 per database, so a global namespace would let a scratch
+/// profile (`MAILSLATE_DATA_DIR`) read or overwrite the packaged app's
+/// credentials for the same numeric id (ARCHITECTURE §12).
+pub struct OsKeyStore {
+    service: String,
+}
 
 impl OsKeyStore {
+    /// Store for the packaged app's default profile.
+    ///
+    /// The daemon must use [`OsKeyStore::for_data_dir`] instead so that
+    /// alternate profiles stay isolated.
+    pub fn new() -> Self {
+        Self {
+            service: KEYRING_SERVICE.to_string(),
+        }
+    }
+
+    /// Store scoped to the profile that lives in `data_dir`.
+    pub fn for_data_dir(data_dir: &Path) -> Self {
+        Self {
+            service: service_for_data_dir(data_dir),
+        }
+    }
+
+    /// Keyring service name this store reads and writes.
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+
     /// Probes whether the platform keyring store is usable without creating
     /// an entry.
     pub fn is_available() -> bool {
@@ -54,14 +84,39 @@ impl OsKeyStore {
     }
 }
 
+impl Default for OsKeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Profile-scoped keyring service name: `mailslate:<16 hex digits>`.
+///
+/// The digest is FNV-1a over the canonical path: stable across process
+/// restarts and Rust releases (unlike `DefaultHasher`), and it keeps the
+/// user's filesystem layout out of keyring metadata.
+pub fn service_for_data_dir(data_dir: &Path) -> String {
+    let canonical = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    format!("{KEYRING_SERVICE}:{:016x}", fnv1a(&canonical))
+}
+
+fn fnv1a(path: &Path) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 impl KeyStore for OsKeyStore {
     fn store(&self, key: &str, secret: &str) -> Result<(), KeyStoreError> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, key).map_err(map_store_init_error)?;
+        let entry = keyring::Entry::new(&self.service, key).map_err(map_store_init_error)?;
         entry.set_password(secret).map_err(map_operation_error)
     }
 
     fn get(&self, key: &str) -> Result<Option<String>, KeyStoreError> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, key).map_err(map_store_init_error)?;
+        let entry = keyring::Entry::new(&self.service, key).map_err(map_store_init_error)?;
         match entry.get_password() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -70,7 +125,7 @@ impl KeyStore for OsKeyStore {
     }
 
     fn delete(&self, key: &str) -> Result<(), KeyStoreError> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, key).map_err(map_store_init_error)?;
+        let entry = keyring::Entry::new(&self.service, key).map_err(map_store_init_error)?;
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(err) => Err(map_operation_error(err)),
@@ -160,6 +215,25 @@ mod tests {
     fn key_names_follow_the_account_scheme() {
         assert_eq!(oauth_key(42), "account:42:oauth");
         assert_eq!(imap_password_key(42), "account:42:imap_password");
+    }
+
+    #[test]
+    fn profile_service_is_stable_and_scoped() {
+        let one = tempfile::tempdir().unwrap();
+        let two = tempfile::tempdir().unwrap();
+
+        let first = service_for_data_dir(one.path());
+        let again = service_for_data_dir(one.path());
+        let other = service_for_data_dir(two.path());
+
+        assert_eq!(first, again, "same profile must keep the same namespace");
+        assert_ne!(first, other, "profiles must not share credentials");
+        assert!(first.starts_with("mailslate:"), "got {first}");
+        assert!(
+            !first.contains(one.path().file_name().unwrap().to_str().unwrap()),
+            "the service name must not leak the profile path: {first}"
+        );
+        assert_eq!(OsKeyStore::for_data_dir(one.path()).service(), first);
     }
 
     #[test]
