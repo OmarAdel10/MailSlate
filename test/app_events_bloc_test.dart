@@ -38,7 +38,7 @@ void main() {
 
     controller.add(const AppEvent.accountStatus(account: 1, state: 'syncing'));
     controller.add(const AppEvent.oauthCompleted(email: 'a@b.c'));
-    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
 
     await controller.close();
     await bloc.close();
@@ -51,10 +51,10 @@ void main() {
       onCancel: () => sourceCancelled = true,
     );
     final bloc = AppEventsBloc(controller.stream);
-    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
 
     await bloc.close();
-    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
 
     expect(sourceCancelled, isTrue);
   });

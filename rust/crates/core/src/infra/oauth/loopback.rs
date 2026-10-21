@@ -194,6 +194,33 @@ mod tests {
         }
     }
 
+    /// A callback missing `code` or `state` is not a real redirect:
+    /// the listener answers and keeps waiting for the genuine one.
+    #[test]
+    fn incomplete_callbacks_keep_the_listener_waiting() {
+        let listener = LoopbackListener::bind().expect("bind loopback");
+
+        let waiter = {
+            let listener = listener.for_waiter();
+            std::thread::spawn(move || listener.wait_for_code("st-1", Duration::from_secs(10)))
+        };
+
+        let codeless = format!("http://127.0.0.1:{}/callback?state=st-1", listener.port());
+        http_get(&codeless).expect("GET callback without code");
+        let stateless = format!("http://127.0.0.1:{}/callback?code=cd-9", listener.port());
+        http_get(&stateless).expect("GET callback without state");
+
+        let url = format!(
+            "http://127.0.0.1:{}/callback?code=cd-9&state=st-1",
+            listener.port()
+        );
+        http_get(&url).expect("GET callback");
+
+        let (code, state) = waiter.join().expect("waiter thread").expect("code");
+        assert_eq!(code, "cd-9");
+        assert_eq!(state, "st-1");
+    }
+
     /// No callback within the deadline fails the flow.
     #[test]
     fn listener_times_out_without_a_callback() {
@@ -203,7 +230,7 @@ mod tests {
         let started = std::time::Instant::now();
         let result = waiter.wait_for_code("st-1", Duration::from_millis(300));
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_millis(800),
             "timeout must fire near the deadline"
         );
         match result {

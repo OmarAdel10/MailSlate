@@ -726,7 +726,7 @@ mod tests {
     use mailslate_core::infra::db::pool::ReadPool;
     use mailslate_core::infra::db::writer::WriterActor;
     use mailslate_core::infra::db::{DB_FILE_NAME, migrations};
-    use mailslate_core::infra::keyring::FakeKeyStore;
+    use mailslate_core::infra::keyring::{FakeKeyStore, KeyStore, KeyStoreError};
     use std::sync::Arc;
 
     /// A dispatch context over a fresh migrated database in `dir`.
@@ -966,18 +966,62 @@ mod tests {
         format!("{header}.{payload}.sig")
     }
 
+    /// A dead token endpoint: every POST fails (exchange failure).
+    struct FailingPoster;
+    impl TokenPoster for FailingPoster {
+        fn post(
+            &self,
+            _url: &str,
+            _form: &[(&str, &str)],
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<TokenResponse, OAuthError>> + Send + '_>,
+        > {
+            Box::pin(async { Err(OAuthError::Network("token endpoint down".into())) })
+        }
+    }
+
+    /// A broken keyring: every secret operation fails.
+    struct FailingKeyStore;
+    impl KeyStore for FailingKeyStore {
+        fn store(&self, _key: &str, _secret: &str) -> Result<(), KeyStoreError> {
+            Err(KeyStoreError::Unavailable("keyring locked".into()))
+        }
+        fn get(&self, _key: &str) -> Result<Option<String>, KeyStoreError> {
+            Err(KeyStoreError::Unavailable("keyring locked".into()))
+        }
+        fn delete(&self, _key: &str) -> Result<(), KeyStoreError> {
+            Err(KeyStoreError::Unavailable("keyring locked".into()))
+        }
+    }
+
     fn test_ctx_with(dir: &tempfile::TempDir, oauth_deadline: Duration) -> Arc<DispatchCtx> {
+        test_ctx_with_doubles(
+            dir,
+            oauth_deadline,
+            Arc::new(FakePoster),
+            Arc::new(FakeKeyStore::new()),
+        )
+    }
+
+    /// A dispatch context with injected token-poster/keyring doubles
+    /// for the waiter failure-path tests.
+    fn test_ctx_with_doubles(
+        dir: &tempfile::TempDir,
+        oauth_deadline: Duration,
+        poster: Arc<dyn TokenPoster>,
+        keystore: Arc<dyn KeyStore>,
+    ) -> Arc<DispatchCtx> {
         let db_path = dir.path().join(DB_FILE_NAME);
         let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
         migrations::run(&mut conn).unwrap();
         drop(conn);
         Arc::new(DispatchCtx {
             writer: Arc::new(WriterActor::spawn(&db_path)),
-            keystore: Arc::new(FakeKeyStore::new()),
+            keystore,
             reader: Arc::new(ReadPool::open(&db_path).unwrap()),
             bus: mailslate_core::domain::events::EventBus::new(),
             oauth: std::sync::Mutex::new(None),
-            token_poster: Arc::new(FakePoster),
+            token_poster: poster,
             oauth_deadline,
             sync: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         })
@@ -1032,6 +1076,24 @@ mod tests {
         let err =
             dispatch(&ctx, methods::START_OAUTH, &json!({ "provider": "yahoo" })).unwrap_err();
         assert_eq!(err.kind, ErrorKind::Validation);
+    }
+
+    /// A known provider whose public client id is not configured
+    /// surfaces the NotConfigured failure over the wire.
+    #[test]
+    fn start_oauth_without_a_client_id_is_internal() {
+        let _env = OAUTH_ENV_LOCK.lock().unwrap();
+        // No ClientIdGuard: the provider env var stays unset.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx_with(&dir, Duration::from_secs(5));
+        let err =
+            dispatch(&ctx, methods::START_OAUTH, &json!({ "provider": "google" })).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(
+            err.message.contains("missing public client id"),
+            "got {}",
+            err.message
+        );
     }
 
     #[test]
@@ -1094,6 +1156,54 @@ mod tests {
 
         let failed = wait_event(&mut events, "oauth_failed");
         assert!(failed.data["reason"].is_string());
+    }
+
+    /// A dead token endpoint publishes `oauth_failed` with the
+    /// exchange failure (wizard flow).
+    #[test]
+    fn oauth_waiter_publishes_failure_when_the_exchange_fails() {
+        let _env = OAUTH_ENV_LOCK.lock().unwrap();
+        let _id = ClientIdGuard::set("google-app-id");
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx_with_doubles(
+            &dir,
+            Duration::from_secs(5),
+            Arc::new(FailingPoster),
+            Arc::new(FakeKeyStore::new()),
+        );
+        let mut events = ctx.bus.subscribe();
+
+        dispatch(&ctx, methods::START_OAUTH, &json!({ "provider": "google" })).unwrap();
+        let _ready = wait_event(&mut events, "oauth_url_ready");
+        deliver_oauth_callback(&ctx, "cd-9");
+
+        let failed = wait_event(&mut events, "oauth_failed");
+        let reason = failed.data["reason"].as_str().expect("reason string");
+        assert!(reason.contains("token endpoint down"), "got {reason}");
+    }
+
+    /// A keyring that cannot store the snapshot publishes
+    /// `oauth_failed` instead of completing silently.
+    #[test]
+    fn oauth_waiter_publishes_failure_when_the_keyring_fails() {
+        let _env = OAUTH_ENV_LOCK.lock().unwrap();
+        let _id = ClientIdGuard::set("google-app-id");
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx_with_doubles(
+            &dir,
+            Duration::from_secs(5),
+            Arc::new(FakePoster),
+            Arc::new(FailingKeyStore),
+        );
+        let mut events = ctx.bus.subscribe();
+
+        dispatch(&ctx, methods::START_OAUTH, &json!({ "provider": "google" })).unwrap();
+        let _ready = wait_event(&mut events, "oauth_url_ready");
+        deliver_oauth_callback(&ctx, "cd-9");
+
+        let failed = wait_event(&mut events, "oauth_failed");
+        let reason = failed.data["reason"].as_str().expect("reason string");
+        assert!(reason.contains("keyring"), "got {reason}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1360,6 +1470,25 @@ mod tests {
         let err = dispatch(&ctx, methods::SYNC_NOW, &json!({ "account_id": 1 })).unwrap_err();
         assert_eq!(err.kind, ErrorKind::NotFound);
         assert!(err.message.contains("no sync actor"));
+    }
+
+    /// A running actor accepts `sync_now` and replies ok.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_now_reaches_a_running_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        let account_id = seed_oauth_account(&dir, "actor@example.com");
+        ensure_sync_actor(&ctx, account_id).expect("spawn actor");
+
+        let Dispatched::Reply(value) = dispatch(
+            &ctx,
+            methods::SYNC_NOW,
+            &json!({ "account_id": account_id }),
+        )
+        .unwrap() else {
+            panic!("sync_now must reply");
+        };
+        assert_eq!(value["ok"], json!(true));
     }
 
     #[test]

@@ -149,7 +149,7 @@ void main() {
       await wizard.stream.firstWhere((state) => state is WaitingForOauth);
 
       wizard.add(const ReopenBrowserRequested());
-      await Future<void>.delayed(Duration.zero);
+      await pumpEventQueue();
 
       expect(urlOpener.openedUrls, [client.oauthUrl, client.oauthUrl]);
     });
@@ -174,7 +174,7 @@ void main() {
       await wizard.stream.firstWhere((state) => state is OauthTimedOut);
 
       wizard.add(const OauthRetryRequested());
-      await Future<void>.delayed(Duration.zero);
+      await pumpEventQueue();
 
       expect(client.startOauthCalls, 2);
       expect(urlOpener.openedUrls.length, 2);
@@ -215,7 +215,7 @@ void main() {
 
       events.add(const AppEvent.oauthCompleted(email: 'user@gmail.com'));
       events.add(const AppEvent.oauthFailed(reason: 'too late'));
-      await Future<void>.delayed(Duration.zero);
+      await pumpEventQueue();
 
       expect(client.completeOauthCalls, 0);
       expect(wizard.state, const WizardWelcome());

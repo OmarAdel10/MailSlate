@@ -49,10 +49,10 @@ void main() {
       final broadcast = appEventStream(client);
 
       final subscription = broadcast.listen(null);
-      await Future<void>.delayed(Duration.zero);
+      await pumpEventQueue();
 
       await subscription.cancel();
-      await Future<void>.delayed(Duration.zero);
+      await pumpEventQueue();
 
       expect(sourceCancelled, isTrue);
     },
@@ -70,14 +70,14 @@ void main() {
     final broadcast = appEventStream(client);
 
     final firstSubscription = broadcast.listen(null);
-    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
     await firstSubscription.cancel();
-    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
 
     final secondSubscription = broadcast.listen(null);
-    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
     await secondSubscription.cancel();
-    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
 
     expect(subscriptions, 2);
     expect(active!.hasListener, isFalse);
@@ -102,9 +102,9 @@ void main() {
       // The first dial fails: the broadcast stream must swallow the throw
       // instead of crashing the listener that dialed it.
       final first = broadcast.listen(null);
-      await Future<void>.delayed(Duration.zero);
+      await pumpEventQueue();
       await first.cancel();
-      await Future<void>.delayed(Duration.zero);
+      await pumpEventQueue();
 
       final events = await broadcast.toList();
 

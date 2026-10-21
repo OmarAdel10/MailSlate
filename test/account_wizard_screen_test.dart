@@ -419,6 +419,75 @@ void main() {
     expect(smtpField().controller!.text, 'smtp.mail.me.com');
   });
 
+  testWidgets('validates required fields before testing', (tester) async {
+    final client = FakeFfiClient();
+    await pumpWizard(tester, client: client, firstAccount: false);
+    await tester.tap(find.byKey(const Key('wizard-card-other')));
+    await tester.pumpAndSettle();
+
+    // Expand the SMTP section so its inline errors are part of the tree.
+    await tester.tap(find.byKey(const Key('wizard-smtp-section')));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byKey(const Key('wizard-test-connection')));
+    await tester.tap(find.byKey(const Key('wizard-test-connection')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Required'), findsNWidgets(6));
+    expect(client.testConnectionCalls, 0);
+
+    // Fill everything but leave the ports malformed.
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-email')),
+      'work@example.com',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-password')),
+      'secret-pw',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-imap-host')),
+      'imap.example.com',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-imap-port')),
+      'abc',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-smtp-host')),
+      'smtp.example.com',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-smtp-port')),
+      '99999',
+    );
+    await tester.ensureVisible(find.byKey(const Key('wizard-test-connection')));
+    await tester.tap(find.byKey(const Key('wizard-test-connection')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Enter a number'), findsOneWidget);
+    expect(find.text('Port must be 1–65535'), findsOneWidget);
+    expect(find.text('Required'), findsNothing);
+    expect(client.testConnectionCalls, 0);
+
+    // Fix the ports; the connection test finally goes through.
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-imap-port')),
+      '993',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-smtp-port')),
+      '465',
+    );
+    await tester.ensureVisible(find.byKey(const Key('wizard-test-connection')));
+    await tester.tap(find.byKey(const Key('wizard-test-connection')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Enter a number'), findsNothing);
+    expect(find.text('Port must be 1–65535'), findsNothing);
+    expect(client.testConnectionCalls, 1);
+  });
+
   test('configures production defaults when no overrides given', () {
     configureDependencies();
     expect(getIt<UrlOpener>(), isA<ProcessUrlOpener>());

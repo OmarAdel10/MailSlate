@@ -73,6 +73,17 @@ void main() {
       expect(bloc.state, const AccountGateFailure('cannot reach the daemon'));
     });
 
+    test('an unexpected error surfaces a generic failure', () async {
+      final client = FakeFfiClient()..listAccountsError = StateError('boom');
+      final bloc = AccountGateBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const AccountGateCheckRequested());
+      await bloc.stream.firstWhere((state) => state is! AccountGateChecking);
+
+      expect(bloc.state, const AccountGateFailure('Something went wrong'));
+    });
+
     test('a recheck after a failure lists accounts again', () async {
       final client = FakeFfiClient(
         accounts: const [

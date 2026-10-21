@@ -260,6 +260,19 @@ mod tests {
         )
     }
 
+    fn fetch_line_without_message_id(uid: u32, size: u32) -> String {
+        // No Message-ID header: the dedupe key must fall back to the
+        // mailbox/uid pair.
+        let headers =
+            "Subject: Headerless\r\nFrom: Bob <bob@x>\r\nDate: Mon, 19 Oct 2026 00:00:00 +0000\r\n\r\n"
+                .to_string();
+        format!(
+            "* 1 FETCH (UID {uid} FLAGS () RFC822.SIZE {size} INTERNALDATE \"17-Jul-1996 02:44:25 -0700\" BODY[HEADER.FIELDS (DATE FROM TO CC SUBJECT REPLY-TO MESSAGE-ID REFERENCES IN-REPLY-TO)] {{{}}}\r\n{})",
+            headers.len(),
+            headers
+        )
+    }
+
     #[test]
     fn kinds_map_from_special_use_and_inbox() {
         assert_eq!(kind_for("INBOX", None), "inbox");
@@ -501,6 +514,63 @@ mod tests {
             "expected an INBOX sync_progress event, got {progress:?}"
         );
         assert!(progress.iter().any(|e| e.data["mailbox"] == "Sent"));
+    }
+
+    /// A SELECT without `[UIDNEXT]` falls back to one full-range
+    /// fetch, and a message without a Message-ID header dedupes on
+    /// its mailbox/uid pair instead of the header.
+    #[tokio::test]
+    async fn initial_sync_fetches_the_full_range_without_uidnext_and_dedupes_without_message_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir);
+        let writer = crate::infra::db::writer::WriterActor::spawn(&db_path);
+
+        let port = spawn_fake(|tag: &str, command: &str| {
+            if command.starts_with("LOGIN") {
+                vec![format!("{tag} OK logged in")]
+            } else if command.starts_with("LIST") {
+                vec![
+                    "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                    format!("{tag} OK list done"),
+                ]
+            } else if command.starts_with("SELECT") {
+                // Deliberately no [UIDNEXT] code: the envelope fetch
+                // must fall back to the full `1:*` range.
+                vec![
+                    "* 1 EXISTS".to_string(),
+                    "* OK [UIDVALIDITY 100] UIDs valid".to_string(),
+                    format!("{tag} OK select done"),
+                ]
+            } else if command.starts_with("UID FETCH") {
+                vec![
+                    fetch_line_without_message_id(5, 123),
+                    format!("{tag} OK fetch done"),
+                ]
+            } else {
+                vec![format!("{tag} OK")]
+            }
+        })
+        .await;
+
+        let mut session = fake_session(port).await;
+        let bus = crate::domain::events::EventBus::new();
+
+        initial_sync(&mut session, &writer, &bus, 1)
+            .await
+            .expect("initial sync");
+        writer.flush().expect("flush");
+        drop(session);
+
+        let conn = crate::infra::db::open_readonly(&db_path).expect("readonly");
+        let (dedupe_key, message_id_hdr): (String, Option<String>) = conn
+            .query_row(
+                "SELECT dedupe_key, message_id_hdr FROM messages WHERE account_id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(dedupe_key, "imap:INBOX:5", "uid-based fallback key");
+        assert_eq!(message_id_hdr, None);
     }
 
     #[tokio::test]

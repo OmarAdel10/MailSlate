@@ -261,4 +261,40 @@ mod tests {
             "got {error:?}"
         );
     }
+
+    /// A server that closes the connection before sending the
+    /// greeting fails the connect with a dedicated message.
+    #[tokio::test]
+    async fn a_connection_closed_before_the_greeting_fails() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind");
+        let port = listener.local_addr().expect("local addr").port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            drop(stream);
+        });
+
+        let err = connect("127.0.0.1", port, Security::Plaintext)
+            .await
+            .expect_err("EOF before the greeting must fail the connect");
+        assert!(matches!(err, ImapError::Connect(_)), "got {err:?}");
+        assert!(
+            err.to_string()
+                .contains("connection closed before greeting"),
+            "got {err:?}"
+        );
+    }
+
+    /// Hostnames that are not valid TLS server names fail early with
+    /// a TLS classification, not a connect error.
+    #[test]
+    fn server_name_rejects_invalid_hostnames() {
+        let err = server_name("not a host!").expect_err("spaces are not a valid name");
+        assert!(matches!(err, ImapError::Tls(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("invalid server name"),
+            "got {err:?}"
+        );
+    }
 }

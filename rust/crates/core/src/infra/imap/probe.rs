@@ -310,6 +310,39 @@ mod tests {
         assert!(matches!(err, ProbeError::Greeting(_)), "got {err:?}");
     }
 
+    /// A server that rejects `EHLO` fails the probe.
+    #[tokio::test]
+    async fn smtp_probe_rejects_a_failed_ehlo() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fake smtp bind");
+        let port = listener.local_addr().expect("local addr").port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("smtp accept");
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let (reader, mut writer) = tokio::io::split(stream);
+            writer
+                .write_all(b"220 fake.local ESMTP\r\n")
+                .await
+                .expect("smtp greeting");
+            let mut lines = BufReader::new(reader).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.starts_with("EHLO") {
+                    writer.write_all(b"500 unimplemented\r\n").await
+                } else {
+                    writer.write_all(b"221 bye\r\n").await
+                }
+                .expect("smtp reply");
+            }
+        });
+
+        let err = probe_smtp("127.0.0.1", port, Security::Plaintext)
+            .await
+            .expect_err("an EHLO rejection must fail the probe");
+        assert!(matches!(err, ProbeError::Ehlo(_)), "got {err:?}");
+        assert!(err.to_string().contains("500"), "got {err:?}");
+    }
+
     #[tokio::test]
     async fn smtp_probe_reports_unreachable_hosts() {
         let err = probe_smtp("127.0.0.1", 1, Security::Plaintext)
