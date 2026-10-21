@@ -26,6 +26,11 @@ pub fn authorize_url(
     if profile.access_type_offline {
         params.push(("access_type", "offline"));
     }
+    if profile.prompt_consent {
+        // A silent re-authorization returns no refresh token; force the
+        // consent screen so the grant always carries one (F1.6).
+        params.push(("prompt", "consent"));
+    }
     let url = reqwest::Url::parse_with_params(profile.auth_url, params)
         .expect("profile auth_url is a valid url");
     url.to_string()
@@ -66,7 +71,12 @@ mod tests {
         assert_eq!(get("state"), "st-1");
         assert_eq!(get("code_challenge"), "challenge-1");
         assert_eq!(get("code_challenge_method"), "S256");
-        assert_eq!(get("scope"), "https://mail.google.com/");
+        assert_eq!(get("scope"), "openid email https://mail.google.com/");
+        assert_eq!(
+            get("prompt"),
+            "consent",
+            "a silent re-consent would return no refresh token"
+        );
     }
 
     #[test]
@@ -119,8 +129,17 @@ mod tests {
             .find(|(k, _)| k == "scope")
             .map(|(_, v)| v.into_owned())
             .expect("scope present");
-        assert_eq!(scope, "offline_access IMAP.AccessAsUser.All SMTP.Send");
+        assert_eq!(
+            scope,
+            "openid email profile offline_access \
+             https://outlook.office.com/IMAP.AccessAsUser.All \
+             https://outlook.office.com/SMTP.Send"
+        );
         // Spaces must not survive raw in the serialized URL.
-        assert!(url.contains("scope=offline_access%20") || url.contains("scope=offline_access+"));
+        assert!(url.contains("scope=openid%20email") || url.contains("scope=openid+email"));
+        assert!(
+            parsed.query_pairs().all(|(key, _)| key != "prompt"),
+            "Microsoft must not force a consent prompt"
+        );
     }
 }

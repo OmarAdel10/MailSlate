@@ -179,7 +179,15 @@ pub async fn exchange_code_detail<E: TokenPoster + ?Sized>(
     ];
     let response = endpoint.post(profile.token_url, &form).await?;
     let id_token = response.id_token.as_deref().and_then(id_token_email);
-    Ok((to_snapshot(response, now, None), id_token))
+    let snapshot = to_snapshot(response, now, None);
+    if snapshot.refresh_token.is_empty() {
+        // Without a refresh token the account dies after the first hour;
+        // surface it now, while the user is still in the wizard.
+        return Err(OAuthError::InvalidGrant(
+            "provider returned no refresh token; the consent screen was skipped".into(),
+        ));
+    }
+    Ok((snapshot, id_token))
 }
 
 /// Object-safe stand-in for [`TokenEndpoint`]: AFIT makes the original
@@ -384,5 +392,57 @@ mod tests {
         assert_eq!(snapshot.refresh_token, "rt-old");
         assert_eq!(snapshot.access_token, "at-2");
         assert_eq!(snapshot.expires_at, 2_000 + 1800);
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_a_grant_without_a_refresh_token() {
+        let fake = FakeEndpoint::new(canned("at-3", None, 3600));
+        let err = exchange_code(
+            &fake,
+            GOOGLE,
+            "auth-code",
+            "verifier",
+            "http://127.0.0.1:1/callback",
+            "client-id",
+            1_000,
+        )
+        .await
+        .expect_err("a grant without a refresh token is unusable");
+        assert!(matches!(
+            err,
+            OAuthError::InvalidGrant(ref message) if message.contains("refresh token")
+        ));
+    }
+
+    #[test]
+    fn parse_token_response_maps_provider_error_bodies() {
+        let body = serde_json::json!({
+            "error": "invalid_grant",
+            "error_description": "token has been revoked",
+        });
+        let err = parse_token_response(&body).expect_err("error body is not a token");
+        assert!(matches!(
+            err,
+            OAuthError::InvalidGrant(ref message) if message.contains("revoked")
+        ));
+    }
+
+    #[test]
+    fn parse_token_response_requires_object_and_token_fields() {
+        let not_an_object = parse_token_response(&serde_json::json!([])).expect_err("array body");
+        assert!(matches!(not_an_object, OAuthError::Network(_)));
+
+        let no_access = parse_token_response(&serde_json::json!({})).expect_err("empty body");
+        assert!(matches!(
+            no_access,
+            OAuthError::Network(ref message) if message.contains("access_token")
+        ));
+
+        let no_expiry = parse_token_response(&serde_json::json!({"access_token": "at"}))
+            .expect_err("missing expiry");
+        assert!(matches!(
+            no_expiry,
+            OAuthError::Network(ref message) if message.contains("expires_in")
+        ));
     }
 }

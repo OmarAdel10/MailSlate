@@ -56,6 +56,10 @@ pub struct ProviderProfile {
     /// Google refresh tokens require `access_type=offline` on the
     /// authorize URL; Microsoft covers offline access via its scope.
     pub access_type_offline: bool,
+    /// Google only returns a refresh token on a fresh consent; the
+    /// authorize URL must force `prompt=consent` or re-authorizing an
+    /// account silently yields no refresh token.
+    pub prompt_consent: bool,
     pub imap_host: &'static str,
     pub imap_port: u16,
     pub imap_security: Security,
@@ -70,8 +74,12 @@ pub fn profile(provider: Provider) -> &'static ProviderProfile {
     const GOOGLE: ProviderProfile = ProviderProfile {
         auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
         token_url: "https://oauth2.googleapis.com/token",
-        scope: "https://mail.google.com/",
+        // `openid email` is what makes the token endpoint return the
+        // id_token the account email is read from (F1.1); the mail
+        // scope alone yields no identity claim.
+        scope: "openid email https://mail.google.com/",
         access_type_offline: true,
+        prompt_consent: true,
         imap_host: "imap.gmail.com",
         imap_port: 993,
         imap_security: Security::Tls,
@@ -83,8 +91,14 @@ pub fn profile(provider: Provider) -> &'static ProviderProfile {
     const MICROSOFT: ProviderProfile = ProviderProfile {
         auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
         token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-        scope: "offline_access IMAP.AccessAsUser.All SMTP.Send",
+        // Entra resolves unqualified permission names against Graph, so
+        // the Outlook resource URIs must be fully qualified (PRD F1.2).
+        // `openid email profile` supplies the id_token for the address.
+        scope: "openid email profile offline_access \
+                https://outlook.office.com/IMAP.AccessAsUser.All \
+                https://outlook.office.com/SMTP.Send",
         access_type_offline: false,
+        prompt_consent: false,
         imap_host: "outlook.office365.com",
         imap_port: 993,
         imap_security: Security::Tls,
@@ -123,10 +137,14 @@ mod tests {
         let p = profile(Provider::Google);
         assert_eq!(p.auth_url, "https://accounts.google.com/o/oauth2/v2/auth");
         assert_eq!(p.token_url, "https://oauth2.googleapis.com/token");
-        assert_eq!(p.scope, "https://mail.google.com/");
+        assert_eq!(p.scope, "openid email https://mail.google.com/");
         assert!(
             p.access_type_offline,
             "Google grants refresh tokens only with access_type=offline"
+        );
+        assert!(
+            p.prompt_consent,
+            "Google only returns a refresh token on a forced consent"
         );
         assert_eq!(p.imap_host, "imap.gmail.com");
         assert_eq!(p.imap_port, 993);
@@ -148,10 +166,19 @@ mod tests {
             p.token_url,
             "https://login.microsoftonline.com/common/oauth2/v2.0/token"
         );
-        assert_eq!(p.scope, "offline_access IMAP.AccessAsUser.All SMTP.Send");
+        assert_eq!(
+            p.scope,
+            "openid email profile offline_access \
+             https://outlook.office.com/IMAP.AccessAsUser.All \
+             https://outlook.office.com/SMTP.Send"
+        );
         assert!(
             !p.access_type_offline,
             "Microsoft requests offline access via the scope, not access_type"
+        );
+        assert!(
+            !p.prompt_consent,
+            "Microsoft re-consents through its own scope set"
         );
         assert_eq!(p.imap_host, "outlook.office365.com");
         assert_eq!(p.imap_port, 993);
