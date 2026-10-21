@@ -5,9 +5,14 @@ import 'package:mailslate/core/di/di.dart';
 import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/core/logging/daemon_log.dart';
 import 'package:mailslate/core/logging/log_opener.dart';
+import 'package:mailslate/core/system/url_opener.dart';
 import 'package:mailslate/core/theme/tokens.dart';
+import 'package:mailslate/features/accounts/account_colors.dart';
+import 'package:mailslate/features/accounts/account_settings_dialog.dart';
+import 'package:mailslate/features/accounts/accounts_bloc.dart';
 import 'package:mailslate/features/accounts/wizard/account_wizard_screen.dart';
 
+import 'app_events_bloc.dart';
 import 'daemon_status_bloc.dart';
 
 /// The app shell: window chrome around the mail views.
@@ -15,6 +20,10 @@ import 'daemon_status_bloc.dart';
 /// Sidebar 240px · conversation list 380px · reader fills (USER_FLOW §2,
 /// DESIGN §5). Messages arrive with the sync milestones; M1 panes render
 /// their empty states next to the live daemon connection status.
+///
+/// The sidebar also lists the connected accounts (F1.5) and, when the
+/// daemon reports `reauth_required`, a `Reconnect <account>` card runs the
+/// OAuth flow again without re-adding anything (F1.6, USER_FLOW §11).
 class ShellScreen extends StatelessWidget {
   const ShellScreen({super.key, this.openThreadId});
 
@@ -30,7 +39,20 @@ class ShellScreen extends StatelessWidget {
       create: (_) =>
           DaemonStatusBloc(getIt<FfiClient>())
             ..add(const DaemonStatusRequested()),
-      child: const _ShellView(),
+      child: Builder(
+        builder: (context) {
+          return BlocProvider(
+            create: (_) => AccountsBloc(
+              getIt<FfiClient>(),
+              // The root AppEventsBloc owns the daemon event connection;
+              // this only taps its broadcast stream (PERFORMANCE §4.5).
+              context.read<AppEventsBloc>().stream,
+              getIt<UrlOpener>(),
+            )..add(const AccountsLoadRequested()),
+            child: const _ShellView(),
+          );
+        },
+      ),
     );
   }
 }
@@ -85,6 +107,7 @@ class _ShellViewState extends State<_ShellView> {
                 const _Toolbar(key: Key('shell-toolbar')),
                 Divider(height: 1, thickness: 1, color: tokens.hairline),
                 const _UnavailableBanner(),
+                const _ReconnectBanner(),
                 Expanded(
                   child: Row(
                     children: [
@@ -129,32 +152,63 @@ class _Sidebar extends StatelessWidget {
       width: 240,
       color: tokens.surfaceSoft,
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-      child: ListView(
-        padding: EdgeInsets.zero,
-        children: [
-          for (final view in MailView.values)
-            _SidebarItem(
-              view: view,
-              selected: view == selectedView,
-              onTap: () => onSelect(view),
-            ),
-          const SizedBox(height: 8),
-          _AddAccountItem(
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => AccountWizardScreen(
-                  firstAccount: false,
-                  onDone: () => Navigator.of(context).pop(),
+      child: BlocBuilder<AccountsBloc, AccountsState>(
+        builder: (context, state) {
+          return ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              for (final view in MailView.values)
+                _SidebarItem(
+                  view: view,
+                  selected: view == selectedView,
+                  onTap: () => onSelect(view),
                 ),
+              const SizedBox(height: 8),
+              if (state.accounts.isNotEmpty) ...[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 4, 8, 6),
+                  child: Text(
+                    'Accounts',
+                    style: Theme.of(context).textTheme.labelSmall
+                        ?.copyWith(color: tokens.muted),
+                  ),
+                ),
+                for (final account in state.accounts)
+                  _AccountRow(
+                    account: account,
+                    needsReauth: state.reauthRequired.contains(account.id),
+                  ),
+                const SizedBox(height: 8),
+              ],
+              _AddAccountItem(
+                onTap: () => Navigator.of(context)
+                    .push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => AccountWizardScreen(
+                          firstAccount: false,
+                          onDone: () => Navigator.of(context).pop(),
+                        ),
+                      ),
+                    )
+                    .then((_) {
+                      // The wizard may have added an account (or been
+                      // cancelled); refresh the sidebar either way.
+                      if (context.mounted) {
+                        context.read<AccountsBloc>().add(
+                          const AccountsLoadRequested(),
+                        );
+                      }
+                    }),
               ),
-            ),
-          ),
-        ],
+            ],
+          );
+        },
       ),
     );
   }
 }
 
+/// One selectable mail view in the sidebar (USER_FLOW §2).
 class _SidebarItem extends StatelessWidget {
   const _SidebarItem({
     required this.view,
@@ -193,6 +247,77 @@ class _SidebarItem extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   Text(view.label, style: labelStyle),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One account under the sidebar's `Accounts` group (USER_FLOW §2).
+///
+/// M2 scope: the row and its gear open account settings (F1.5/F1.8);
+/// per-account filtering of the conversation list arrives with M3. The
+/// warning glyph marks accounts the daemon flagged `reauth_required`.
+class _AccountRow extends StatelessWidget {
+  const _AccountRow({required this.account, required this.needsReauth});
+
+  final AccountSummary account;
+  final bool needsReauth;
+
+  void _openSettings(BuildContext context) {
+    showAccountSettingsDialog(context, account);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final labelStyle = Theme.of(context).textTheme.labelMedium
+        ?.copyWith(color: needsReauth ? tokens.error : tokens.body);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          key: Key('account-row-${account.id}'),
+          onTap: () => _openSettings(context),
+          borderRadius: BorderRadius.circular(8),
+          hoverColor: tokens.surfaceCard,
+          child: SizedBox(
+            height: 32,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Row(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: accountDotColor(account, tokens),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(account.displayName, style: labelStyle)),
+                  if (needsReauth)
+                    Tooltip(
+                      message: 'Reconnect needed',
+                      child: Icon(
+                        Symbols.warning,
+                        size: 16,
+                        color: tokens.error,
+                      ),
+                    ),
+                  IconButton(
+                    key: Key('account-settings-${account.id}'),
+                    onPressed: () => _openSettings(context),
+                    icon: Icon(Symbols.settings, size: 16, color: tokens.muted),
+                    tooltip: 'Account settings',
+                  ),
                 ],
               ),
             ),
@@ -373,6 +498,128 @@ class _UnavailableBanner extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Inline `Reconnect <account>` cards for accounts the daemon flagged
+/// `reauth_required` (USER_FLOW §11, PRD F9.4). Reader and list keep
+/// working; the card re-runs the OAuth flow in the background (F1.6).
+class _ReconnectBanner extends StatelessWidget {
+  const _ReconnectBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<AccountsBloc, AccountsState>(
+      builder: (context, state) {
+        if (state.reauthRequired.isEmpty) {
+          return const SizedBox.shrink();
+        }
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (final id in state.reauthRequired)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: _ReconnectCard(
+                    accountId: id,
+                    displayName: _displayName(state, id),
+                    pending: state.reconnectPending,
+                    failure: state.reconnectFailure?.account == id
+                        ? state.reconnectFailure?.reason
+                        : null,
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Account name for the card; `an account` covers an event that raced
+  /// ahead of the account list (e.g. account added elsewhere).
+  static String _displayName(AccountsState state, int accountId) {
+    for (final account in state.accounts) {
+      if (account.id == accountId) {
+        return account.displayName;
+      }
+    }
+    return 'an account';
+  }
+}
+
+class _ReconnectCard extends StatelessWidget {
+  const _ReconnectCard({
+    required this.accountId,
+    required this.displayName,
+    required this.pending,
+    required this.failure,
+  });
+
+  final int accountId;
+  final String displayName;
+  final int? pending;
+  final String? failure;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = context.tokens;
+    final bodySmall = Theme.of(context).textTheme.bodySmall;
+    final waiting = pending == accountId;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+      decoration: BoxDecoration(
+        color: tokens.surfaceCard,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: tokens.hairline),
+      ),
+      child: Row(
+        children: [
+          Icon(Symbols.warning, size: 20, color: tokens.error),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Reconnect $displayName', style: bodySmall),
+                if (failure != null)
+                  Text(
+                    failure!,
+                    style: bodySmall?.copyWith(color: tokens.error),
+                  ),
+                if (waiting)
+                  Text(
+                    'Waiting for the browser…',
+                    style: bodySmall?.copyWith(color: tokens.muted),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          FilledButton(
+            key: Key('account-reconnect-$accountId'),
+            // The daemon rejects a second concurrent OAuth flow, so every
+            // card disables while one reconnect is in flight.
+            onPressed: pending == null
+                ? () => context.read<AccountsBloc>().add(
+                    AccountReconnectRequested(accountId),
+                  )
+                : null,
+            child: waiting
+                ? const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Text('Reconnect'),
+          ),
+        ],
+      ),
     );
   }
 }

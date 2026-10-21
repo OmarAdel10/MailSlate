@@ -22,6 +22,8 @@ class FakeFfiClient extends FfiClient {
     this.addImapFailure,
     this.oauthUrl = 'https://accounts.example.test/auth',
     this.startOauthFailure,
+    this.reauthUrl = 'https://accounts.example.test/reauth',
+    this.reauthFailure,
     this.completeOauthResult = 11,
     this.completeOauthFailure,
     this.testConnectionResult = const ConnectionTest(
@@ -61,6 +63,9 @@ class FakeFfiClient extends FfiClient {
   /// When set, every accounts call throws it.
   AppFailure? accountsFailure;
 
+  /// When set, [listAccounts] throws it after the failure check.
+  Object? listAccountsError;
+
   /// Returned by [FfiClient.addImapAccount] when [addImapFailure] is null.
   int addImapResult;
 
@@ -72,6 +77,16 @@ class FakeFfiClient extends FfiClient {
 
   /// When set, [FfiClient.startOauth] throws it.
   AppFailure? startOauthFailure;
+
+  /// Returned by [FfiClient.startReauth] when [reauthFailure] is null.
+  String reauthUrl;
+
+  /// When set, [FfiClient.startReauth] throws it.
+  AppFailure? reauthFailure;
+
+  /// When set, [FfiClient.startReauth] throws it (any object, for generic
+  /// catches).
+  Object? reauthThrow;
 
   /// Returned by [FfiClient.completeOauthAccount] when null failure.
   int completeOauthResult;
@@ -94,6 +109,9 @@ class FakeFfiClient extends FfiClient {
   /// How often [FfiClient.startOauth] was called.
   int startOauthCalls = 0;
 
+  /// How often [FfiClient.startReauth] was called.
+  int reauthCalls = 0;
+
   /// How often [FfiClient.completeOauthAccount] was called.
   int completeOauthCalls = 0;
 
@@ -109,6 +127,9 @@ class FakeFfiClient extends FfiClient {
 
   /// Captured [FfiClient.startOauth] provider.
   String? lastOauthProvider;
+
+  /// Captured [FfiClient.startReauth] account id.
+  int? lastReauthId;
 
   /// Captured [FfiClient.completeOauthAccount] arguments.
   String? lastCompleteDisplayName;
@@ -185,6 +206,10 @@ class FakeFfiClient extends FfiClient {
     if (failure != null) {
       throw failure;
     }
+    final thrown = listAccountsError;
+    if (thrown != null) {
+      throw thrown;
+    }
     return accounts;
   }
 
@@ -212,6 +237,21 @@ class FakeFfiClient extends FfiClient {
       throw failure;
     }
     return oauthUrl;
+  }
+
+  @override
+  Future<String> startReauth({required int accountId}) async {
+    reauthCalls += 1;
+    lastReauthId = accountId;
+    final failure = reauthFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    final thrown = reauthThrow;
+    if (thrown != null) {
+      throw thrown;
+    }
+    return reauthUrl;
   }
 
   @override

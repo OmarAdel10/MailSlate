@@ -7,6 +7,7 @@ import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/features/accounts/account_gate.dart';
 import 'package:mailslate/features/accounts/wizard/account_wizard_bloc.dart';
 import 'package:mailslate/core/theme/theme.dart';
+import 'package:mailslate/features/shell/app_events_bloc.dart';
 
 import 'support/fake_ffi_client.dart';
 import 'support/fake_url_opener.dart';
@@ -25,10 +26,16 @@ void main() {
   tearDown(getIt.reset);
 
   Future<void> pumpGate(WidgetTester tester) {
+    // Mirrors the app root: the events bloc sits above the gate so the
+    // shell (and its accounts surface) can read it.
+    final client = getIt<FfiClient>();
     return tester.pumpWidget(
-      MaterialApp(
-        theme: buildTheme(Brightness.light),
-        home: const AccountGate(),
+      BlocProvider<AppEventsBloc>(
+        create: (_) => AppEventsBloc(client.events()),
+        child: MaterialApp(
+          theme: buildTheme(Brightness.light),
+          home: const AccountGate(),
+        ),
       ),
     );
   }
@@ -99,7 +106,8 @@ void main() {
 
     expect(find.byKey(const Key('wizard-welcome')), findsNothing);
     expect(find.byKey(const Key('shell-sidebar')), findsOneWidget);
-    expect(client.listAccountsCalls, 2);
+    // Gate re-check + the shell's accounts surface loading its list.
+    expect(client.listAccountsCalls, 3);
   });
 }
 

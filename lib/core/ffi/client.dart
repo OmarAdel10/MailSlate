@@ -16,6 +16,7 @@ export 'package:mailslate/src/rust/api/system.dart'
         AppEvent_AccountStatus,
         AppEvent_OauthCompleted,
         AppEvent_OauthFailed,
+        AppEvent_OauthReconnected,
         AppEvent_OauthUrlReady,
         AppEvent_Other,
         AppEvent_SyncProgress,
