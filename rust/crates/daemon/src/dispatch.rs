@@ -1028,6 +1028,12 @@ mod tests {
                                 } else {
                                     format!("{tag} NO invalid credentials")
                                 }
+                            } else if line.to_lowercase().contains("list") {
+                                // The probe now enumerates mailboxes (PRD
+                                // F1.4); an empty LIST fails it.
+                                format!(
+                                    "* LIST (\\HasNoChildren) \"/\" INBOX\r\n{tag} OK list done"
+                                )
                             } else {
                                 format!("{tag} OK done")
                             };

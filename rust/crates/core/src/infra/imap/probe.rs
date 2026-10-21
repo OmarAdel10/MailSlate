@@ -35,6 +35,10 @@ pub enum ProbeError {
     /// The server did not accept `EHLO` (SMTP probe).
     #[error("EHLO rejected: {0}")]
     Ehlo(String),
+    /// Authentication worked but mailbox discovery failed: the account
+    /// cannot sync even though the login is valid (PRD F1.4).
+    #[error("mailbox list failed: {0}")]
+    List(String),
 }
 
 impl From<ImapError> for ProbeError {
@@ -55,8 +59,9 @@ impl From<ImapError> for ProbeError {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Proves an IMAP account works: connect with the account's transport
-/// security, then authenticate with username and password. Runs the
-/// same code path the sync engine will use on the first sync.
+/// security, authenticate, and enumerate mailboxes. Runs the same code
+/// path the sync engine will use on the first sync, and covers the
+/// `login + mailbox list` half of PRD F1.4.
 pub async fn probe_imap_login(
     host: &str,
     port: u16,
@@ -66,7 +71,20 @@ pub async fn probe_imap_login(
 ) -> Result<(), ProbeError> {
     tokio::time::timeout(PROBE_TIMEOUT, async {
         let client = connect(host, port, security).await?;
-        login_password(client, username, password).await?;
+        let mut session = login_password(client, username, password).await?;
+        let mailboxes =
+            super::mailbox::list_mailboxes(&mut session)
+                .await
+                .map_err(|err| match err {
+                    ImapError::Protocol(detail) => ProbeError::List(detail),
+                    other => other.into(),
+                })?;
+        // A server that refuses LIST may close the command with `NO`,
+        // which async-imap reports as an empty stream. Either way an
+        // account with no mailbox is unusable (PRD F1.4).
+        if mailboxes.is_empty() {
+            return Err(ProbeError::List("the server listed no mailboxes".into()));
+        }
         Ok(())
     })
     .await
@@ -182,6 +200,11 @@ mod tests {
         let port = spawn_fake(|tag, command| {
             if command.starts_with("LOGIN") {
                 vec![format!("{tag} OK logged in")]
+            } else if command.starts_with("LIST") {
+                vec![
+                    "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                    format!("{tag} OK list done"),
+                ]
             } else {
                 vec![format!("{tag} OK")]
             }
@@ -191,6 +214,53 @@ mod tests {
         probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
             .await
             .expect("probe must succeed");
+    }
+
+    #[tokio::test]
+    async fn imap_probe_lists_mailboxes_after_login() {
+        let listed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&listed);
+        let port = spawn_fake(move |tag, command| {
+            if command.starts_with("LOGIN") {
+                vec![format!("{tag} OK logged in")]
+            } else if command.starts_with("LIST") {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                vec![
+                    "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                    format!("{tag} OK list done"),
+                ]
+            } else {
+                vec![format!("{tag} OK")]
+            }
+        })
+        .await;
+
+        probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
+            .await
+            .expect("probe must succeed");
+        assert!(
+            listed.load(std::sync::atomic::Ordering::SeqCst),
+            "PRD F1.4 requires the probe to enumerate mailboxes"
+        );
+    }
+
+    #[tokio::test]
+    async fn imap_probe_reports_a_failing_mailbox_list() {
+        let port = spawn_fake(|tag, command| {
+            if command.starts_with("LOGIN") {
+                vec![format!("{tag} OK logged in")]
+            } else if command.starts_with("LIST") {
+                vec![format!("{tag} NO [CANNOT] list denied")]
+            } else {
+                vec![format!("{tag} OK")]
+            }
+        })
+        .await;
+
+        let err = probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
+            .await
+            .expect_err("a server that cannot LIST must fail the probe");
+        assert!(matches!(err, ProbeError::List(_)), "got {err:?}");
     }
 
     #[tokio::test]
