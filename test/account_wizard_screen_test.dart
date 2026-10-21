@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mailslate/core/di/di.dart';
 import 'package:mailslate/core/ffi/client.dart';
+import 'package:mailslate/core/logging/log_opener.dart';
+import 'package:mailslate/core/system/url_opener.dart';
 import 'package:mailslate/core/theme/theme.dart';
 import 'package:mailslate/features/accounts/wizard/account_wizard_screen.dart';
 
@@ -19,6 +21,7 @@ void main() {
     FakeUrlOpener? urlOpener,
     bool firstAccount = true,
     VoidCallback? onDone,
+    Duration? oauthDeadline,
   }) async {
     final resolvedClient = client ?? FakeFfiClient();
     final resolvedOpener = urlOpener ?? FakeUrlOpener();
@@ -26,7 +29,11 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(
         theme: buildTheme(Brightness.light),
-        home: AccountWizardScreen(firstAccount: firstAccount, onDone: onDone),
+        home: AccountWizardScreen(
+          firstAccount: firstAccount,
+          onDone: onDone,
+          oauthDeadline: oauthDeadline,
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -154,6 +161,59 @@ void main() {
     expect(add.onPressed, isNotNull);
   });
 
+  testWidgets('editing a tested draft disables save until retested', (
+    tester,
+  ) async {
+    await pumpWizard(tester, firstAccount: false);
+    await tester.tap(find.byKey(const Key('wizard-card-other')));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-email')),
+      'work@example.com',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-password')),
+      'secret-pw',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-imap-host')),
+      'imap.example.com',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-imap-port')),
+      '993',
+    );
+    await tester.tap(find.byKey(const Key('wizard-smtp-section')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-smtp-host')),
+      'smtp.example.com',
+    );
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-smtp-port')),
+      '465',
+    );
+
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('wizard-test-connection')));
+    await tester.tap(find.byKey(const Key('wizard-test-connection')));
+    await tester.pumpAndSettle();
+    FilledButton add() => tester.widget<FilledButton>(
+      find.byKey(const Key('wizard-add-account')),
+    );
+    expect(add().onPressed, isNotNull);
+
+    // The tested draft no longer matches once any field changes (QA#17).
+    await tester.enterText(
+      find.byKey(const Key('wizard-field-email')),
+      'changed@example.com',
+    );
+    await tester.pump();
+
+    expect(add().onPressed, isNull);
+  });
+
   testWidgets('keeps the form open when a step fails', (tester) async {
     final client = FakeFfiClient(
       testConnectionResult: const ConnectionTest(
@@ -272,5 +332,97 @@ void main() {
     expect(find.text('Account connected'), findsOneWidget);
     expect(done, isTrue);
     await oauthEvents.close();
+  });
+
+  testWidgets('timeout view offers Try again after oauth deadline', (
+    tester,
+  ) async {
+    final client = FakeFfiClient();
+    final opener = FakeUrlOpener();
+    await pumpWizard(
+      tester,
+      client: client,
+      urlOpener: opener,
+      oauthDeadline: const Duration(milliseconds: 50),
+    );
+
+    await tester.tap(find.byKey(const Key('wizard-connect-account')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('wizard-card-gmail')));
+    await tester.pumpAndSettle();
+
+    // Advance past the 50 ms deadline to reach OauthTimedOut.
+    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Sign-in timed out'), findsOneWidget);
+    expect(find.byKey(const Key('wizard-try-again')), findsOneWidget);
+
+    // Try again restarts the browser round-trip.
+    final before = client.startOauthCalls;
+    await tester.tap(find.byKey(const Key('wizard-try-again')));
+    await tester.pumpAndSettle();
+    expect(client.startOauthCalls, greaterThan(before));
+    expect(opener.openedUrls.last, client.oauthUrl);
+  });
+
+  testWidgets('fills the fastmail preset hosts', (tester) async {
+    await pumpWizard(tester, firstAccount: false);
+    await tester.tap(find.byKey(const Key('wizard-card-other')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('wizard-smtp-section')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('wizard-preset-Fastmail')));
+    await tester.pumpAndSettle();
+
+    TextField hostField() => tester.widget<TextField>(
+      find.descendant(
+        of: find.byKey(const Key('wizard-field-imap-host')),
+        matching: find.byType(TextField),
+      ),
+    );
+    TextField smtpField() => tester.widget<TextField>(
+      find.descendant(
+        of: find.byKey(const Key('wizard-field-smtp-host')),
+        matching: find.byType(TextField),
+      ),
+    );
+    expect(hostField().controller!.text, 'imap.fastmail.com');
+    expect(smtpField().controller!.text, 'smtp.fastmail.com');
+  });
+
+  testWidgets('fills the icloud preset hosts', (tester) async {
+    await pumpWizard(tester, firstAccount: false);
+    await tester.tap(find.byKey(const Key('wizard-card-other')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('wizard-smtp-section')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('wizard-preset-iCloud')));
+    await tester.pumpAndSettle();
+
+    TextField hostField() => tester.widget<TextField>(
+      find.descendant(
+        of: find.byKey(const Key('wizard-field-imap-host')),
+        matching: find.byType(TextField),
+      ),
+    );
+    TextField smtpField() => tester.widget<TextField>(
+      find.descendant(
+        of: find.byKey(const Key('wizard-field-smtp-host')),
+        matching: find.byType(TextField),
+      ),
+    );
+    expect(hostField().controller!.text, 'imap.mail.me.com');
+    expect(smtpField().controller!.text, 'smtp.mail.me.com');
+  });
+
+  test('configures production defaults when no overrides given', () {
+    configureDependencies();
+    expect(getIt<UrlOpener>(), isA<ProcessUrlOpener>());
+    expect(getIt<FfiClient>(), isA<FfiClient>());
+    expect(getIt<LogOpener>(), isA<XdgOpenLogOpener>());
   });
 }

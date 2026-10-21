@@ -16,13 +16,23 @@ import 'provider_presets.dart';
 /// account (`firstAccount: false` skips the welcome step). [onDone] fires
 /// once the daemon reports the account row.
 class AccountWizardScreen extends StatelessWidget {
-  const AccountWizardScreen({super.key, this.firstAccount = true, this.onDone});
+  const AccountWizardScreen({
+    super.key,
+    this.firstAccount = true,
+    this.onDone,
+    this.oauthDeadline,
+  });
 
   /// Whether this is the first account (show the welcome step).
   final bool firstAccount;
 
   /// Called once the account exists on the daemon.
   final VoidCallback? onDone;
+
+  /// How long the browser round-trip may take before `Try again` is offered.
+  /// Defaults to the bloc's two-minute deadline; exposed so widget tests can
+  /// reach the timeout view quickly.
+  final Duration? oauthDeadline;
 
   @override
   Widget build(BuildContext context) {
@@ -33,6 +43,7 @@ class AccountWizardScreen extends StatelessWidget {
         getIt<UrlOpener>(),
         events: appEventStream(client),
         firstAccount: firstAccount,
+        oauthDeadline: oauthDeadline ?? const Duration(minutes: 2),
       ),
       child: _WizardView(onDone: onDone),
     );
@@ -369,6 +380,17 @@ class _ImapFormViewState extends State<_ImapFormView> {
   String _smtpSecurity = 'tls';
   final Map<String, String> _errors = {};
 
+  /// The draft that was last successfully tested, so a save is only
+  /// allowed when the form still matches it (QA#17).
+  ImapDraft? _testedDraft;
+
+  /// Drops the tested draft after an edit and rebuilds, so the save
+  /// button re-renders disabled in the same frame chain as the keystroke.
+  void _clearTestedDraft() {
+    if (_testedDraft == null) return;
+    setState(() => _testedDraft = null);
+  }
+
   static const _securityChoices = {
     'SSL': 'tls',
     'STARTTLS': 'starttls',
@@ -389,6 +411,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
 
   void _applyPreset(ImapPreset preset) {
     setState(() {
+      _testedDraft = null;
       _imapHost.text = preset.imapHost;
       _imapPort.text = preset.imapPort.toString();
       _imapSecurity = preset.imapSecurity;
@@ -429,14 +452,17 @@ class _ImapFormViewState extends State<_ImapFormView> {
         errors[entry.key] = 'Required';
       }
     }
-    if (errors['imapPort'] == null &&
-        int.tryParse(_imapPort.text.trim()) == null) {
-      errors['imapPort'] = 'Enter a number';
+    void portError(String key, TextEditingController c) {
+      final port = int.tryParse(c.text.trim());
+      if (port == null) {
+        if (errors[key] == null) errors[key] = 'Enter a number';
+      } else if (port < 1 || port > 65535) {
+        errors[key] = 'Port must be 1–65535';
+      }
     }
-    if (errors['smtpPort'] == null &&
-        int.tryParse(_smtpPort.text.trim()) == null) {
-      errors['smtpPort'] = 'Enter a number';
-    }
+
+    portError('imapPort', _imapPort);
+    portError('smtpPort', _smtpPort);
     setState(
       () => _errors
         ..clear()
@@ -449,6 +475,8 @@ class _ImapFormViewState extends State<_ImapFormView> {
     if (!_validate()) {
       return;
     }
+    // Remember what was tested so a later edit invalidates the save (QA#17).
+    _testedDraft = _draft();
     context.read<AccountWizardBloc>().add(
       ImapConnectionTestRequested(draft: _draft(), password: _passwordValue),
     );
@@ -466,7 +494,9 @@ class _ImapFormViewState extends State<_ImapFormView> {
     final tokens = context.tokens;
     final lastTest = widget.details?.lastTest;
     final note = widget.details?.note;
-    final bothOk = lastTest != null && lastTest.imap.ok && lastTest.smtp.ok;
+    // Save is only allowed for the exact draft that passed the test (QA#17).
+    final testedOk = lastTest != null && lastTest.imap.ok && lastTest.smtp.ok;
+    final draftMatchesTest = _testedDraft != null && _draft() == _testedDraft;
     return Padding(
       padding: const EdgeInsets.all(32),
       child: Column(
@@ -501,6 +531,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
             key: const Key('wizard-field-display-name'),
             controller: _displayName,
             label: 'Display name (optional)',
+            onChanged: (_) => _clearTestedDraft(),
           ),
           const SizedBox(height: 12),
           _Field(
@@ -508,6 +539,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
             controller: _email,
             label: 'Email',
             errorText: _errors['email'],
+            onChanged: (_) => _clearTestedDraft(),
           ),
           const SizedBox(height: 12),
           _Field(
@@ -516,6 +548,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
             label: 'Password',
             obscure: true,
             errorText: _errors['password'],
+            onChanged: (_) => _clearTestedDraft(),
           ),
           const SizedBox(height: 16),
           Row(
@@ -526,6 +559,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
                   controller: _imapHost,
                   label: 'IMAP host',
                   errorText: _errors['imapHost'],
+                  onChanged: (_) => _clearTestedDraft(),
                 ),
               ),
               const SizedBox(width: 12),
@@ -537,6 +571,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
                   label: 'Port',
                   number: true,
                   errorText: _errors['imapPort'],
+                  onChanged: (_) => _clearTestedDraft(),
                 ),
               ),
             ],
@@ -566,6 +601,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
                       controller: _smtpHost,
                       label: 'SMTP host',
                       errorText: _errors['smtpHost'],
+                      onChanged: (_) => _clearTestedDraft(),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -577,6 +613,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
                       label: 'Port',
                       number: true,
                       errorText: _errors['smtpPort'],
+                      onChanged: (_) => _clearTestedDraft(),
                     ),
                   ),
                 ],
@@ -622,7 +659,9 @@ class _ImapFormViewState extends State<_ImapFormView> {
           const SizedBox(height: 8),
           FilledButton(
             key: const Key('wizard-add-account'),
-            onPressed: !widget.busy && bothOk ? _saveAccount : null,
+            onPressed: !widget.busy && testedOk && draftMatchesTest
+                ? _saveAccount
+                : null,
             child: const Text('Add account'),
           ),
         ],
@@ -639,6 +678,7 @@ class _Field extends StatelessWidget {
     this.obscure = false,
     this.number = false,
     this.errorText,
+    this.onChanged,
   });
 
   final TextEditingController controller;
@@ -646,12 +686,14 @@ class _Field extends StatelessWidget {
   final bool obscure;
   final bool number;
   final String? errorText;
+  final void Function(String)? onChanged;
 
   @override
   Widget build(BuildContext context) {
     return TextField(
       controller: controller,
       obscureText: obscure,
+      onChanged: onChanged,
       keyboardType: number ? TextInputType.number : null,
       decoration: InputDecoration(
         labelText: label,
@@ -679,6 +721,7 @@ class _SecurityField extends StatelessWidget {
     final handler = onChanged;
     return DropdownButtonFormField<String>(
       initialValue: value,
+      key: ValueKey<String>(value),
       decoration: InputDecoration(labelText: label, isDense: true),
       items: [
         for (final entry in _ImapFormViewState._securityChoices.entries)

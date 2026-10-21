@@ -112,4 +112,27 @@ void main() {
       expect(events, const [AppEvent.other(name: 'late')]);
     },
   );
+
+  test('a failed dial retries while a listener is waiting', () async {
+    var calls = 0;
+    final client = FakeFfiClient()
+      ..eventStream = () {
+        calls += 1;
+        if (calls == 1) {
+          throw StateError('bridge not ready');
+        }
+        return Stream.value(const AppEvent.other(name: 'late'));
+      };
+    final broadcast = appEventStream(
+      client,
+      dialRetryDelay: const Duration(milliseconds: 5),
+    );
+
+    // The listener that triggered the failed dial must not starve: the
+    // stream dials again on its own once the bridge appears.
+    final events = await broadcast.toList();
+
+    expect(calls, 2);
+    expect(events, const [AppEvent.other(name: 'late')]);
+  });
 }
