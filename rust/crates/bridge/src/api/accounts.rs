@@ -121,6 +121,22 @@ pub async fn start_oauth(provider: String) -> Result<String, DaemonError> {
         .ok_or_else(|| internal("start_oauth reply carries no url"))
 }
 
+/// Starts a reconnect flow for an existing OAuth account, so an
+/// expired or revoked grant is refreshed in place; replies with the
+/// consent URL to open in the system browser.
+pub async fn start_reauth(account_id: i64) -> Result<String, DaemonError> {
+    let mut client = connect().await?;
+    let reply = client
+        .start_reauth(account_id)
+        .await
+        .map_err(DaemonError::from)?;
+    reply
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| internal("start_reauth reply carries no url"))
+}
+
 /// Names and files the account whose OAuth handshake just finished;
 /// replies with the new row id.
 pub async fn complete_oauth_account(

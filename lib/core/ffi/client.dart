@@ -85,6 +85,15 @@ class FfiClient {
   Future<String> startOauth({required String provider}) =>
       _guard(() => rust_accounts.startOauth(provider: provider));
 
+  /// Starts an in-place reconnect for [accountId] and returns the
+  /// authorize url.
+  ///
+  /// Used when an account's grant expired: the daemon refreshes the
+  /// account's own tokens and restarts its sync actor; the outcome is
+  /// announced as `oauth_reconnected` on the [events] stream.
+  Future<String> startReauth({required int accountId}) =>
+      _guard(() => rust_accounts.startReauth(accountId: accountId));
+
   /// Adopts the OAuth account the daemon just finished authenticating.
   ///
   /// Returns the new account id.

@@ -26,6 +26,9 @@ class FakeRustLibApi extends RustLibApi {
   /// Captured start-oauth provider.
   String? lastOauthProvider;
 
+  /// Captured reconnect account id.
+  int? lastReauthId;
+
   /// Captured complete-oauth arguments.
   String? lastCompleteDisplayName;
   String? lastCompleteEmail;
@@ -54,6 +57,7 @@ class FakeRustLibApi extends RustLibApi {
     lastAddDraft = null;
     lastAddPassword = null;
     lastOauthProvider = null;
+    lastReauthId = null;
     lastCompleteDisplayName = null;
     lastCompleteEmail = null;
     lastCompleteColor = null;
@@ -100,6 +104,16 @@ class FakeRustLibApi extends RustLibApi {
     }
     lastOauthProvider = provider;
     return 'https://accounts.example.test/auth';
+  }
+
+  @override
+  Future<String> crateApiAccountsStartReauth({required int accountId}) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    lastReauthId = accountId;
+    return 'https://accounts.example.test/reauth';
   }
 
   @override
@@ -338,6 +352,13 @@ void main() {
 
     expect(url, 'https://accounts.example.test/auth');
     expect(api.lastOauthProvider, 'google');
+  });
+
+  test('startReauth forwards the account id and returns the url', () async {
+    final url = await const FfiClient().startReauth(accountId: 5);
+
+    expect(url, 'https://accounts.example.test/reauth');
+    expect(api.lastReauthId, 5);
   });
 
   test('completeOauthAccount forwards the fields and returns the id', () async {

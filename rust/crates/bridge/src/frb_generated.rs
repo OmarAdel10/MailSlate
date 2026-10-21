@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 390392562;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1412100949;
 
 // Section: executor
 
@@ -446,6 +446,42 @@ fn wire__crate__api__accounts__start_oauth_impl(
         },
     )
 }
+fn wire__crate__api__accounts__start_reauth_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "start_reauth",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_account_id = <i64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::system::DaemonError>(
+                    (move || async move {
+                        let output_ok = crate::api::accounts::start_reauth(api_account_id).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__accounts__test_connection_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -629,6 +665,14 @@ impl SseDecode for crate::api::system::AppEvent {
                 return crate::api::system::AppEvent::OauthFailed { reason: var_reason };
             }
             5 => {
+                let mut var_account = <i64>::sse_decode(deserializer);
+                let mut var_email = <String>::sse_decode(deserializer);
+                return crate::api::system::AppEvent::OauthReconnected {
+                    account: var_account,
+                    email: var_email,
+                };
+            }
+            6 => {
                 let mut var_name = <String>::sse_decode(deserializer);
                 return crate::api::system::AppEvent::Other { name: var_name };
             }
@@ -870,8 +914,9 @@ fn pde_ffi_dispatcher_primary_impl(
         9 => wire__crate__api__accounts__remove_account_impl(port, ptr, rust_vec_len, data_len),
         10 => wire__crate__api__system__start_daemon_impl(port, ptr, rust_vec_len, data_len),
         11 => wire__crate__api__accounts__start_oauth_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__accounts__test_connection_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__accounts__update_account_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__accounts__start_reauth_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__accounts__test_connection_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__accounts__update_account_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -973,8 +1018,14 @@ impl flutter_rust_bridge::IntoDart for crate::api::system::AppEvent {
             crate::api::system::AppEvent::OauthFailed { reason } => {
                 [4.into_dart(), reason.into_into_dart().into_dart()].into_dart()
             }
+            crate::api::system::AppEvent::OauthReconnected { account, email } => [
+                5.into_dart(),
+                account.into_into_dart().into_dart(),
+                email.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             crate::api::system::AppEvent::Other { name } => {
-                [5.into_dart(), name.into_into_dart().into_dart()].into_dart()
+                [6.into_dart(), name.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -1224,8 +1275,13 @@ impl SseEncode for crate::api::system::AppEvent {
                 <i32>::sse_encode(4, serializer);
                 <String>::sse_encode(reason, serializer);
             }
-            crate::api::system::AppEvent::Other { name } => {
+            crate::api::system::AppEvent::OauthReconnected { account, email } => {
                 <i32>::sse_encode(5, serializer);
+                <i64>::sse_encode(account, serializer);
+                <String>::sse_encode(email, serializer);
+            }
+            crate::api::system::AppEvent::Other { name } => {
+                <i32>::sse_encode(6, serializer);
                 <String>::sse_encode(name, serializer);
             }
             _ => {

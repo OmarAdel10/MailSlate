@@ -33,6 +33,12 @@ Future<PlatformInt64> addImapAccount({
 Future<String> startOauth({required String provider}) =>
     RustLib.instance.api.crateApiAccountsStartOauth(provider: provider);
 
+/// Starts a reconnect flow for an existing OAuth account, so an
+/// expired or revoked grant is refreshed in place; replies with the
+/// consent URL to open in the system browser.
+Future<String> startReauth({required PlatformInt64 accountId}) =>
+    RustLib.instance.api.crateApiAccountsStartReauth(accountId: accountId);
+
 /// Names and files the account whose OAuth handshake just finished;
 /// replies with the new row id.
 Future<PlatformInt64> completeOauthAccount({

@@ -55,7 +55,7 @@ extension AppEventPatterns on AppEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AppEvent_AccountStatus value)?  accountStatus,TResult Function( AppEvent_SyncProgress value)?  syncProgress,TResult Function( AppEvent_OauthUrlReady value)?  oauthUrlReady,TResult Function( AppEvent_OauthCompleted value)?  oauthCompleted,TResult Function( AppEvent_OauthFailed value)?  oauthFailed,TResult Function( AppEvent_Other value)?  other,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AppEvent_AccountStatus value)?  accountStatus,TResult Function( AppEvent_SyncProgress value)?  syncProgress,TResult Function( AppEvent_OauthUrlReady value)?  oauthUrlReady,TResult Function( AppEvent_OauthCompleted value)?  oauthCompleted,TResult Function( AppEvent_OauthFailed value)?  oauthFailed,TResult Function( AppEvent_OauthReconnected value)?  oauthReconnected,TResult Function( AppEvent_Other value)?  other,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case AppEvent_AccountStatus() when accountStatus != null:
@@ -63,7 +63,8 @@ return accountStatus(_that);case AppEvent_SyncProgress() when syncProgress != nu
 return syncProgress(_that);case AppEvent_OauthUrlReady() when oauthUrlReady != null:
 return oauthUrlReady(_that);case AppEvent_OauthCompleted() when oauthCompleted != null:
 return oauthCompleted(_that);case AppEvent_OauthFailed() when oauthFailed != null:
-return oauthFailed(_that);case AppEvent_Other() when other != null:
+return oauthFailed(_that);case AppEvent_OauthReconnected() when oauthReconnected != null:
+return oauthReconnected(_that);case AppEvent_Other() when other != null:
 return other(_that);case _:
   return orElse();
 
@@ -82,7 +83,7 @@ return other(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AppEvent_AccountStatus value)  accountStatus,required TResult Function( AppEvent_SyncProgress value)  syncProgress,required TResult Function( AppEvent_OauthUrlReady value)  oauthUrlReady,required TResult Function( AppEvent_OauthCompleted value)  oauthCompleted,required TResult Function( AppEvent_OauthFailed value)  oauthFailed,required TResult Function( AppEvent_Other value)  other,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AppEvent_AccountStatus value)  accountStatus,required TResult Function( AppEvent_SyncProgress value)  syncProgress,required TResult Function( AppEvent_OauthUrlReady value)  oauthUrlReady,required TResult Function( AppEvent_OauthCompleted value)  oauthCompleted,required TResult Function( AppEvent_OauthFailed value)  oauthFailed,required TResult Function( AppEvent_OauthReconnected value)  oauthReconnected,required TResult Function( AppEvent_Other value)  other,}){
 final _that = this;
 switch (_that) {
 case AppEvent_AccountStatus():
@@ -90,7 +91,8 @@ return accountStatus(_that);case AppEvent_SyncProgress():
 return syncProgress(_that);case AppEvent_OauthUrlReady():
 return oauthUrlReady(_that);case AppEvent_OauthCompleted():
 return oauthCompleted(_that);case AppEvent_OauthFailed():
-return oauthFailed(_that);case AppEvent_Other():
+return oauthFailed(_that);case AppEvent_OauthReconnected():
+return oauthReconnected(_that);case AppEvent_Other():
 return other(_that);}
 }
 /// A variant of `map` that fallback to returning `null`.
@@ -105,7 +107,7 @@ return other(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AppEvent_AccountStatus value)?  accountStatus,TResult? Function( AppEvent_SyncProgress value)?  syncProgress,TResult? Function( AppEvent_OauthUrlReady value)?  oauthUrlReady,TResult? Function( AppEvent_OauthCompleted value)?  oauthCompleted,TResult? Function( AppEvent_OauthFailed value)?  oauthFailed,TResult? Function( AppEvent_Other value)?  other,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AppEvent_AccountStatus value)?  accountStatus,TResult? Function( AppEvent_SyncProgress value)?  syncProgress,TResult? Function( AppEvent_OauthUrlReady value)?  oauthUrlReady,TResult? Function( AppEvent_OauthCompleted value)?  oauthCompleted,TResult? Function( AppEvent_OauthFailed value)?  oauthFailed,TResult? Function( AppEvent_OauthReconnected value)?  oauthReconnected,TResult? Function( AppEvent_Other value)?  other,}){
 final _that = this;
 switch (_that) {
 case AppEvent_AccountStatus() when accountStatus != null:
@@ -113,7 +115,8 @@ return accountStatus(_that);case AppEvent_SyncProgress() when syncProgress != nu
 return syncProgress(_that);case AppEvent_OauthUrlReady() when oauthUrlReady != null:
 return oauthUrlReady(_that);case AppEvent_OauthCompleted() when oauthCompleted != null:
 return oauthCompleted(_that);case AppEvent_OauthFailed() when oauthFailed != null:
-return oauthFailed(_that);case AppEvent_Other() when other != null:
+return oauthFailed(_that);case AppEvent_OauthReconnected() when oauthReconnected != null:
+return oauthReconnected(_that);case AppEvent_Other() when other != null:
 return other(_that);case _:
   return null;
 
@@ -131,14 +134,15 @@ return other(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( PlatformInt64 account,  String state)?  accountStatus,TResult Function( PlatformInt64 account,  String mailbox,  String phase,  int done,  int total)?  syncProgress,TResult Function( String url)?  oauthUrlReady,TResult Function( String email)?  oauthCompleted,TResult Function( String reason)?  oauthFailed,TResult Function( String name)?  other,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( PlatformInt64 account,  String state)?  accountStatus,TResult Function( PlatformInt64 account,  String mailbox,  String phase,  int done,  int total)?  syncProgress,TResult Function( String url)?  oauthUrlReady,TResult Function( String email)?  oauthCompleted,TResult Function( String reason)?  oauthFailed,TResult Function( PlatformInt64 account,  String email)?  oauthReconnected,TResult Function( String name)?  other,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case AppEvent_AccountStatus() when accountStatus != null:
 return accountStatus(_that.account,_that.state);case AppEvent_SyncProgress() when syncProgress != null:
 return syncProgress(_that.account,_that.mailbox,_that.phase,_that.done,_that.total);case AppEvent_OauthUrlReady() when oauthUrlReady != null:
 return oauthUrlReady(_that.url);case AppEvent_OauthCompleted() when oauthCompleted != null:
 return oauthCompleted(_that.email);case AppEvent_OauthFailed() when oauthFailed != null:
-return oauthFailed(_that.reason);case AppEvent_Other() when other != null:
+return oauthFailed(_that.reason);case AppEvent_OauthReconnected() when oauthReconnected != null:
+return oauthReconnected(_that.account,_that.email);case AppEvent_Other() when other != null:
 return other(_that.name);case _:
   return orElse();
 
@@ -157,14 +161,15 @@ return other(_that.name);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( PlatformInt64 account,  String state)  accountStatus,required TResult Function( PlatformInt64 account,  String mailbox,  String phase,  int done,  int total)  syncProgress,required TResult Function( String url)  oauthUrlReady,required TResult Function( String email)  oauthCompleted,required TResult Function( String reason)  oauthFailed,required TResult Function( String name)  other,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( PlatformInt64 account,  String state)  accountStatus,required TResult Function( PlatformInt64 account,  String mailbox,  String phase,  int done,  int total)  syncProgress,required TResult Function( String url)  oauthUrlReady,required TResult Function( String email)  oauthCompleted,required TResult Function( String reason)  oauthFailed,required TResult Function( PlatformInt64 account,  String email)  oauthReconnected,required TResult Function( String name)  other,}) {final _that = this;
 switch (_that) {
 case AppEvent_AccountStatus():
 return accountStatus(_that.account,_that.state);case AppEvent_SyncProgress():
 return syncProgress(_that.account,_that.mailbox,_that.phase,_that.done,_that.total);case AppEvent_OauthUrlReady():
 return oauthUrlReady(_that.url);case AppEvent_OauthCompleted():
 return oauthCompleted(_that.email);case AppEvent_OauthFailed():
-return oauthFailed(_that.reason);case AppEvent_Other():
+return oauthFailed(_that.reason);case AppEvent_OauthReconnected():
+return oauthReconnected(_that.account,_that.email);case AppEvent_Other():
 return other(_that.name);}
 }
 /// A variant of `when` that fallback to returning `null`
@@ -179,14 +184,15 @@ return other(_that.name);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( PlatformInt64 account,  String state)?  accountStatus,TResult? Function( PlatformInt64 account,  String mailbox,  String phase,  int done,  int total)?  syncProgress,TResult? Function( String url)?  oauthUrlReady,TResult? Function( String email)?  oauthCompleted,TResult? Function( String reason)?  oauthFailed,TResult? Function( String name)?  other,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( PlatformInt64 account,  String state)?  accountStatus,TResult? Function( PlatformInt64 account,  String mailbox,  String phase,  int done,  int total)?  syncProgress,TResult? Function( String url)?  oauthUrlReady,TResult? Function( String email)?  oauthCompleted,TResult? Function( String reason)?  oauthFailed,TResult? Function( PlatformInt64 account,  String email)?  oauthReconnected,TResult? Function( String name)?  other,}) {final _that = this;
 switch (_that) {
 case AppEvent_AccountStatus() when accountStatus != null:
 return accountStatus(_that.account,_that.state);case AppEvent_SyncProgress() when syncProgress != null:
 return syncProgress(_that.account,_that.mailbox,_that.phase,_that.done,_that.total);case AppEvent_OauthUrlReady() when oauthUrlReady != null:
 return oauthUrlReady(_that.url);case AppEvent_OauthCompleted() when oauthCompleted != null:
 return oauthCompleted(_that.email);case AppEvent_OauthFailed() when oauthFailed != null:
-return oauthFailed(_that.reason);case AppEvent_Other() when other != null:
+return oauthFailed(_that.reason);case AppEvent_OauthReconnected() when oauthReconnected != null:
+return oauthReconnected(_that.account,_that.email);case AppEvent_Other() when other != null:
 return other(_that.name);case _:
   return null;
 
@@ -538,6 +544,76 @@ class _$AppEvent_OauthFailedCopyWithImpl<$Res>
 @pragma('vm:prefer-inline') $Res call({Object? reason = null,}) {
   return _then(AppEvent_OauthFailed(
 reason: null == reason ? _self.reason : reason // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class AppEvent_OauthReconnected extends AppEvent {
+  const AppEvent_OauthReconnected({required this.account, required this.email}): super._();
+  
+
+/// Row id of the reconnected account.
+ final  PlatformInt64 account;
+/// Email address the provider returned.
+ final  String email;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$AppEvent_OauthReconnectedCopyWith<AppEvent_OauthReconnected> get copyWith => _$AppEvent_OauthReconnectedCopyWithImpl<AppEvent_OauthReconnected>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is AppEvent_OauthReconnected&&(identical(other.account, account) || other.account == account)&&(identical(other.email, email) || other.email == email));
+}
+
+
+@override
+int get hashCode => Object.hash(runtimeType,account,email);
+
+@override
+String toString() {
+  return 'AppEvent.oauthReconnected(account: $account, email: $email)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $AppEvent_OauthReconnectedCopyWith<$Res> implements $AppEventCopyWith<$Res> {
+  factory $AppEvent_OauthReconnectedCopyWith(AppEvent_OauthReconnected value, $Res Function(AppEvent_OauthReconnected) _then) = _$AppEvent_OauthReconnectedCopyWithImpl;
+@useResult
+$Res call({
+ PlatformInt64 account, String email
+});
+
+
+
+
+}
+/// @nodoc
+class _$AppEvent_OauthReconnectedCopyWithImpl<$Res>
+    implements $AppEvent_OauthReconnectedCopyWith<$Res> {
+  _$AppEvent_OauthReconnectedCopyWithImpl(this._self, this._then);
+
+  final AppEvent_OauthReconnected _self;
+  final $Res Function(AppEvent_OauthReconnected) _then;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? account = null,Object? email = null,}) {
+  return _then(AppEvent_OauthReconnected(
+account: null == account ? _self.account : account // ignore: cast_nullable_to_non_nullable
+as PlatformInt64,email: null == email ? _self.email : email // ignore: cast_nullable_to_non_nullable
 as String,
   ));
 }

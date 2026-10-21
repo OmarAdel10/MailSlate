@@ -146,6 +146,14 @@ pub enum AppEvent {
         /// Why the handshake failed.
         reason: String,
     },
+    /// `oauth_reconnected`: a reconnect flow refreshed an existing
+    /// account's tokens and its sync actor was restarted.
+    OauthReconnected {
+        /// Row id of the reconnected account.
+        account: i64,
+        /// Email address the provider returned.
+        email: String,
+    },
     /// Any other event: unknown name or malformed payload.
     Other {
         /// The `event` field from the wire frame.
@@ -226,6 +234,16 @@ fn app_event_from_wire(event: &WireEvent) -> AppEvent {
                 reason: reason.to_string(),
             },
             None => other(),
+        },
+        "oauth_reconnected" => match (
+            data.get("account").and_then(|value| value.as_i64()),
+            data.get("email").and_then(|value| value.as_str()),
+        ) {
+            (Some(account), Some(email)) => AppEvent::OauthReconnected {
+                account,
+                email: email.to_string(),
+            },
+            _ => other(),
         },
         _ => other(),
     }
@@ -522,6 +540,32 @@ pub(crate) mod tests {
             app_event_from_wire(&wire),
             AppEvent::OauthFailed {
                 reason: "denied".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn maps_oauth_reconnected_to_its_variant() {
+        let wire = WireEvent::new(
+            "oauth_reconnected",
+            json!({"account": 7, "email": "user@example.com"}),
+        );
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::OauthReconnected {
+                account: 7,
+                email: "user@example.com".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_oauth_reconnected_falls_back_to_other() {
+        let wire = WireEvent::new("oauth_reconnected", json!({"email": "user@example.com"}));
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::Other {
+                name: "oauth_reconnected".to_string(),
             }
         );
     }

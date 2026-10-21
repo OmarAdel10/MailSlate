@@ -87,6 +87,16 @@ sealed class AppEvent with _$AppEvent {
     required String reason,
   }) = AppEvent_OauthFailed;
 
+  /// `oauth_reconnected`: a reconnect flow refreshed an existing
+  /// account's tokens and its sync actor was restarted.
+  const factory AppEvent.oauthReconnected({
+    /// Row id of the reconnected account.
+    required PlatformInt64 account,
+
+    /// Email address the provider returned.
+    required String email,
+  }) = AppEvent_OauthReconnected;
+
   /// Any other event: unknown name or malformed payload.
   const factory AppEvent.other({
     /// The `event` field from the wire frame.

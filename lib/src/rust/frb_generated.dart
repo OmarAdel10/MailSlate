@@ -70,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 390392562;
+  int get rustContentHash => 1412100949;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -112,6 +112,10 @@ abstract class RustLibApi extends BaseApi {
   Future<PingInfo> crateApiSystemStartDaemon();
 
   Future<String> crateApiAccountsStartOauth({required String provider});
+
+  Future<String> crateApiAccountsStartReauth({
+    required PlatformInt64 accountId,
+  });
 
   Future<ConnectionTest> crateApiAccountsTestConnection({
     required ImapDraft draft,
@@ -457,6 +461,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "start_oauth", argNames: ["provider"]);
 
   @override
+  Future<String> crateApiAccountsStartReauth({
+    required PlatformInt64 accountId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(accountId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 12,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiAccountsStartReauthConstMeta,
+        argValues: [accountId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiAccountsStartReauthConstMeta =>
+      const TaskConstMeta(debugName: "start_reauth", argNames: ["accountId"]);
+
+  @override
   Future<ConnectionTest> crateApiAccountsTestConnection({
     required ImapDraft draft,
     required String password,
@@ -470,7 +504,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 13,
             port: port_,
           );
         },
@@ -505,7 +539,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 14,
             port: port_,
           );
         },
@@ -599,6 +633,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 4:
         return AppEvent_OauthFailed(reason: dco_decode_String(raw[1]));
       case 5:
+        return AppEvent_OauthReconnected(
+          account: dco_decode_i_64(raw[1]),
+          email: dco_decode_String(raw[2]),
+        );
+      case 6:
         return AppEvent_Other(name: dco_decode_String(raw[1]));
       default:
         throw Exception("unreachable");
@@ -878,6 +917,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         var var_reason = sse_decode_String(deserializer);
         return AppEvent_OauthFailed(reason: var_reason);
       case 5:
+        var var_account = sse_decode_i_64(deserializer);
+        var var_email = sse_decode_String(deserializer);
+        return AppEvent_OauthReconnected(
+          account: var_account,
+          email: var_email,
+        );
+      case 6:
         var var_name = sse_decode_String(deserializer);
         return AppEvent_Other(name: var_name);
       default:
@@ -1175,8 +1221,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case AppEvent_OauthFailed(reason: final reason):
         sse_encode_i_32(4, serializer);
         sse_encode_String(reason, serializer);
-      case AppEvent_Other(name: final name):
+      case AppEvent_OauthReconnected(
+        account: final account,
+        email: final email,
+      ):
         sse_encode_i_32(5, serializer);
+        sse_encode_i_64(account, serializer);
+        sse_encode_String(email, serializer);
+      case AppEvent_Other(name: final name):
+        sse_encode_i_32(6, serializer);
         sse_encode_String(name, serializer);
     }
   }
