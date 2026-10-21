@@ -37,8 +37,9 @@ tempfile = "3.27.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 
 [features]
-# Gates the GreenMail integration test (tests/greenmail_imap.rs); it needs
-# the pinned standalone jar under .tools/ and a local JVM, so CI never
-# enables it. Run locally with:
-#   cargo test -p mailslate-core --features greenmail --test greenmail_imap
+# Gates the GreenMail integration tests (src/infra/imap/greenmail_tests.rs,
+# compiled as a module so the adapter keeps its pub(crate) surface closed);
+# they need the pinned standalone jar under .tools/ and a local JVM, so CI
+# never enables it. Run locally with:
+#   cargo test -p mailslate-core --features greenmail --lib greenmail_tests
 greenmail = []

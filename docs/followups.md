@@ -6,6 +6,11 @@ project (global `AGENTS.md` §4 and §13).
 
 ## Open
 
+- MAILSLATE-43 — M2: the account settings dialog offers 30d/90d/1y sync
+  windows but not "all" (PRD F2.2) — the `update_account` wire carries a
+  plain i64 where NULL means "unchanged", so the DB's NULL-everything state
+  is not expressible; extend protocol + daemon + bridge, then add the choice
+  (`lib/features/accounts/account_settings_dialog.dart`).
 - MAILSLATE-8 — Docs: FAST-gate cargo commands in `specs/DEVELOPMENT_ENVIRONMENT.md`
   (§12.1) and root `AGENTS.md` (§3/§4) are written as bare `cargo ...` but assume
   the working directory `rust/`; make the cwd explicit. Found during `chore/ci-setup`.
@@ -34,15 +39,9 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-16 — M1: minimum window size 1024x640 (USER_FLOW.md §2) is not yet
   enforced; wire the desktop runners once the scaffolds land (MAILSLATE-9;
   `lib/main.dart`, `linux/`, `windows/`, `macos/`).
-- MAILSLATE-17 — M1: the daemon-unavailable card ships Retry only; add the
-  `View log` action (USER_FLOW.md §9) alongside the M5 Settings daemon section
-  (`lib/features/shell/shell_screen.dart`).
 - MAILSLATE-18 — M2: `is_compatible` in `rust/crates/protocol/` is never called;
   wire the protocol compatibility check and the update-required screen when the
   daemon earns its first wire change (ARCHITECTURE.md §5.2; `lib/features/shell/`).
-- MAILSLATE-19 — M1: no automated end-to-end test drives the real GUI against a
-  spawned daemon (a manual `flutter run -d linux` smoke is the only evidence);
-  add an automated GUI↔daemon E2E before M2 closes.
 - MAILSLATE-20 — M2: `daemon_binary()` picks the first `is_file()` candidate
   without an executable-bit check and falls back to a bare PATH lookup
   (`rust/crates/core/src/infra/ipc.rs:145-166`); require `mode & 0o111` on
