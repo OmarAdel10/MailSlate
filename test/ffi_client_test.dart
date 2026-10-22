@@ -392,6 +392,47 @@ void main() {
     },
   );
 
+  test('updateAccount maps DaemonError to an AppFailure', () async {
+    api.accountsError = DaemonError(
+      kind: 'validation',
+      message: 'bad patch',
+      retryable: false,
+    );
+
+    await expectLater(
+      const FfiClient().updateAccount(
+        accountId: 3,
+        patch: const AccountPatch(clearColor: true),
+      ),
+      throwsA(
+        isA<ValidationFailure>().having(
+          (failure) => failure.message,
+          'message',
+          'bad patch',
+        ),
+      ),
+    );
+  });
+
+  test('removeAccount maps DaemonError to an AppFailure', () async {
+    api.accountsError = DaemonError(
+      kind: 'validation',
+      message: 'bad account',
+      retryable: false,
+    );
+
+    await expectLater(
+      const FfiClient().removeAccount(accountId: 9),
+      throwsA(
+        isA<ValidationFailure>().having(
+          (failure) => failure.message,
+          'message',
+          'bad account',
+        ),
+      ),
+    );
+  });
+
   test('testConnection forwards the draft and password', () async {
     const draft = ImapDraft(
       email: 'private@example.test',
