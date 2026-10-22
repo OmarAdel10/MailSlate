@@ -104,6 +104,9 @@ pub fn dispatch(
         methods::COMPLETE_OAUTH_ACCOUNT => {
             complete_oauth_account_dispatch(ctx, params).map(Dispatched::Reply)
         }
+        methods::ABORT_OAUTH_ACCOUNT => {
+            abort_oauth_account_dispatch(ctx).map(Dispatched::Reply)
+        }
         methods::SYNC_NOW => sync_now_dispatch(ctx, params).map(Dispatched::Reply),
         methods::GET_STATUS => get_status_dispatch(ctx).map(Dispatched::Reply),
         other => Err(BridgeError::new(
@@ -585,6 +588,18 @@ fn restart_actor(
     Ok(())
 }
 
+/// Aborts an in-flight OAuth flow: releases the single OAuth session
+/// slot and drops any staged tokens under [`PENDING_ACCOUNT_ID`], so a
+/// new flow can start immediately instead of waiting for the daemon's
+/// deadline. Called from the wizard on back / timeout / retry.
+fn abort_oauth_account_dispatch(ctx: &DispatchCtx) -> Result<Value, BridgeError> {
+    // Release the session slot if one is pending.
+    *ctx.oauth.lock().expect("oauth session lock") = None;
+    // Drop any staged tokens so they don't orphan under PENDING_ACCOUNT_ID.
+    let _ = tokens::delete(ctx.keystore.as_ref(), PENDING_ACCOUNT_ID);
+    Ok(json!({ "ok": true }))
+}
+
 /// Turns the staged OAuth tokens into a real account: consumes the
 /// pending session, moves the snapshot to the new account's keyring
 /// keys, and writes the row with the provider's endpoints.
@@ -615,10 +630,6 @@ fn complete_oauth_account_dispatch(
         .map_err(|err| BridgeError::new(ErrorKind::Internal, err.to_string()))?
         .ok_or_else(|| validation("oauth token snapshot missing from the keyring"))?;
 
-    // Consume the session only after account creation succeeds. On
-    // completion failure the session is released so the flow can be
-    // retried, and the staged tokens are dropped so they don't orphan
-    // under PENDING_ACCOUNT_ID.
     let account_id = blocking(|| {
         add_oauth_account(
             ctx.keystore.as_ref(),
@@ -632,24 +643,20 @@ fn complete_oauth_account_dispatch(
             &staged,
         )
         .map_err(account_error)
-    });
+    })?;
 
-    match account_id {
-        Ok(account_id) => {
-            ctx.oauth
-                .lock()
-                .expect("oauth session lock")
-                .take()
-                .expect("the wizard session cannot vanish before completion");
-            ensure_sync_actor(ctx, account_id)?;
-            Ok(json!({ "account_id": account_id }))
-        }
-        Err(err) => {
-            let _ = ctx.oauth.lock().expect("oauth session lock").take();
-            let _ = tokens::delete(ctx.keystore.as_ref(), PENDING_ACCOUNT_ID);
-            Err(err)
-        }
-    }
+    // ensure_sync_actor can fail even after the row exists. Only once both
+    // fallible steps pass do we consume the session — on any earlier
+    // failure the session slot stays so the flow can be retried.
+    ensure_sync_actor(ctx, account_id)?;
+
+    ctx.oauth
+        .lock()
+        .expect("oauth session lock")
+        .take()
+        .expect("the wizard session cannot vanish before completion");
+
+    Ok(json!({ "account_id": account_id }))
 }
 
 /// Maps an OAuth failure onto the wire error vocabulary.

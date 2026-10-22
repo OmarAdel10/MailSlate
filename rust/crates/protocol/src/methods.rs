@@ -39,6 +39,11 @@ pub const START_REAUTH: &str = "start_reauth";
 /// (name, email, color); creates the account row (M2).
 pub const COMPLETE_OAUTH_ACCOUNT: &str = "complete_oauth_account";
 
+/// Aborts an in-flight OAuth flow: releases the session slot and drops
+/// staged tokens so a new flow can start immediately (wizard back /
+/// timeout / retry) (M2).
+pub const ABORT_OAUTH_ACCOUNT: &str = "abort_oauth_account";
+
 /// Asks the daemon to re-run the sync for one account (or all when
 /// `account_id` is absent) (M2).
 pub const SYNC_NOW: &str = "sync_now";

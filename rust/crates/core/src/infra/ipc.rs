@@ -218,6 +218,12 @@ impl Client {
         .await
     }
 
+    /// Aborts an in-flight OAuth flow: releases the session slot and
+    /// drops staged tokens so a new flow can start immediately.
+    pub async fn abort_oauth_account(&mut self) -> Result<Value, BridgeError> {
+        self.request(methods::ABORT_OAUTH_ACCOUNT, json!({})).await
+    }
+
     pub async fn update_account(
         &mut self,
         account_id: i64,

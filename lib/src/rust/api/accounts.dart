@@ -51,6 +51,12 @@ Future<PlatformInt64> completeOauthAccount({
   color: color,
 );
 
+/// Aborts an in-flight OAuth flow on the daemon: releases the session
+/// slot and drops any staged tokens so a new flow can start immediately
+/// (wizard back / timeout / retry).
+Future<void> abortOauthAccount() =>
+    RustLib.instance.api.crateApiAccountsAbortOauthAccount();
+
 /// Patches mutable account fields (name, color, sync window).
 Future<void> updateAccount({
   required PlatformInt64 accountId,

@@ -152,6 +152,15 @@ pub async fn complete_oauth_account(
     account_id(&reply, "complete_oauth_account")
 }
 
+/// Aborts an in-flight OAuth flow on the daemon: releases the session
+/// slot and drops any staged tokens so a new flow can start immediately
+/// (wizard back / timeout / retry).
+pub async fn abort_oauth_account() -> Result<(), DaemonError> {
+    let mut client = connect().await?;
+    client.abort_oauth_account().await.map_err(DaemonError::from)?;
+    Ok(())
+}
+
 /// Patches mutable account fields (name, color, sync window).
 pub async fn update_account(account_id: i64, patch: AccountPatch) -> Result<(), DaemonError> {
     let mut client = connect().await?;
@@ -375,6 +384,7 @@ mod tests {
             methods::START_OAUTH => json!({ "url": "https://accounts.example.test/auth" }),
             methods::START_REAUTH => json!({ "url": "https://accounts.example.test/reauth" }),
             methods::COMPLETE_OAUTH_ACCOUNT => json!({ "account_id": 11 }),
+            methods::ABORT_OAUTH_ACCOUNT => json!({ "ok": true }),
             methods::UPDATE_ACCOUNT | methods::REMOVE_ACCOUNT => json!({ "ok": true }),
             _ => json!({}),
         }

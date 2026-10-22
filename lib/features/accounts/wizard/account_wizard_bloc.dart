@@ -136,6 +136,11 @@ class AccountWizardBloc extends Bloc<AccountWizardEvent, AccountWizardState> {
     Emitter<AccountWizardState> emit,
   ) async {
     _oauthTimer?.cancel();
+    if (state is WaitingForOauth) {
+      // Release the daemon's OAuth session slot so a later start is not
+      // rejected until the 300 s deadline or a daemon restart.
+      await _client.abortOauthAccount();
+    }
     emit(const ChooseProvider());
   }
 
@@ -145,6 +150,7 @@ class AccountWizardBloc extends Bloc<AccountWizardEvent, AccountWizardState> {
   ) async {
     final state = this.state;
     if (state is! WaitingForOauth) return;
+    await _client.abortOauthAccount();
     emit(OauthTimedOut(provider: state.provider, url: state.url));
   }
 

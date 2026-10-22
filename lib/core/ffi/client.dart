@@ -110,6 +110,14 @@ class FfiClient {
     ),
   );
 
+  /// Aborts an in-flight OAuth flow on the daemon: releases the session
+  /// slot and drops staged tokens so a new flow can start immediately.
+  ///
+  /// Called from the wizard on back / timeout / retry. Best-effort: if
+  /// the daemon is already down there is nothing to abort.
+  Future<void> abortOauthAccount() =>
+      _guard(() => rust_accounts.abortOauthAccount());
+
   /// Patches an account row.
   ///
   /// `AccountPatch.clearColor` wins over a set `AccountPatch.color` so the

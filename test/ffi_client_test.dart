@@ -43,6 +43,9 @@ class FakeRustLibApi extends RustLibApi {
   ImapDraft? lastTestDraft;
   String? lastTestPassword;
 
+  /// Whether abort-oauth-account was called.
+  bool abortCalled = false;
+
   int pingCalls = 0;
 
   /// Stream the fake [FfiClient.events] can subscribe to in tests.
@@ -66,6 +69,7 @@ class FakeRustLibApi extends RustLibApi {
     lastRemoveId = null;
     lastTestDraft = null;
     lastTestPassword = null;
+    abortCalled = false;
     pingCalls = 0;
     eventStream = const Stream<AppEvent>.empty();
   }
@@ -169,6 +173,15 @@ class FakeRustLibApi extends RustLibApi {
       imap: ConnectionStep(ok: true),
       smtp: ConnectionStep(ok: true),
     );
+  }
+
+  @override
+  Future<void> crateApiAccountsAbortOauthAccount() async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    abortCalled = true;
   }
 
   @override
@@ -480,6 +493,27 @@ void main() {
           (failure) => failure.message,
           'message',
           'bad account',
+        ),
+      ),
+    );
+  });
+
+  test('abortOauthAccount releases the session and maps errors', () async {
+    await const FfiClient().abortOauthAccount();
+    expect(api.abortCalled, isTrue);
+
+    api.accountsError = DaemonError(
+      kind: 'validation',
+      message: 'session gone',
+      retryable: false,
+    );
+    await expectLater(
+      const FfiClient().abortOauthAccount(),
+      throwsA(
+        isA<ValidationFailure>().having(
+          (failure) => failure.message,
+          'message',
+          'session gone',
         ),
       ),
     );

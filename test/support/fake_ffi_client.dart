@@ -31,6 +31,7 @@ class FakeFfiClient extends FfiClient {
       smtp: ConnectionStep(ok: true),
     ),
     this.testConnectionFailure,
+    this.abortOauthFailure,
   });
 
   /// Returned by [daemonStatus] when [statusFailure] is null.
@@ -100,6 +101,9 @@ class FakeFfiClient extends FfiClient {
   /// When set, [FfiClient.testConnection] throws it.
   AppFailure? testConnectionFailure;
 
+  /// When set, [FfiClient.abortOauthAccount] throws it.
+  AppFailure? abortOauthFailure;
+
   /// How often [FfiClient.listAccounts] was called.
   int listAccountsCalls = 0;
 
@@ -145,6 +149,9 @@ class FakeFfiClient extends FfiClient {
 
   /// How often [FfiClient.testConnection] was called.
   int testConnectionCalls = 0;
+
+  /// How often [FfiClient.abortOauthAccount] was called.
+  int abortCalls = 0;
 
   /// Captured [FfiClient.testConnection] arguments.
   ImapDraft? lastTestDraft;
@@ -308,5 +315,14 @@ class FakeFfiClient extends FfiClient {
       throw failure;
     }
     return testConnectionResult;
+  }
+
+  @override
+  Future<void> abortOauthAccount() async {
+    abortCalls += 1;
+    final failure = abortOauthFailure;
+    if (failure != null) {
+      throw failure;
+    }
   }
 }
