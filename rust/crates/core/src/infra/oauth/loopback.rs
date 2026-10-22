@@ -93,9 +93,12 @@ fn recv_one(
             }
         };
         if got_state != state {
+            // A state from another (or stale) flow is not ours: answer
+            // and keep waiting, exactly like a missing-param probe. A
+            // local port scanner must not be able to abort the sign-in.
             let response = tiny_http::Response::from_string("state mismatch").with_status_code(400);
             let _ = request.respond(response);
-            break Err(OAuthError::StateMismatch);
+            continue;
         }
         let response = tiny_http::Response::from_string("sign-in complete");
         let _ = request.respond(response);
@@ -173,7 +176,7 @@ mod tests {
 
     /// A forged redirect (wrong state) is rejected, not trusted.
     #[test]
-    fn state_mismatch_is_rejected() {
+    fn a_state_mismatch_keeps_the_listener_waiting() {
         let listener = LoopbackListener::bind().expect("bind loopback");
 
         let waiter = {
@@ -187,10 +190,19 @@ mod tests {
         );
         http_get(&url).expect("GET callback");
 
+        let url = format!(
+            "http://127.0.0.1:{}/callback?code=cd-9&state=expected",
+            listener.port()
+        );
+        http_get(&url).expect("GET callback");
+
         let result = waiter.join().expect("waiter thread");
         match result {
-            Err(OAuthError::StateMismatch) => {}
-            other => panic!("expected StateMismatch, got {other:?}"),
+            Ok((code, state)) => {
+                assert_eq!(code, "cd-9");
+                assert_eq!(state, "expected");
+            }
+            other => panic!("expected a completed flow, got {other:?}"),
         }
     }
 
