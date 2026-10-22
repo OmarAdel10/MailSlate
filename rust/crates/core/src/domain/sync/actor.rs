@@ -104,10 +104,13 @@ async fn refresh_oauth(
         _ => return Err(RefreshError::Reauth),
     };
     let client_id = providers::client_id(provider).map_err(|_| RefreshError::Reauth)?;
-    let stale = tokens::load(keystore.as_ref(), account.id)
-        .ok()
-        .flatten()
-        .ok_or(RefreshError::Reauth)?;
+    let stale = match tokens::load(keystore.as_ref(), account.id) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return Err(RefreshError::Reauth),
+        // A keyring backend error is transient; retry rather than
+        // parking the account.
+        Err(err) => return Err(RefreshError::Transient(err.to_string())),
+    };
     let refreshed = grant::refresh(
         token_poster.as_ref(),
         provider,
@@ -187,6 +190,12 @@ async fn wait_backoff(rx: &mut mpsc::Receiver<SyncCmd>, delay: std::time::Durati
 /// then serve SyncNow commands on the live session. Returns how the
 /// cycle ended; the supervision loop in [`spawn_actor`] decides what
 /// to do next.
+///
+/// `backoff` is the supervision loop's current retry delay; it is
+/// reset to [`INITIAL_BACKOFF`] once the cycle reaches the serve loop
+/// (the account is healthy), so a later transient failure starts from
+/// the initial delay instead of the previously accumulated one.
+#[allow(clippy::too_many_arguments)]
 async fn run_account_cycle(
     account: &AccountConfig,
     keystore: &Arc<dyn KeyStore>,
@@ -195,6 +204,7 @@ async fn run_account_cycle(
     token_poster: &Arc<dyn TokenPoster>,
     rx: &mut mpsc::Receiver<SyncCmd>,
     set_state: &(dyn Fn(SyncState) + Send + Sync),
+    backoff: &mut std::time::Duration,
 ) -> CycleOutcome {
     set_state(SyncState::Connecting);
     let client = match tokio::time::timeout(
@@ -212,7 +222,12 @@ async fn run_account_cycle(
     let mut session = if account.auth_type == "oauth2" {
         let mut auth = match tokens::load(keystore.as_ref(), account.id) {
             Ok(Some(snapshot)) => snapshot,
-            _ => return CycleOutcome::Reauth,
+            // A missing snapshot means the account was never
+            // authorized (or access was revoked): terminal re-auth.
+            Ok(None) => return CycleOutcome::Reauth,
+            // A keyring backend error is transient (D-Bus hiccup,
+            // locked keyring): retry, do not park the account.
+            Err(err) => return CycleOutcome::Retry(err.to_string()),
         };
         if !auth.is_fresh(now_unix()) {
             auth = match refresh_oauth(account, keystore, token_poster).await {
@@ -237,7 +252,12 @@ async fn run_account_cycle(
     } else {
         let password = match keystore.get(&imap_password_key(account.id)) {
             Ok(Some(password)) => password,
-            _ => return CycleOutcome::Reauth,
+            // No stored password means the account was never set up
+            // (or was revoked): terminal re-auth.
+            Ok(None) => return CycleOutcome::Reauth,
+            // A keyring backend error is transient: retry, do not
+            // park the account.
+            Err(err) => return CycleOutcome::Retry(err.to_string()),
         };
         match tokio::time::timeout(
             IMAP_STEP_TIMEOUT,
@@ -260,6 +280,9 @@ async fn run_account_cycle(
         return CycleOutcome::Retry(err.to_string());
     }
     set_state(SyncState::Idle);
+    // The account is healthy: reset the accumulated backoff so the
+    // next transient failure starts from the initial delay again.
+    *backoff = INITIAL_BACKOFF;
 
     loop {
         match rx.recv().await {
@@ -314,6 +337,7 @@ pub fn spawn_actor(
                 &token_poster,
                 &mut rx,
                 &set_state,
+                &mut backoff,
             )
             .await
             {
@@ -477,6 +501,157 @@ mod tests {
         assert!(
             statuses.iter().any(|e| e.data["state"] == "stopped"),
             "a stopped status must be published"
+        );
+    }
+
+    /// A keyring whose backend errors on every call (D-Bus down,
+    /// locked keyring): every secret lookup fails with `Err`.
+    struct FailingKeyStore;
+
+    impl crate::infra::keyring::KeyStore for FailingKeyStore {
+        fn store(
+            &self,
+            _key: &str,
+            _secret: &str,
+        ) -> Result<(), crate::infra::keyring::KeyStoreError> {
+            Err(crate::infra::keyring::KeyStoreError::Unavailable(
+                "keyring down".into(),
+            ))
+        }
+
+        fn get(&self, _key: &str) -> Result<Option<String>, crate::infra::keyring::KeyStoreError> {
+            Err(crate::infra::keyring::KeyStoreError::Unavailable(
+                "keyring down".into(),
+            ))
+        }
+
+        fn delete(&self, _key: &str) -> Result<(), crate::infra::keyring::KeyStoreError> {
+            Err(crate::infra::keyring::KeyStoreError::Unavailable(
+                "keyring down".into(),
+            ))
+        }
+    }
+
+    /// A keyring backend error is transient: the actor must back off
+    /// and retry, never park in reauth_required (password accounts
+    /// have no reconnect path).
+    #[tokio::test]
+    async fn a_keyring_failure_backs_off_instead_of_parking_the_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = crate::infra::imap::testing::spawn_fake_multi(|tag, command| {
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            password_account(port),
+            std::sync::Arc::new(FailingKeyStore)
+                as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        let mut saw_backoff = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if handle.current_state().as_str() == "backoff" {
+                saw_backoff += 1;
+            }
+            assert_ne!(handle.current_state().as_str(), "reauth_required");
+            assert_ne!(handle.current_state().as_str(), "stopped");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(saw_backoff >= 2, "backoff must repeat, saw {saw_backoff}");
+
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    /// An oauth account whose snapshot cannot be *read* from the
+    /// keyring also retries — only a missing snapshot parks.
+    #[tokio::test]
+    async fn an_oauth_snapshot_load_failure_backs_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "oauth2", "gmail");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = crate::infra::imap::testing::spawn_fake_multi(|tag, command| {
+            happy_replies(tag, command)
+        })
+        .await;
+
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let handle = spawn_actor(
+            oauth_account(port),
+            std::sync::Arc::new(FailingKeyStore)
+                as std::sync::Arc<dyn crate::infra::keyring::KeyStore>,
+            std::sync::Arc::clone(&writer),
+            std::sync::Arc::clone(&bus),
+            std::sync::Arc::new(RefreshPoster),
+        );
+
+        let mut saw_backoff = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if handle.current_state().as_str() == "backoff" {
+                saw_backoff += 1;
+            }
+            assert_ne!(handle.current_state().as_str(), "reauth_required");
+            assert_ne!(handle.current_state().as_str(), "stopped");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(saw_backoff >= 2, "backoff must repeat, saw {saw_backoff}");
+
+        handle.try_shutdown();
+        wait_state(&handle, "stopped", std::time::Duration::from_secs(5)).await;
+    }
+
+    /// Reaching the serve loop resets the accumulated backoff: a later
+    /// transient failure must start from the initial delay again.
+    #[tokio::test]
+    async fn a_successful_cycle_resets_the_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir, "password", "imap");
+        let writer = std::sync::Arc::new(crate::infra::db::writer::WriterActor::spawn(&db_path));
+
+        let port = crate::infra::imap::testing::spawn_fake(happy_replies).await;
+
+        let keystore = std::sync::Arc::new(crate::infra::keyring::FakeKeyStore::new());
+        keystore
+            .store(&crate::infra::keyring::imap_password_key(1), "pass")
+            .expect("store password");
+        let bus = std::sync::Arc::new(crate::domain::events::EventBus::new());
+
+        let (tx, mut rx) = mpsc::channel(16);
+        tx.try_send(SyncCmd::Shutdown)
+            .expect("queue the shutdown ahead of the serve loop");
+        let mut backoff = MAX_BACKOFF;
+        let set_state = |_next: SyncState| {};
+        let outcome = run_account_cycle(
+            &password_account(port),
+            &(std::sync::Arc::clone(&keystore)
+                as std::sync::Arc<dyn crate::infra::keyring::KeyStore>),
+            &writer,
+            &bus,
+            &(std::sync::Arc::new(RefreshPoster)
+                as std::sync::Arc<dyn crate::infra::oauth::grant::TokenPoster>),
+            &mut rx,
+            &set_state,
+            &mut backoff,
+        )
+        .await;
+
+        assert!(matches!(outcome, CycleOutcome::Shutdown));
+        assert_eq!(
+            backoff, INITIAL_BACKOFF,
+            "a healthy cycle must reset the backoff"
         );
     }
 
