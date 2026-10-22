@@ -22,9 +22,14 @@ crate-type = ["cdylib", "staticlib"]
 flutter_rust_bridge = "=2.13.0"
 mailslate-core = { path = "../core" }
 mailslate-protocol = { path = "../protocol" }
+# Account wire payloads (`conn`, `creds`, `patch`) are built at runtime.
+serde_json = "1"
+# Main-code use is limited to `tokio::sync::mpsc::Receiver` in the event
+# pump; the async runtime itself comes with flutter_rust_bridge's
+# rust-async feature.
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
-serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync"] }
 

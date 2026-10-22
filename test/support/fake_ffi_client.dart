@@ -15,6 +15,23 @@ class FakeFfiClient extends FfiClient {
     this.statusFailure,
     this.statusThrow,
     this.logDir = '',
+    this.eventStream = _emptyEvents,
+    this.accounts = const [],
+    this.accountsFailure,
+    this.addImapResult = 7,
+    this.addImapFailure,
+    this.oauthUrl = 'https://accounts.example.test/auth',
+    this.startOauthFailure,
+    this.reauthUrl = 'https://accounts.example.test/reauth',
+    this.reauthFailure,
+    this.completeOauthResult = 11,
+    this.completeOauthFailure,
+    this.testConnectionResult = const ConnectionTest(
+      imap: ConnectionStep(ok: true),
+      smtp: ConnectionStep(ok: true),
+    ),
+    this.testConnectionFailure,
+    this.abortOauthFailure,
   });
 
   /// Returned by [daemonStatus] when [statusFailure] is null.
@@ -34,6 +51,111 @@ class FakeFfiClient extends FfiClient {
 
   /// Returned by [daemonLogDir].
   String logDir;
+
+  /// Builds the stream returned by [FfiClient.events]; fresh per call,
+  /// like the real bridge (each `appEvents()` call dials a new Rust sink).
+  Stream<AppEvent> Function() eventStream;
+
+  static Stream<AppEvent> _emptyEvents() => const Stream<AppEvent>.empty();
+
+  /// Canned [FfiClient.listAccounts] result.
+  List<AccountSummary> accounts;
+
+  /// When set, every accounts call throws it.
+  AppFailure? accountsFailure;
+
+  /// When set, [listAccounts] throws it after the failure check.
+  Object? listAccountsError;
+
+  /// Returned by [FfiClient.addImapAccount] when [addImapFailure] is null.
+  int addImapResult;
+
+  /// When set, [FfiClient.addImapAccount] throws it.
+  AppFailure? addImapFailure;
+
+  /// Returned by [FfiClient.startOauth] when [startOauthFailure] is null.
+  String oauthUrl;
+
+  /// When set, [FfiClient.startOauth] throws it.
+  AppFailure? startOauthFailure;
+
+  /// Returned by [FfiClient.startReauth] when [reauthFailure] is null.
+  String reauthUrl;
+
+  /// When set, [FfiClient.startReauth] throws it.
+  AppFailure? reauthFailure;
+
+  /// When set, [FfiClient.startReauth] throws it (any object, for generic
+  /// catches).
+  Object? reauthThrow;
+
+  /// Returned by [FfiClient.completeOauthAccount] when null failure.
+  int completeOauthResult;
+
+  /// When set, [FfiClient.completeOauthAccount] throws it.
+  AppFailure? completeOauthFailure;
+
+  /// Returned by [FfiClient.testConnection] when null failure.
+  ConnectionTest testConnectionResult;
+
+  /// When set, [FfiClient.testConnection] throws it.
+  AppFailure? testConnectionFailure;
+
+  /// When set, [FfiClient.abortOauthAccount] throws it.
+  AppFailure? abortOauthFailure;
+
+  /// How often [FfiClient.listAccounts] was called.
+  int listAccountsCalls = 0;
+
+  /// How often [FfiClient.addImapAccount] was called.
+  int addImapCalls = 0;
+
+  /// How often [FfiClient.startOauth] was called.
+  int startOauthCalls = 0;
+
+  /// How often [FfiClient.startReauth] was called.
+  int reauthCalls = 0;
+
+  /// How often [FfiClient.completeOauthAccount] was called.
+  int completeOauthCalls = 0;
+
+  /// How often [FfiClient.updateAccount] was called.
+  int updateCalls = 0;
+
+  /// How often [FfiClient.removeAccount] was called.
+  int removeCalls = 0;
+
+  /// Captured [FfiClient.addImapAccount] arguments.
+  ImapDraft? lastAddDraft;
+  String? lastAddPassword;
+
+  /// Captured [FfiClient.startOauth] provider.
+  String? lastOauthProvider;
+
+  /// Captured [FfiClient.startReauth] account id.
+  int? lastReauthId;
+
+  /// Captured [FfiClient.completeOauthAccount] arguments.
+  String? lastCompleteDisplayName;
+  String? lastCompleteEmail;
+  String? lastCompleteColor;
+
+  /// Captured [FfiClient.updateAccount] arguments.
+  int? lastUpdateId;
+  AccountPatch? lastPatch;
+
+  /// Captured [FfiClient.removeAccount] argument.
+  int? lastRemoveId;
+
+  /// How often [FfiClient.testConnection] was called.
+  int testConnectionCalls = 0;
+
+  /// How often [FfiClient.abortOauthAccount] was called.
+  int abortCalls = 0;
+
+  /// Captured [FfiClient.testConnection] arguments.
+  ImapDraft? lastTestDraft;
+  String? lastTestPassword;
 
   /// How often [startDaemon] was called.
   int startCalls = 0;
@@ -79,5 +201,128 @@ class FakeFfiClient extends FfiClient {
   Future<String> daemonLogDir() async => logDir;
 
   @override
+  Stream<AppEvent> events() => eventStream();
+
+  @override
   Future<PingInfo> ping() async => pingResult;
+
+  @override
+  Future<List<AccountSummary>> listAccounts() async {
+    listAccountsCalls += 1;
+    final failure = accountsFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    final thrown = listAccountsError;
+    if (thrown != null) {
+      throw thrown;
+    }
+    return accounts;
+  }
+
+  @override
+  Future<int> addImapAccount({
+    required ImapDraft draft,
+    required String password,
+  }) async {
+    addImapCalls += 1;
+    lastAddDraft = draft;
+    lastAddPassword = password;
+    final failure = addImapFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    return addImapResult;
+  }
+
+  @override
+  Future<String> startOauth({required String provider}) async {
+    startOauthCalls += 1;
+    lastOauthProvider = provider;
+    final failure = startOauthFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    return oauthUrl;
+  }
+
+  @override
+  Future<String> startReauth({required int accountId}) async {
+    reauthCalls += 1;
+    lastReauthId = accountId;
+    final failure = reauthFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    final thrown = reauthThrow;
+    if (thrown != null) {
+      throw thrown;
+    }
+    return reauthUrl;
+  }
+
+  @override
+  Future<int> completeOauthAccount({
+    required String displayName,
+    required String email,
+    String? color,
+  }) async {
+    completeOauthCalls += 1;
+    lastCompleteDisplayName = displayName;
+    lastCompleteEmail = email;
+    lastCompleteColor = color;
+    final failure = completeOauthFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    return completeOauthResult;
+  }
+
+  @override
+  Future<void> updateAccount({
+    required int accountId,
+    required AccountPatch patch,
+  }) async {
+    updateCalls += 1;
+    lastUpdateId = accountId;
+    lastPatch = patch;
+    final failure = accountsFailure;
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  @override
+  Future<void> removeAccount({required int accountId}) async {
+    removeCalls += 1;
+    lastRemoveId = accountId;
+    final failure = accountsFailure;
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  @override
+  Future<ConnectionTest> testConnection({
+    required ImapDraft draft,
+    required String password,
+  }) async {
+    testConnectionCalls += 1;
+    lastTestDraft = draft;
+    lastTestPassword = password;
+    final failure = testConnectionFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    return testConnectionResult;
+  }
+
+  @override
+  Future<void> abortOauthAccount() async {
+    abortCalls += 1;
+    final failure = abortOauthFailure;
+    if (failure != null) {
+      throw failure;
+    }
+  }
 }

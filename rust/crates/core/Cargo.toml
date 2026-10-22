@@ -8,15 +8,38 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+base64 = "0.22"
 dirs = "7.0.0"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+form_urlencoded = "1"
 keyring = { version = "4.2.0", default-features = false, features = ["v1", "zbus-secret-service-keyring-store", "apple-native-keyring-store", "windows-native-keyring-store"] }
 libc = "0.2"
+mail-parser = "0.11"
 mailslate-protocol = { path = "../protocol", features = ["tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustls = { version = "0.23", features = ["ring"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2.0.21"
-tokio = { version = "1", features = ["io-util", "net", "time"] }
+tiny_http = "0.12"
+# `macros` backs `tokio::select!` in the event-stream loop; it must be a
+# main feature (not just dev) because flutter_rust_bridge codegen expands
+# this crate without dev-dependencies.
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = "0.26"
+uuid = { version = "1", features = ["v4"] }
+webpki-roots = "0.26"
 
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+
+[features]
+# Gates the GreenMail integration tests (src/infra/imap/greenmail_tests.rs,
+# compiled as a module so the adapter keeps its pub(crate) surface closed);
+# they need the pinned standalone jar under .tools/ and a local JVM, so CI
+# never enables it. Run locally with:
+#   cargo test -p mailslate-core --features greenmail --lib greenmail_tests
+greenmail = []

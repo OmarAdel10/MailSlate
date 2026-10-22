@@ -6,9 +6,11 @@
 import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
+part 'system.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `connect_ping`, `status_for`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`
+// These functions are ignored because they are not marked as `pub`: `app_event_from_wire`, `connect_ping`, `pump_events`, `status_for`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
 /// Pings the daemon without spawning one.
 Future<PingInfo> ping() => RustLib.instance.api.crateApiSystemPing();
@@ -27,6 +29,80 @@ Future<PingInfo> startDaemon() =>
 /// this directory (USER_FLOW §9); pure path math, never spawns a daemon.
 Future<String> daemonLogDir() =>
     RustLib.instance.api.crateApiSystemDaemonLogDir();
+
+/// Streams daemon events to the GUI for the whole app lifetime.
+///
+/// Backs the global event bloc (ARCHITECTURE §4/§6): the underlying
+/// loop heartbeats to defeat the daemon's idle timeout and reconnects
+/// with backoff while the daemon is down; the Dart stream ends only
+/// when the listener cancels.
+Stream<AppEvent> appEvents() => RustLib.instance.api.crateApiSystemAppEvents();
+
+@freezed
+sealed class AppEvent with _$AppEvent {
+  const AppEvent._();
+
+  /// `account_status`: an account's sync state changed.
+  const factory AppEvent.accountStatus({
+    /// Row id of the account.
+    required PlatformInt64 account,
+
+    /// Sync state name (`SyncState` snake_case).
+    required String state,
+  }) = AppEvent_AccountStatus;
+
+  /// `sync_progress`: a mailbox batch finished during a sync pass.
+  const factory AppEvent.syncProgress({
+    /// Row id of the account.
+    required PlatformInt64 account,
+
+    /// Mailbox the batch belongs to.
+    required String mailbox,
+
+    /// Sync phase name (currently `initial`).
+    required String phase,
+
+    /// Mailboxes completed so far.
+    required int done,
+
+    /// Total mailboxes in this sync.
+    required int total,
+  }) = AppEvent_SyncProgress;
+
+  /// `oauth_url_ready`: the provider consent screen is ready.
+  const factory AppEvent.oauthUrlReady({
+    /// URL to open in the system browser.
+    required String url,
+  }) = AppEvent_OauthUrlReady;
+
+  /// `oauth_completed`: the OAuth handshake finished for this email.
+  const factory AppEvent.oauthCompleted({
+    /// Email address that just signed in.
+    required String email,
+  }) = AppEvent_OauthCompleted;
+
+  /// `oauth_failed`: the OAuth handshake failed.
+  const factory AppEvent.oauthFailed({
+    /// Why the handshake failed.
+    required String reason,
+  }) = AppEvent_OauthFailed;
+
+  /// `oauth_reconnected`: a reconnect flow refreshed an existing
+  /// account's tokens and its sync actor was restarted.
+  const factory AppEvent.oauthReconnected({
+    /// Row id of the reconnected account.
+    required PlatformInt64 account,
+
+    /// Email address the provider returned.
+    required String email,
+  }) = AppEvent_OauthReconnected;
+
+  /// Any other event: unknown name or malformed payload.
+  const factory AppEvent.other({
+    /// The `event` field from the wire frame.
+    required String name,
+  }) = AppEvent_Other;
+}
 
 /// A failure crossing the FFI boundary.
 class DaemonError implements FrbException {

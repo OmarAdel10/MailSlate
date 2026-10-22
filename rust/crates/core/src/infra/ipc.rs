@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use mailslate_protocol::FrameError;
 use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
-use mailslate_protocol::message::{Request, Response};
+use mailslate_protocol::message::{Event, Request, Response};
 use mailslate_protocol::{BridgeError, ErrorKind, PingResult, methods};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::infra::paths;
 
@@ -39,6 +39,10 @@ pub struct Client {
     next_id: u64,
     request_timeout: Duration,
     poisoned: bool,
+    /// Daemon events interleaved during request/reply frames, parked for
+    /// the consumer until an event API surfaces them (phase 7 wires the
+    /// GUI stream).
+    pending_events: std::collections::VecDeque<Event>,
 }
 
 impl Client {
@@ -55,6 +59,7 @@ impl Client {
             next_id: 0,
             request_timeout: REQUEST_TIMEOUT,
             poisoned: false,
+            pending_events: std::collections::VecDeque::new(),
         })
     }
 
@@ -93,13 +98,23 @@ impl Client {
             params,
         };
         let timeout = self.request_timeout;
-        let stream = &mut self.stream;
         let response: Response = match tokio::time::timeout(timeout, async {
-            write_json_frame_async(stream, &request)
+            write_json_frame_async(&mut self.stream, &request)
                 .await
                 .map_err(frame_error)?;
-            let response: Response = read_json_frame_async(stream).await.map_err(frame_error)?;
-            Ok::<Response, BridgeError>(response)
+            // Events may interleave with replies: skip-and-park every
+            // frame until a response envelope resolves this request.
+            loop {
+                let raw: Value = read_json_frame_async(&mut self.stream)
+                    .await
+                    .map_err(frame_error)?;
+                if let Ok(event) = serde_json::from_value::<Event>(raw.clone()) {
+                    self.pending_events.push_back(event);
+                    continue;
+                }
+                let response: Response = serde_json::from_value(raw).map_err(json_error)?;
+                break Ok::<Response, BridgeError>(response);
+            }
         })
         .await
         {
@@ -134,6 +149,102 @@ impl Client {
         serde_json::from_value(value).map_err(|err| {
             BridgeError::new(ErrorKind::Internal, format!("invalid ping payload: {err}"))
         })
+    }
+
+    /// Creates a generic IMAP/SMTP account; replies with `account_id`.
+    pub async fn add_imap_account(
+        &mut self,
+        conn: Value,
+        creds: Value,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::ADD_IMAP_ACCOUNT,
+            json!({ "conn": conn, "creds": creds }),
+        )
+        .await
+    }
+
+    /// Lists every configured account.
+    pub async fn get_accounts(&mut self) -> Result<Value, BridgeError> {
+        self.request(methods::GET_ACCOUNTS, json!({})).await
+    }
+
+    /// Probes a would-be account: IMAP login plus SMTP reachability.
+    /// The reply carries one `{ ok, error? }` object per step.
+    pub async fn test_connection(
+        &mut self,
+        conn: Value,
+        creds: Value,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::TEST_CONNECTION,
+            json!({ "conn": conn, "creds": creds }),
+        )
+        .await
+    }
+
+    /// Removes an account and scrubs its keyring secrets.
+    pub async fn remove_account(&mut self, account_id: i64) -> Result<Value, BridgeError> {
+        self.request(methods::REMOVE_ACCOUNT, json!({ "account_id": account_id }))
+            .await
+    }
+
+    /// Patches mutable account fields (name, color, sync window).
+    /// Starts an OAuth authorization-code flow; the reply carries the
+    /// provider's authorize URL for the GUI to open in a browser.
+    pub async fn start_oauth(&mut self, provider: &str) -> Result<Value, BridgeError> {
+        self.request(methods::START_OAUTH, json!({ "provider": provider }))
+            .await
+    }
+
+    /// Re-authorizes an existing OAuth account; the reply carries the
+    /// provider's authorize URL.
+    pub async fn start_reauth(&mut self, account_id: i64) -> Result<Value, BridgeError> {
+        self.request(methods::START_REAUTH, json!({ "account_id": account_id }))
+            .await
+    }
+
+    /// Completes a started OAuth flow: names the account and files it.
+    pub async fn complete_oauth_account(
+        &mut self,
+        display_name: &str,
+        email: &str,
+        color: Option<&str>,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::COMPLETE_OAUTH_ACCOUNT,
+            json!({ "display_name": display_name, "email": email, "color": color }),
+        )
+        .await
+    }
+
+    /// Aborts an in-flight OAuth flow: releases the session slot and
+    /// drops staged tokens so a new flow can start immediately.
+    pub async fn abort_oauth_account(&mut self) -> Result<Value, BridgeError> {
+        self.request(methods::ABORT_OAUTH_ACCOUNT, json!({})).await
+    }
+
+    pub async fn update_account(
+        &mut self,
+        account_id: i64,
+        patch: Value,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::UPDATE_ACCOUNT,
+            json!({ "account_id": account_id, "patch": patch }),
+        )
+        .await
+    }
+
+    /// Asks the daemon to re-run the sync for one account.
+    pub async fn sync_now(&mut self, account_id: i64) -> Result<Value, BridgeError> {
+        self.request(methods::SYNC_NOW, json!({ "account_id": account_id }))
+            .await
+    }
+
+    /// Lists every account with its current sync state.
+    pub async fn get_status(&mut self) -> Result<Value, BridgeError> {
+        self.request(methods::GET_STATUS, json!({})).await
     }
 
     /// Overrides the per-request timeout; tests use short values.
@@ -227,6 +338,15 @@ fn frame_error(err: FrameError) -> BridgeError {
     }
 }
 
+/// Maps a serde deserialization failure on a decoded frame to the
+/// "daemon sent an invalid frame" contract used by [`frame_error`].
+fn json_error(err: serde_json::Error) -> BridgeError {
+    BridgeError::new(
+        ErrorKind::Internal,
+        format!("daemon sent an invalid frame: {err}"),
+    )
+}
+
 fn daemon_unavailable(message: String) -> BridgeError {
     BridgeError::new(ErrorKind::DaemonUnavailable, message)
 }
@@ -235,7 +355,7 @@ fn daemon_unavailable(message: String) -> BridgeError {
 /// socket could be planted in a writable directory to hijack this
 /// session. Mirrors the server side of the same check: both ends of
 /// a connection must see a peer running as the effective user.
-fn check_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), BridgeError> {
+pub(crate) fn check_peer_uid(stream: &tokio::net::UnixStream) -> Result<(), BridgeError> {
     let cred = stream
         .peer_cred()
         .map_err(|err| daemon_unavailable(format!("could not read peer credentials: {err}")))?;
@@ -301,6 +421,44 @@ mod tests {
                     return;
                 }
                 "drop" => return,
+                "event-then-ping" => {
+                    let event =
+                        Event::new("sync_progress", serde_json::json!({"done": 3, "total": 10}));
+                    write_json_frame_async(&mut stream, &event)
+                        .await
+                        .expect("fake server writes the event frame");
+                    Response::ok(request.id, json!({"seen": true}))
+                }
+                methods::GET_ACCOUNTS => Response::ok(request.id, json!({ "accounts": [] })),
+                methods::ADD_IMAP_ACCOUNT => Response::ok(request.id, json!({ "account_id": 7 })),
+                methods::START_OAUTH => Response::ok(
+                    request.id,
+                    json!({ "url": "https://accounts.example.test/auth" }),
+                ),
+                methods::COMPLETE_OAUTH_ACCOUNT => {
+                    Response::ok(request.id, json!({ "account_id": 11 }))
+                }
+                methods::START_REAUTH => {
+                    if request.params["account_id"] == json!(9) {
+                        Response::ok(
+                            request.id,
+                            json!({ "url": "https://accounts.example.test/reauth" }),
+                        )
+                    } else {
+                        Response::err(
+                            request.id,
+                            BridgeError::new(ErrorKind::Validation, "wrong account"),
+                        )
+                    }
+                }
+                methods::REMOVE_ACCOUNT | methods::UPDATE_ACCOUNT => {
+                    Response::ok(request.id, json!({ "ok": true }))
+                }
+                methods::SYNC_NOW => Response::ok(request.id, json!({ "ok": true })),
+                methods::GET_STATUS => Response::ok(
+                    request.id,
+                    json!({ "accounts": [{ "id": 3, "state": "idle" }] }),
+                ),
                 _ => Response::ok(request.id, Value::Null),
             };
             write_json_frame_async(&mut stream, &response)
@@ -314,6 +472,92 @@ mod tests {
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
         tokio::spawn(serve(listener));
         socket
+    }
+
+    /// An unsolicited event frame that arrives while the client awaits
+    /// its response is skipped, not fatal: the reply on the wire still
+    /// resolves the pending request.
+    #[tokio::test]
+    async fn event_frame_before_response_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+        let reply = client
+            .request("event-then-ping", Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(reply["seen"], true);
+    }
+
+    /// Thin typed wrappers round-trip the account method names and
+    /// parameter shapes over the wire.
+    #[tokio::test]
+    async fn oauth_method_wrappers_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+
+        let reply = client.start_oauth("google").await.unwrap();
+        assert_eq!(reply["url"], json!("https://accounts.example.test/auth"));
+
+        let reply = client
+            .complete_oauth_account("Gmail", "me@gmail.com", Some("blue"))
+            .await
+            .unwrap();
+        assert_eq!(reply["account_id"], json!(11));
+    }
+
+    /// The reauth wrapper round-trips the account id and the url.
+    #[tokio::test]
+    async fn reauth_method_wrapper_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+
+        let reply = client.start_reauth(9).await.unwrap();
+        assert_eq!(reply["url"], json!("https://accounts.example.test/reauth"));
+
+        // The fake server only accepts account 9, proving the wrapper
+        // sends the id in the request params.
+        let err = client.start_reauth(1).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation);
+    }
+
+    /// sync_now / get_status wrappers round-trip the wire shapes.
+    #[tokio::test]
+    async fn sync_method_wrappers_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+
+        let reply = client.sync_now(3).await.unwrap();
+        assert_eq!(reply["ok"], json!(true));
+
+        let status = client.get_status().await.unwrap();
+        assert_eq!(status["accounts"][0]["id"], json!(3));
+        assert_eq!(status["accounts"][0]["state"], json!("idle"));
+    }
+
+    #[tokio::test]
+    async fn account_method_wrappers_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+
+        let created = client
+            .add_imap_account(json!({ "imap_host": "h" }), json!({ "password": "p" }))
+            .await
+            .unwrap();
+        assert_eq!(created["account_id"], json!(7));
+
+        let listing = client.get_accounts().await.unwrap();
+        assert_eq!(listing["accounts"], json!([]));
+
+        client
+            .update_account(7, json!({ "color": "blue" }))
+            .await
+            .unwrap();
+        client.remove_account(7).await.unwrap();
     }
 
     /// The client only speaks to a daemon owned by this user: the peer

@@ -2,8 +2,11 @@
 
 use std::path::Path;
 
+use crate::frb_generated::StreamSink;
 use flutter_rust_bridge::frb;
+use mailslate_core::infra::events::{spawn_event_stream, EventStreamOptions};
 use mailslate_core::infra::{ipc::Client, paths};
+use mailslate_protocol::message::Event as WireEvent;
 use mailslate_protocol::{BridgeError, PingResult};
 
 /// Liveness of the local daemon.
@@ -101,6 +104,164 @@ pub fn daemon_log_dir() -> String {
     paths::logs_dir().to_string_lossy().into_owned()
 }
 
+/// Daemon events surfaced to the GUI as a Dart stream.
+///
+/// Each variant mirrors a daemon EventBus event the GUI reacts to
+/// (ARCHITECTURE §5.4); anything the bridge does not model arrives as
+/// [`AppEvent::Other`] so an unknown event never breaks the stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppEvent {
+    /// `account_status`: an account's sync state changed.
+    AccountStatus {
+        /// Row id of the account.
+        account: i64,
+        /// Sync state name (`SyncState` snake_case).
+        state: String,
+    },
+    /// `sync_progress`: a mailbox batch finished during a sync pass.
+    SyncProgress {
+        /// Row id of the account.
+        account: i64,
+        /// Mailbox the batch belongs to.
+        mailbox: String,
+        /// Sync phase name (currently `initial`).
+        phase: String,
+        /// Mailboxes completed so far.
+        done: u32,
+        /// Total mailboxes in this sync.
+        total: u32,
+    },
+    /// `oauth_url_ready`: the provider consent screen is ready.
+    OauthUrlReady {
+        /// URL to open in the system browser.
+        url: String,
+    },
+    /// `oauth_completed`: the OAuth handshake finished for this email.
+    OauthCompleted {
+        /// Email address that just signed in.
+        email: String,
+    },
+    /// `oauth_failed`: the OAuth handshake failed.
+    OauthFailed {
+        /// Why the handshake failed.
+        reason: String,
+    },
+    /// `oauth_reconnected`: a reconnect flow refreshed an existing
+    /// account's tokens and its sync actor was restarted.
+    OauthReconnected {
+        /// Row id of the reconnected account.
+        account: i64,
+        /// Email address the provider returned.
+        email: String,
+    },
+    /// Any other event: unknown name or malformed payload.
+    Other {
+        /// The `event` field from the wire frame.
+        name: String,
+    },
+}
+
+/// Streams daemon events to the GUI for the whole app lifetime.
+///
+/// Backs the global event bloc (ARCHITECTURE §4/§6): the underlying
+/// loop heartbeats to defeat the daemon's idle timeout and reconnects
+/// with backoff while the daemon is down; the Dart stream ends only
+/// when the listener cancels.
+pub async fn app_events(sink: StreamSink<AppEvent>) -> Result<(), DaemonError> {
+    let events = spawn_event_stream(paths::socket_path(), EventStreamOptions::default());
+    pump_events(events, |event| sink.add(event).is_ok()).await;
+    Ok(())
+}
+
+/// Maps a wire [`WireEvent`] to an [`AppEvent`].
+///
+/// Known payloads are parsed field by field; unknown names and
+/// malformed payloads collapse to [`AppEvent::Other`] so one bad
+/// frame cannot break the stream.
+fn app_event_from_wire(event: &WireEvent) -> AppEvent {
+    let data = &event.data;
+    let other = || AppEvent::Other {
+        name: event.event.clone(),
+    };
+    match event.event.as_str() {
+        "account_status" => match (
+            data.get("account").and_then(|value| value.as_i64()),
+            data.get("state").and_then(|value| value.as_str()),
+        ) {
+            (Some(account), Some(state)) => AppEvent::AccountStatus {
+                account,
+                state: state.to_string(),
+            },
+            _ => other(),
+        },
+        "sync_progress" => {
+            match (
+                data.get("account").and_then(|value| value.as_i64()),
+                data.get("mailbox").and_then(|value| value.as_str()),
+                data.get("phase").and_then(|value| value.as_str()),
+                data.get("done").and_then(|value| value.as_u64()),
+                data.get("total").and_then(|value| value.as_u64()),
+            ) {
+                (Some(account), Some(mailbox), Some(phase), Some(done), Some(total)) => {
+                    match (u32::try_from(done), u32::try_from(total)) {
+                        (Ok(done), Ok(total)) => AppEvent::SyncProgress {
+                            account,
+                            mailbox: mailbox.to_string(),
+                            phase: phase.to_string(),
+                            done,
+                            total,
+                        },
+                        _ => other(),
+                    }
+                }
+                _ => other(),
+            }
+        }
+        "oauth_url_ready" => match data.get("url").and_then(|value| value.as_str()) {
+            Some(url) => AppEvent::OauthUrlReady {
+                url: url.to_string(),
+            },
+            None => other(),
+        },
+        "oauth_completed" => match data.get("email").and_then(|value| value.as_str()) {
+            Some(email) => AppEvent::OauthCompleted {
+                email: email.to_string(),
+            },
+            None => other(),
+        },
+        "oauth_failed" => match data.get("reason").and_then(|value| value.as_str()) {
+            Some(reason) => AppEvent::OauthFailed {
+                reason: reason.to_string(),
+            },
+            None => other(),
+        },
+        "oauth_reconnected" => match (
+            data.get("account").and_then(|value| value.as_i64()),
+            data.get("email").and_then(|value| value.as_str()),
+        ) {
+            (Some(account), Some(email)) => AppEvent::OauthReconnected {
+                account,
+                email: email.to_string(),
+            },
+            _ => other(),
+        },
+        _ => other(),
+    }
+}
+
+/// Forwards mapped [`AppEvent`]s until `emit` returns `false` (the
+/// Dart side cancelled) or the core stream ends.
+async fn pump_events<F: FnMut(AppEvent) -> bool>(
+    mut events: tokio::sync::mpsc::Receiver<WireEvent>,
+    mut emit: F,
+) {
+    while let Some(event) = events.recv().await {
+        if !emit(app_event_from_wire(&event)) {
+            break;
+        }
+    }
+}
+
 async fn connect_ping(socket: &Path) -> Result<PingInfo, DaemonError> {
     let mut client = Client::connect(socket).await.map_err(DaemonError::from)?;
     client
@@ -126,7 +287,7 @@ async fn status_for(socket: &Path) -> DaemonStatus {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
     use mailslate_protocol::message::{Request, Response};
@@ -138,8 +299,9 @@ mod tests {
     /// (`MAILSLATE_DATA_DIR`, `MAILSLATE_DAEMON_PATH`,
     /// `XDG_RUNTIME_DIR`); sibling tests in this binary run in
     /// parallel. Async-aware because the guarded tests hold it across
-    /// await points.
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    /// await points. Shared with the accounts API tests: one lock, one
+    /// environment.
+    pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn serve(listener: UnixListener) {
         while let Ok((mut stream, _)) = listener.accept().await {
@@ -314,5 +476,197 @@ mod tests {
 
         let expected = dir.path().join("logs");
         assert_eq!(Path::new(&reported), expected);
+    }
+
+    #[test]
+    fn maps_account_status_to_its_variant() {
+        let wire = WireEvent::new("account_status", json!({"account": 7, "state": "syncing"}));
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::AccountStatus {
+                account: 7,
+                state: "syncing".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn maps_sync_progress_to_its_variant() {
+        let wire = WireEvent::new(
+            "sync_progress",
+            json!({"account": 3, "mailbox": "INBOX", "phase": "initial", "done": 2, "total": 5}),
+        );
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::SyncProgress {
+                account: 3,
+                mailbox: "INBOX".to_string(),
+                phase: "initial".to_string(),
+                done: 2,
+                total: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn maps_oauth_url_ready_to_its_variant() {
+        let wire = WireEvent::new(
+            "oauth_url_ready",
+            json!({"url": "https://example.com/auth"}),
+        );
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::OauthUrlReady {
+                url: "https://example.com/auth".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn maps_oauth_completed_to_its_variant() {
+        let wire = WireEvent::new("oauth_completed", json!({"email": "user@example.com"}));
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::OauthCompleted {
+                email: "user@example.com".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn maps_oauth_failed_to_its_variant() {
+        let wire = WireEvent::new("oauth_failed", json!({"reason": "denied"}));
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::OauthFailed {
+                reason: "denied".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn maps_oauth_reconnected_to_its_variant() {
+        let wire = WireEvent::new(
+            "oauth_reconnected",
+            json!({"account": 7, "email": "user@example.com"}),
+        );
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::OauthReconnected {
+                account: 7,
+                email: "user@example.com".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_oauth_reconnected_falls_back_to_other() {
+        let wire = WireEvent::new("oauth_reconnected", json!({"email": "user@example.com"}));
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::Other {
+                name: "oauth_reconnected".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_event_names_map_to_other() {
+        let wire = WireEvent::new("mail_new", json!({"thread": 12}));
+        assert_eq!(
+            app_event_from_wire(&wire),
+            AppEvent::Other {
+                name: "mail_new".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_known_payloads_map_to_other() {
+        // Known name, payload missing a required field.
+        let missing = WireEvent::new("account_status", json!({"account": 7}));
+        assert_eq!(
+            app_event_from_wire(&missing),
+            AppEvent::Other {
+                name: "account_status".to_string(),
+            }
+        );
+
+        // Known name, wrong field types: `done` is a string and
+        // `account` is a float.
+        let wrong = WireEvent::new(
+            "sync_progress",
+            json!({"account": 1.5, "mailbox": "INBOX", "phase": "initial", "done": "2", "total": 5}),
+        );
+        assert_eq!(
+            app_event_from_wire(&wrong),
+            AppEvent::Other {
+                name: "sync_progress".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_forwards_events_in_order() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        for state in ["syncing", "idle", "error"] {
+            sender
+                .send(WireEvent::new(
+                    "account_status",
+                    json!({"account": 1, "state": state}),
+                ))
+                .await
+                .expect("send");
+        }
+        drop(sender);
+
+        let mut received = Vec::new();
+        pump_events(receiver, |event| {
+            received.push(event);
+            true
+        })
+        .await;
+
+        assert_eq!(
+            received,
+            vec![
+                AppEvent::AccountStatus {
+                    account: 1,
+                    state: "syncing".to_string(),
+                },
+                AppEvent::AccountStatus {
+                    account: 1,
+                    state: "idle".to_string(),
+                },
+                AppEvent::AccountStatus {
+                    account: 1,
+                    state: "error".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_stops_when_emit_returns_false() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        for state in ["syncing", "idle", "error"] {
+            sender
+                .send(WireEvent::new(
+                    "account_status",
+                    json!({"account": 1, "state": state}),
+                ))
+                .await
+                .expect("send");
+        }
+        drop(sender);
+
+        let mut count = 0;
+        pump_events(receiver, |_| {
+            count += 1;
+            false
+        })
+        .await;
+
+        assert_eq!(count, 1);
     }
 }

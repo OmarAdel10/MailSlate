@@ -7,6 +7,39 @@
 
 mod dispatch;
 mod logging;
+
+/// Creates `path` and restricts it to this user (0700): the data dir
+/// holds the plaintext-by-design mail database (ADR 9) and the logs dir
+/// rotated mail contents, so other local accounts must not read them
+/// even where the home dir permits traversal. Non-unix platforms keep
+/// the platform defaults.
+#[cfg(unix)]
+fn secure_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_dir(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
+#[cfg(all(test, unix))]
+mod secure_dir_tests {
+    use super::secure_dir;
+
+    #[test]
+    fn secure_dir_restricts_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("mailslate-data");
+        secure_dir(&target).unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+}
 mod server;
 
 use std::process::ExitCode;
@@ -62,18 +95,79 @@ fn main() -> ExitCode {
 #[cfg(unix)]
 fn run() -> Result<(), ServerError> {
     let data_dir = paths::data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    secure_dir(&data_dir)?;
     let _logs = logging::init(&paths::logs_dir())?;
 
-    let mut conn = db::open_rw(&paths::db_path())?;
+    let db_path = paths::db_path();
+    let mut conn = db::open_rw(&db_path)?;
     let schema = db::migrations::run(&mut conn)?;
     db::assert_fts5()?;
+    // Resume the account id counter before any request can create
+    // an account: a fresh process would otherwise start handing out
+    // ids that collide with rows from the previous run.
+    mailslate_core::domain::accounts::resume_next_id(&conn)?;
+    drop(conn); // the writer actor owns the rw connection from here on
     tracing::info!(schema, "database ready");
+
+    let keystore: std::sync::Arc<dyn mailslate_core::infra::keyring::KeyStore> =
+        std::sync::Arc::new(mailslate_core::infra::keyring::OsKeyStore::for_data_dir(
+            &data_dir,
+        ));
+    let writer = std::sync::Arc::new(db::writer::WriterActor::spawn_with_error_hook(
+        &db_path,
+        |error| tracing::warn!(error, "writer operation failed and was skipped"),
+    ));
+    let ctx = std::sync::Arc::new(crate::dispatch::DispatchCtx {
+        writer,
+        keystore,
+        reader: std::sync::Arc::new(db::pool::ReadPool::open(&db_path)?),
+        bus: mailslate_core::domain::events::EventBus::new(),
+        oauth: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        token_poster: std::sync::Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
+        oauth_deadline: std::time::Duration::from_secs(300),
+        sync: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+    });
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(server::run(paths::socket_path(), paths::pid_file()))
+    runtime.block_on(async {
+        // One sync actor per configured account; failures inside the
+        // actor publish account_status and stop the task — the daemon
+        // keeps serving IPC regardless.
+        {
+            let connections = {
+                let conn = ctx
+                    .reader
+                    .acquire()
+                    .map_err(|err| ServerError::Io(std::io::Error::other(err.to_string())))?;
+                mailslate_core::domain::accounts::get_account_connections(&conn)
+                    .map_err(|err| ServerError::Io(std::io::Error::other(err.to_string())))?
+            };
+            for account in connections {
+                let handle = mailslate_core::domain::sync::actor::spawn_actor(
+                    mailslate_core::domain::sync::actor::AccountConfig {
+                        id: account.id,
+                        email: account.email,
+                        imap_host: account.imap_host,
+                        imap_port: account.imap_port,
+                        imap_security: account.imap_security,
+                        auth_type: account.auth_type,
+                        provider: account.provider,
+                    },
+                    std::sync::Arc::clone(&ctx.keystore),
+                    std::sync::Arc::clone(&ctx.writer),
+                    std::sync::Arc::clone(&ctx.bus),
+                    std::sync::Arc::clone(&ctx.token_poster),
+                );
+                ctx.sync
+                    .lock()
+                    .expect("sync handle lock")
+                    .insert(account.id, handle);
+            }
+        }
+        server::run(paths::socket_path(), paths::pid_file(), ctx).await
+    })
 }
 
 #[cfg(not(unix))]

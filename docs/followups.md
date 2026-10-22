@@ -6,6 +6,56 @@ project (global `AGENTS.md` §4 and §13).
 
 ## Open
 
+- MAILSLATE-44 — M2: `restart_actor` spawns the replacement while the old
+  actor may still be mid-cycle, interleaving `account_status` events and
+  duplicating work; gate reconnect respawns on actor termination (await the
+  ack or check `current_state()`) (`rust/crates/daemon/src/dispatch.rs:495-517`).
+- MAILSLATE-45 — M2: re-sync never deletes vanished `message_locations`
+  and a recorded `uidvalidity` change is never acted on, so local membership
+  drifts from the server across `sync_now` runs; add expunge/UIDVALIDITY
+  handling (ties into MAILSLATE-36)
+  (`rust/crates/core/src/infra/db/writer.rs:399-419`).
+- MAILSLATE-46 — M2: a failed SELECT (including the 30s timeout) silently
+  skips a mailbox with no surfaced event; publish a `sync_progress` error
+  phase so the GUI can tell "empty" from "failed"
+  (`rust/crates/core/src/domain/sync/initial.rs:127-139`).
+- MAILSLATE-47 — M2: `ThreadCountersRecompute` runs after every mailbox
+  (O(mailboxes×threads)); recompute once after the mailbox loop
+  (`rust/crates/core/src/domain/sync/initial.rs:213`, op at
+  `rust/crates/core/src/infra/db/writer.rs:691-704`).
+- MAILSLATE-48 — M2: `add_imap_account`/`add_oauth_account` store the
+  secret under a freshly reserved id before the row write; a later DB
+  failure orphans the keyring entry — sweep unreferenced secrets at
+  startup (`rust/crates/core/src/domain/accounts.rs:99,145`).
+- MAILSLATE-49 — M2: dispatch handlers lock `ctx.sync`/`ctx.oauth` with
+  `.lock().expect` (11 sites); a panic while holding either poisons the
+  lock and every later dispatch panics its connection task — map poisoned
+  locks to bridge errors (`rust/crates/daemon/src/dispatch.rs`).
+- MAILSLATE-50 — M2: the IMAP/SMTP TLS connector hardcodes the webpki root
+  store, so the `Tls`/`StartTls` arms cannot be integration-tested against
+  a local fake CA; add a trust-store injection seam
+  (`rust/crates/core/src/infra/imap/tls.rs:17`).
+- MAILSLATE-51 — M2: minor test gaps in sync/writer/mime paths —
+  `refresh_oauth` failure sub-branches (`actor.rs:100-124`), reauth park
+  ignores SyncNow (`actor.rs:324-329`), event-stream garbage-frame recycle
+  (`events.rs:172-177`), `MessageUpsert` soft-fail and gmail fresh-INSERT
+  (`writer.rs:491-509,600-602`), probe `read_reply_line` EOF
+  (`probe.rs:160-163`), mailbox `flag_string` arms (`mailbox.rs:102-113`),
+  mime address-group flattening (`mime.rs:134-140`).
+- MAILSLATE-53 — M2: the accept loop enforces MAX_CONNECTIONS=8 with same-uid
+  slot accounting but has no per-connection read timeout or idle cutoff, so a
+  same-uid peer can exhaust slots (resource exhaustion, CWE-400); harden
+  accept-loop slot lifecycle before M2 widens the surface. Pre-existing code,
+  not introduced by M2 — track only, do not fix in this branch
+  (`rust/crates/daemon/src/server.rs:30`).
+- MAILSLATE-52 — M3: subject-only thread clustering merges unrelated
+  conversations that share a normalized subject; replace with JWZ threading
+  in the M3 slice (`rust/crates/core/src/infra/db/writer.rs:510-522`).
+- MAILSLATE-43 — M2: the account settings dialog offers 30d/90d/1y sync
+  windows but not "all" (PRD F2.2) — the `update_account` wire carries a
+  plain i64 where NULL means "unchanged", so the DB's NULL-everything state
+  is not expressible; extend protocol + daemon + bridge, then add the choice
+  (`lib/features/accounts/account_settings_dialog.dart`).
 - MAILSLATE-8 — Docs: FAST-gate cargo commands in `specs/DEVELOPMENT_ENVIRONMENT.md`
   (§12.1) and root `AGENTS.md` (§3/§4) are written as bare `cargo ...` but assume
   the working directory `rust/`; make the cwd explicit. Found during `chore/ci-setup`.
@@ -34,15 +84,9 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-16 — M1: minimum window size 1024x640 (USER_FLOW.md §2) is not yet
   enforced; wire the desktop runners once the scaffolds land (MAILSLATE-9;
   `lib/main.dart`, `linux/`, `windows/`, `macos/`).
-- MAILSLATE-17 — M1: the daemon-unavailable card ships Retry only; add the
-  `View log` action (USER_FLOW.md §9) alongside the M5 Settings daemon section
-  (`lib/features/shell/shell_screen.dart`).
 - MAILSLATE-18 — M2: `is_compatible` in `rust/crates/protocol/` is never called;
   wire the protocol compatibility check and the update-required screen when the
   daemon earns its first wire change (ARCHITECTURE.md §5.2; `lib/features/shell/`).
-- MAILSLATE-19 — M1: no automated end-to-end test drives the real GUI against a
-  spawned daemon (a manual `flutter run -d linux` smoke is the only evidence);
-  add an automated GUI↔daemon E2E before M2 closes.
 - MAILSLATE-20 — M2: `daemon_binary()` picks the first `is_file()` candidate
   without an executable-bit check and falls back to a bare PATH lookup
   (`rust/crates/core/src/infra/ipc.rs:145-166`); require `mode & 0o111` on
@@ -86,6 +130,19 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-34 — CI: re-verify the e2e job apt list (gtk/ninja/
   pkg-config) and the Node-20 deprecation warnings after the Ubuntu-26
   runner flip (`.github/workflows/ci.yml`); starts 2026-10-19.
+- MAILSLATE-36 — M3 (user-committed 2026-10-19): incremental sync via
+  CONDSTORE CHANGEDSINCE + UIDVALIDITY wipe; SyncNow full-refetch is
+  the M2 fallback (`rust/crates/core/src/domain/sync/initial.rs`;
+  quirks detection ready in `rust/crates/core/src/infra/imap/quirks.rs`).
+- MAILSLATE-37 — M3 (user-committed 2026-10-19): IDLE push with 29-min
+  re-issue + 60s polling fallback; pull forward mid-M3 if dogfooding
+  demands it (`rust/crates/core/src/domain/sync/actor.rs`).
+- MAILSLATE-38 — M3 (user-committed 2026-10-19): sync-window filtering
+  + body-fetch-on-open (body_state headers→full) — absorbed by the M3
+  reading UI by necessity.
+- MAILSLATE-39 — M3 (user-committed 2026-10-19): outbox drainer for
+  server mutations (uid_store/uid_move, FIFO per target, retry jitter
+  ≤60s) — absorbed by the M3 reading UI by necessity.
 
 ## Acknowledged test deferrals
 
@@ -97,3 +154,11 @@ gain logic):
 - `MigrationError::Version` arm —
   `rust/crates/core/src/infra/db/migrations.rs:27-28`.
 - `FrameError` Display strings — `rust/crates/protocol/src/framing.rs:31-42`.
+
+M2 accepted constraints (recorded by the round-3 QA review; no Plane item —
+revisit only if these gain decisions or logic):
+
+- The `id_token` email is read without JWT signature validation — acceptable
+  per OIDC §3.1.3.7 because the token arrives directly over TLS and is used
+  for display only; validate against the provider JWKS if it ever drives
+  decisions (`rust/crates/core/src/infra/oauth/grant.rs:123-135`).

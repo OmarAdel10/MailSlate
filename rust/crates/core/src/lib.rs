@@ -9,6 +9,7 @@
 //! `domain/` (sync engines, mailbox model, threading, search) arrives with
 //! M2+.
 
+pub mod domain;
 pub mod infra;
 
 /// Returns the crate version from `Cargo.toml`.

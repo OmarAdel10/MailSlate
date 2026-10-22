@@ -148,7 +148,7 @@ void main() {
       emitsInOrder([isA<DaemonConnecting>(), emitsDone]),
     );
     bloc.add(const DaemonStatusRequested());
-    await Future<void>.delayed(Duration.zero);
+    await pumpEventQueue();
 
     final closed = bloc.close();
     gate.complete();

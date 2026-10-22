@@ -66,12 +66,19 @@ jobs:
       - name: Fetch GreenMail JAR (tooling smoke test)
         working-directory: ${{ github.workspace }}
         run: bash tool/fetch_greenmail.sh
+      - name: Set up Java (GreenMail needs a JVM)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
       - name: Format check
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Test (GreenMail IMAP/SMTP integration)
+        run: cargo test -p mailslate-core --features greenmail
       - name: Install cargo-deny
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
