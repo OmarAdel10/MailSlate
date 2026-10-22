@@ -89,7 +89,7 @@ fn run() -> Result<(), ServerError> {
         keystore,
         reader: std::sync::Arc::new(db::pool::ReadPool::open(&db_path)?),
         bus: mailslate_core::domain::events::EventBus::new(),
-        oauth: std::sync::Mutex::new(None),
+        oauth: std::sync::Arc::new(std::sync::Mutex::new(None)),
         token_poster: std::sync::Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
         oauth_deadline: std::time::Duration::from_secs(300),
         sync: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

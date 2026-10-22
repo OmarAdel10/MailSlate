@@ -66,7 +66,12 @@ pub struct DispatchCtx {
     /// Domain events fanned out to connected GUIs.
     pub bus: Arc<EventBus>,
     /// The OAuth session waiting for `complete_oauth_account`.
-    pub oauth: std::sync::Mutex<Option<PendingAuth>>,
+    ///
+    /// `Arc` so the callback waiter can release the slot when its flow
+    /// dies — every outcome except a wizard success clears the session,
+    /// otherwise one failed or reconnecting flow would reject all
+    /// later starts until the daemon restarts.
+    pub oauth: Arc<std::sync::Mutex<Option<PendingAuth>>>,
     /// Token endpoint used for exchanges (swapped for fakes in tests).
     pub token_poster: Arc<dyn TokenPoster>,
     /// How long the callback waiter waits before giving up.
@@ -379,6 +384,7 @@ fn spawn_oauth_waiter(
     let writer = Arc::clone(&ctx.writer);
     let reader = Arc::clone(&ctx.reader);
     let sync = Arc::clone(&ctx.sync);
+    let session_slot = Arc::clone(&ctx.oauth);
     let deadline = ctx.oauth_deadline;
     std::thread::spawn(move || {
         let OauthFlow {
@@ -415,6 +421,7 @@ fn spawn_oauth_waiter(
             tokens::save(keystore.as_ref(), target, &snapshot).map_err(|err| err.to_string())?;
             Ok(email)
         })();
+        let mut release_session = true;
         match outcome {
             Ok(email) => match reauth_account {
                 Some(account_id) => {
@@ -439,14 +446,19 @@ fn spawn_oauth_waiter(
                         ));
                     }
                 }
-                None => bus.publish(Event::new(
-                    "oauth_completed",
-                    json!({
-                        "account_pending": PENDING_ACCOUNT_ID,
-                        "email": email,
-                        "provider": provider.db_name(),
-                    }),
-                )),
+                None => {
+                    // The wizard session must survive until
+                    // `complete_oauth_account` consumes it.
+                    release_session = false;
+                    bus.publish(Event::new(
+                        "oauth_completed",
+                        json!({
+                            "account_pending": PENDING_ACCOUNT_ID,
+                            "email": email,
+                            "provider": provider.db_name(),
+                        }),
+                    ));
+                }
             },
             Err(reason) => bus.publish(Event::new(
                 "oauth_failed",
@@ -457,7 +469,24 @@ fn spawn_oauth_waiter(
                 }),
             )),
         }
+        if release_session {
+            release_oauth_session(&session_slot, &state);
+        }
     });
+}
+
+/// Releases the daemon's single OAuth session slot after a terminated
+/// flow so later starts are not rejected forever. The state match
+/// keeps a (today impossible) superseding flow from being cleared by a
+/// stale waiter.
+fn release_oauth_session(slot: &Arc<std::sync::Mutex<Option<PendingAuth>>>, state: &str) {
+    let mut session = slot.lock().expect("oauth session lock");
+    if session
+        .as_ref()
+        .is_some_and(|pending| pending.state == state)
+    {
+        *session = None;
+    }
 }
 
 /// Replaces the parked actor of a freshly reconnected account: the old
@@ -520,19 +549,22 @@ fn restart_actor(
 /// Turns the staged OAuth tokens into a real account: consumes the
 /// pending session, moves the snapshot to the new account's keyring
 /// keys, and writes the row with the provider's endpoints.
+///
+/// The session is only consumed once every fallible check has passed —
+/// a failed completion must not discard the still-live browser flow.
 fn complete_oauth_account_dispatch(
     ctx: &DispatchCtx,
     params: &Value,
 ) -> Result<Value, BridgeError> {
     let session = {
-        let mut pending = ctx.oauth.lock().expect("oauth session lock");
+        let pending = ctx.oauth.lock().expect("oauth session lock");
         match pending.as_ref() {
             Some(session) if session.reauth_account.is_some() => {
                 return Err(validation(
                     "the pending flow reconnects an existing account; it completes on its own",
                 ));
             }
-            Some(_) => pending.take().expect("checked above"),
+            Some(session) => session.clone(),
             None => return Err(validation("no pending oauth session")),
         }
     };
@@ -543,6 +575,14 @@ fn complete_oauth_account_dispatch(
     let staged = tokens::load(ctx.keystore.as_ref(), PENDING_ACCOUNT_ID)
         .map_err(|err| BridgeError::new(ErrorKind::Internal, err.to_string()))?
         .ok_or_else(|| validation("oauth token snapshot missing from the keyring"))?;
+
+    // Every fallible check passed: consume the session now. The waiter
+    // never clears a wizard session, so the slot still holds ours.
+    ctx.oauth
+        .lock()
+        .expect("oauth session lock")
+        .take()
+        .expect("the wizard session cannot vanish before completion");
 
     let account_id = add_oauth_account(
         ctx.keystore.as_ref(),
@@ -1020,7 +1060,7 @@ mod tests {
             keystore,
             reader: Arc::new(ReadPool::open(&db_path).unwrap()),
             bus: mailslate_core::domain::events::EventBus::new(),
-            oauth: std::sync::Mutex::new(None),
+            oauth: Arc::new(std::sync::Mutex::new(None)),
             token_poster: poster,
             oauth_deadline,
             sync: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -1180,6 +1220,11 @@ mod tests {
         let failed = wait_event(&mut events, "oauth_failed");
         let reason = failed.data["reason"].as_str().expect("reason string");
         assert!(reason.contains("token endpoint down"), "got {reason}");
+
+        // The dead flow must release the single OAuth session slot;
+        // otherwise every later start is rejected until restart.
+        dispatch(&ctx, methods::START_OAUTH, &json!({ "provider": "google" }))
+            .expect("a failed flow must free the session slot");
     }
 
     /// A keyring that cannot store the snapshot publishes
@@ -1416,6 +1461,15 @@ mod tests {
             ctx.sync.lock().unwrap().contains_key(&account_id),
             "the parked actor must be respawned"
         );
+
+        // A finished reconnect must free the session slot for the next
+        // flow (the account's next expiry must be able to reconnect).
+        dispatch(
+            &ctx,
+            methods::START_REAUTH,
+            &json!({ "account_id": account_id }),
+        )
+        .expect("a completed reconnect must free the session slot");
     }
 
     #[test]
@@ -1461,6 +1515,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Validation);
         assert!(err.message.contains("missing from the keyring"));
+        assert!(
+            ctx.oauth.lock().unwrap().is_some(),
+            "a failed completion must not discard the live flow"
+        );
     }
 
     #[test]

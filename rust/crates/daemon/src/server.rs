@@ -471,7 +471,7 @@ mod tests {
                 mailslate_core::infra::db::pool::ReadPool::open(&db_path).expect("pool"),
             ),
             bus: mailslate_core::domain::events::EventBus::new(),
-            oauth: std::sync::Mutex::new(None),
+            oauth: Arc::new(std::sync::Mutex::new(None)),
             token_poster: Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),
             oauth_deadline: std::time::Duration::from_secs(5),
             sync: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
