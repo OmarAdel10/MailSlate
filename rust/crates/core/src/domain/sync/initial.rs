@@ -15,7 +15,9 @@ use crate::domain::events::EventBus;
 use crate::infra::db::writer::{LocationInline, WriteOp, WriterActor};
 use crate::infra::imap::ImapError;
 use crate::infra::imap::connect::Conn;
-use crate::infra::imap::mailbox::{fetch_envelope_chunk, list_mailboxes, select_mailbox};
+use crate::infra::imap::mailbox::{
+    EnvelopeRow, fetch_envelope_chunk, list_mailboxes, select_mailbox,
+};
 use crate::infra::mime;
 use async_imap::Session;
 use mailslate_protocol::message::Event;
@@ -92,21 +94,86 @@ fn flag_set(flags: &[String], name: &str) -> bool {
     flags.iter().any(|f| f == name)
 }
 
+/// Persists one fetched envelope batch as message + location rows.
+///
+/// Called once per fetch chunk so a mailbox's envelopes are written as
+/// they arrive instead of being buffered whole (a 100k-message
+/// mailbox is a 100-200 MB spike otherwise).
+fn write_envelope_rows(
+    writer: &WriterActor,
+    account_id: i64,
+    mailbox: &str,
+    rows: Vec<EnvelopeRow>,
+    now: i64,
+) -> Result<(), ImapError> {
+    for row in rows {
+        let header = row.header.unwrap_or_default();
+        let record = mime::parse_header(&header);
+        let dedupe_key = match record.message_id_hdr.as_deref() {
+            Some(id) => format!("mid:{id}"),
+            None => format!("imap:{}:{}", mailbox, row.uid.unwrap_or(0)),
+        };
+        let location = LocationInline {
+            mailbox_name: mailbox.to_string(),
+            uid: row.uid.unwrap_or(0),
+            seen: flag_set(&row.flags, "\\Seen"),
+            flagged: flag_set(&row.flags, "\\Flagged"),
+            answered: flag_set(&row.flags, "\\Answered"),
+            draft: flag_set(&row.flags, "\\Draft"),
+            deleted: flag_set(&row.flags, "\\Deleted"),
+            keywords_json: "[]".into(),
+            modseq: None,
+        };
+        let date_utc = mime::resolve_date_utc(row.internal_date, &record, now);
+        write(
+            writer,
+            WriteOp::MessageUpsert {
+                account_id,
+                dedupe_key,
+                message_id_hdr: record.message_id_hdr,
+                gmail_thread_id: None,
+                root_message_id: record.root_message_id,
+                subject_norm: mime::subject_norm(record.subject.as_deref()),
+                subject: record.subject,
+                from_json: record.from_json,
+                to_json: record.to_json,
+                cc_json: record.cc_json,
+                reply_to_json: record.reply_to_json,
+                date_utc: Some(date_utc),
+                size_bytes: row.size.map(i64::from),
+                snippet: None,
+                location: Some(location),
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Runs the full initial sync for one account over an authenticated
 /// session: discovery, cursor capture, envelope backfill (a single
 /// `1:*` fetch per mailbox — rows carry uids, no SEARCH round-trip),
 /// and a `sync_progress` event per completed mailbox.
+///
+/// `stopping` is polled between mailboxes and between fetch chunks so
+/// an account removed (or shut down) mid-sync bails out promptly
+/// instead of fetching for the full 300 s chunk deadline.
 pub(crate) async fn initial_sync(
     session: &mut Session<Conn>,
     writer: &WriterActor,
     bus: &EventBus,
     account_id: i64,
+    stopping: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<(), ImapError> {
     let mut mailboxes = timed("list mailboxes", STEP_TIMEOUT, list_mailboxes(session)).await?;
     mailboxes.sort_by_key(|m| sync_rank(kind_for(&m.name, m.special_use.as_deref())));
     let total = mailboxes.len();
 
     for (index, mailbox) in mailboxes.iter().enumerate() {
+        if stopping() {
+            // Removal/shutdown raced the sync: leave the remaining
+            // mailboxes untouched.
+            return Ok(());
+        }
         let kind = kind_for(&mailbox.name, mailbox.special_use.as_deref());
         let special_use = mailbox.special_use.clone();
         let name = mailbox.name.clone();
@@ -150,65 +217,40 @@ pub(crate) async fn initial_sync(
             },
         )?;
 
-        let rows = timed("envelope fetch", FETCH_TIMEOUT, async {
-            let mut all = Vec::new();
-            let max_uid = selected.uid_next.map(|n| n.saturating_sub(1)).unwrap_or(0);
-            if max_uid >= 1 {
-                // Chunked UID ranges: every chunk is its own bounded
-                // FETCH; a giant mailbox never stalls one request.
-                for start in (1..=max_uid).step_by(FETCH_CHUNK as usize) {
-                    let end = (start + FETCH_CHUNK - 1).min(max_uid);
-                    let chunk = fetch_envelope_chunk(session, &format!("{start}:{end}")).await?;
-                    all.extend(chunk);
-                }
-            } else {
-                // uid_next unavailable: one full-range fetch, the
-                // pre-chunking behavior.
-                all = fetch_envelope_chunk(session, "1:*").await?;
-            }
-            Ok(all)
-        })
-        .await?;
         let now = now_unix();
-        for row in rows {
-            let header = row.header.clone().unwrap_or_default();
-            let record = mime::parse_header(&header);
-            let dedupe_key = match record.message_id_hdr.as_deref() {
-                Some(id) => format!("mid:{id}"),
-                None => format!("imap:{}:{}", name, row.uid.unwrap_or(0)),
-            };
-            let flags = row.flags.clone();
-            let location = LocationInline {
-                mailbox_name: name.clone(),
-                uid: row.uid.unwrap_or(0),
-                seen: flag_set(&flags, "\\Seen"),
-                flagged: flag_set(&flags, "\\Flagged"),
-                answered: flag_set(&flags, "\\Answered"),
-                draft: flag_set(&flags, "\\Draft"),
-                deleted: flag_set(&flags, "\\Deleted"),
-                keywords_json: "[]".into(),
-                modseq: None,
-            };
-            write(
-                writer,
-                WriteOp::MessageUpsert {
-                    account_id,
-                    dedupe_key,
-                    message_id_hdr: record.message_id_hdr.clone(),
-                    gmail_thread_id: None,
-                    root_message_id: record.root_message_id.clone(),
-                    subject_norm: mime::subject_norm(record.subject.as_deref()),
-                    subject: record.subject.clone(),
-                    from_json: record.from_json.clone(),
-                    to_json: record.to_json.clone(),
-                    cc_json: record.cc_json.clone(),
-                    reply_to_json: record.reply_to_json.clone(),
-                    date_utc: Some(mime::resolve_date_utc(row.internal_date, &record, now)),
-                    size_bytes: row.size.map(i64::from),
-                    snippet: None,
-                    location: Some(location),
-                },
-            )?;
+        let max_uid = selected.uid_next.map(|n| n.saturating_sub(1)).unwrap_or(0);
+        if max_uid >= 1 {
+            // Chunked UID ranges: every chunk is its own bounded
+            // FETCH under its own deadline — a hung chunk fails
+            // alone instead of stalling the whole mailbox, and a
+            // retry restarts at the failed chunk. Each chunk is
+            // persisted before the next one is fetched, so a
+            // mailbox's envelopes are never buffered whole.
+            for start in (1..=max_uid).step_by(FETCH_CHUNK as usize) {
+                if stopping() {
+                    // Removal/shutdown raced the sync: bail out
+                    // without touching the remaining chunks.
+                    return Ok(());
+                }
+                let end = (start + FETCH_CHUNK - 1).min(max_uid);
+                let chunk = timed(
+                    "envelope fetch",
+                    FETCH_TIMEOUT,
+                    fetch_envelope_chunk(session, &format!("{start}:{end}")),
+                )
+                .await?;
+                write_envelope_rows(writer, account_id, &name, chunk, now)?;
+            }
+        } else {
+            // uid_next unavailable: one full-range fetch, the
+            // pre-chunking behavior.
+            let rows = timed(
+                "envelope fetch",
+                FETCH_TIMEOUT,
+                fetch_envelope_chunk(session, "1:*"),
+            )
+            .await?;
+            write_envelope_rows(writer, account_id, &name, rows, now)?;
         }
         write(writer, WriteOp::ThreadCountersRecompute { account_id })?;
 
@@ -296,6 +338,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stopped_sync_bails_before_the_next_mailbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = seeded_db(&dir);
+        let writer = crate::infra::db::writer::WriterActor::spawn(&db_path);
+
+        let port = spawn_fake(|tag: &str, command: &str| {
+            if command.starts_with("LOGIN") {
+                vec![format!("{tag} OK logged in")]
+            } else if command.starts_with("LIST") {
+                vec![
+                    "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                    "* LIST (\\HasNoChildren) \"/\" Sent".to_string(),
+                    format!("{tag} OK list done"),
+                ]
+            } else if command.starts_with("SELECT") {
+                vec![
+                    "* 1 EXISTS".to_string(),
+                    "* OK [UIDVALIDITY 100] UIDs valid".to_string(),
+                    "* OK [UIDNEXT 2] Predicted".to_string(),
+                    format!("{tag} OK select done"),
+                ]
+            } else if command.starts_with("UID FETCH") {
+                vec![
+                    fetch_line(1, false, 500, "stop-1", "Subject", ""),
+                    format!("{tag} OK fetch done"),
+                ]
+            } else {
+                vec![format!("{tag} OK")]
+            }
+        })
+        .await;
+
+        let mut session = fake_session(port).await;
+        let bus = crate::domain::events::EventBus::new();
+
+        // INBOX consumes two checks (mailbox top + its single fetch
+        // chunk); the third check lands on Sent's mailbox top and
+        // must stop the sync before Sent is touched.
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let stopping = || checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 2;
+        initial_sync(&mut session, &writer, &bus, 1, &stopping)
+            .await
+            .expect("a stopped sync completes without error");
+        writer.flush().expect("flush");
+        drop(session);
+
+        let conn = crate::infra::db::open_readonly(&db_path).expect("readonly");
+        let mailboxes: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM mailboxes WHERE account_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mailboxes, 1, "only INBOX may be upserted before the stop");
+        let messages: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM messages WHERE account_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(messages, 1, "the INBOX envelope must still be imported");
+    }
+
+    #[tokio::test]
     async fn initial_sync_skips_unselectable_mailboxes_and_keeps_going() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = seeded_db(&dir);
@@ -355,7 +463,7 @@ mod tests {
         let mut session = fake_session(port).await;
         let bus = crate::domain::events::EventBus::new();
 
-        initial_sync(&mut session, &writer, &bus, 1)
+        initial_sync(&mut session, &writer, &bus, 1, &|| false)
             .await
             .expect("one unselectable mailbox must not abort the sync");
         writer.flush().expect("flush");
@@ -434,7 +542,7 @@ mod tests {
         let bus = crate::domain::events::EventBus::new();
         let mut feed = bus.subscribe();
 
-        initial_sync(&mut session, &writer, &bus, 1)
+        initial_sync(&mut session, &writer, &bus, 1, &|| false)
             .await
             .expect("initial sync");
 
@@ -555,7 +663,7 @@ mod tests {
         let mut session = fake_session(port).await;
         let bus = crate::domain::events::EventBus::new();
 
-        initial_sync(&mut session, &writer, &bus, 1)
+        initial_sync(&mut session, &writer, &bus, 1, &|| false)
             .await
             .expect("initial sync");
         writer.flush().expect("flush");
@@ -629,7 +737,7 @@ mod tests {
 
         let mut session = fake_session(port).await;
         let bus = crate::domain::events::EventBus::new();
-        initial_sync(&mut session, &writer, &bus, 1)
+        initial_sync(&mut session, &writer, &bus, 1, &|| false)
             .await
             .expect("initial sync");
         writer.flush().expect("flush");

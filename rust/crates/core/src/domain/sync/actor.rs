@@ -54,6 +54,10 @@ pub struct AccountConfig {
 pub struct SyncHandle {
     tx: mpsc::Sender<SyncCmd>,
     state: Arc<Mutex<SyncState>>,
+    /// Flipped by [`SyncHandle::try_shutdown`] so an in-flight sync
+    /// bails out between mailboxes and fetch chunks instead of
+    /// running to completion for an account that was just removed.
+    stop: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SyncHandle {
@@ -68,8 +72,10 @@ impl SyncHandle {
         self.tx.try_send(SyncCmd::SyncNow).is_ok()
     }
 
-    /// Enqueues a shutdown request; false when the actor is gone.
+    /// Enqueues a shutdown request and flags any in-flight sync to
+    /// bail out; false when the actor is gone.
     pub fn try_shutdown(&self) -> bool {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         self.tx.try_send(SyncCmd::Shutdown).is_ok()
     }
 }
@@ -205,7 +211,12 @@ async fn run_account_cycle(
     rx: &mut mpsc::Receiver<SyncCmd>,
     set_state: &(dyn Fn(SyncState) + Send + Sync),
     backoff: &mut std::time::Duration,
+    stop: &std::sync::atomic::AtomicBool,
 ) -> CycleOutcome {
+    // Polled between mailboxes and fetch chunks: a removed account's
+    // in-flight sync must not keep fetching (and FK-failing writes)
+    // until the queued Shutdown is finally observed between cycles.
+    let stopping = || stop.load(std::sync::atomic::Ordering::Relaxed);
     set_state(SyncState::Connecting);
     let client = match tokio::time::timeout(
         IMAP_STEP_TIMEOUT,
@@ -275,7 +286,7 @@ async fn run_account_cycle(
     };
 
     set_state(SyncState::InitialSync);
-    if let Err(err) = initial_sync(&mut session, writer, bus, account.id).await {
+    if let Err(err) = initial_sync(&mut session, writer, bus, account.id, &stopping).await {
         let _ = tokio::time::timeout(LOGOUT_TIMEOUT, session.logout()).await;
         return CycleOutcome::Retry(err.to_string());
     }
@@ -288,7 +299,9 @@ async fn run_account_cycle(
         match rx.recv().await {
             Some(SyncCmd::SyncNow) => {
                 set_state(SyncState::Busy);
-                if let Err(err) = initial_sync(&mut session, writer, bus, account.id).await {
+                if let Err(err) =
+                    initial_sync(&mut session, writer, bus, account.id, &stopping).await
+                {
                     let _ = tokio::time::timeout(LOGOUT_TIMEOUT, session.logout()).await;
                     return CycleOutcome::Retry(err.to_string());
                 }
@@ -317,6 +330,8 @@ pub fn spawn_actor(
     let (tx, mut rx) = mpsc::channel(16);
     let state = Arc::new(Mutex::new(SyncState::Disconnected));
     let state_for_task = Arc::clone(&state);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_for_task = Arc::clone(&stop);
 
     tokio::spawn(async move {
         let set_state = |next: SyncState| {
@@ -338,6 +353,7 @@ pub fn spawn_actor(
                 &mut rx,
                 &set_state,
                 &mut backoff,
+                &stop_for_task,
             )
             .await
             {
@@ -365,7 +381,7 @@ pub fn spawn_actor(
         set_state(SyncState::Stopped);
     });
 
-    SyncHandle { tx, state }
+    SyncHandle { tx, state, stop }
 }
 
 #[cfg(test)]
@@ -645,6 +661,7 @@ mod tests {
             &mut rx,
             &set_state,
             &mut backoff,
+            &std::sync::atomic::AtomicBool::new(false),
         )
         .await;
 
