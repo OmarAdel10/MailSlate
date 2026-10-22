@@ -6,6 +6,45 @@ project (global `AGENTS.md` §4 and §13).
 
 ## Open
 
+- MAILSLATE-44 — M2: `restart_actor` spawns the replacement while the old
+  actor may still be mid-cycle, interleaving `account_status` events and
+  duplicating work; gate reconnect respawns on actor termination (await the
+  ack or check `current_state()`) (`rust/crates/daemon/src/dispatch.rs:495-517`).
+- MAILSLATE-45 — M2: re-sync never deletes vanished `message_locations`
+  and a recorded `uidvalidity` change is never acted on, so local membership
+  drifts from the server across `sync_now` runs; add expunge/UIDVALIDITY
+  handling (ties into MAILSLATE-36)
+  (`rust/crates/core/src/infra/db/writer.rs:399-419`).
+- MAILSLATE-46 — M2: a failed SELECT (including the 30s timeout) silently
+  skips a mailbox with no surfaced event; publish a `sync_progress` error
+  phase so the GUI can tell "empty" from "failed"
+  (`rust/crates/core/src/domain/sync/initial.rs:127-139`).
+- MAILSLATE-47 — M2: `ThreadCountersRecompute` runs after every mailbox
+  (O(mailboxes×threads)); recompute once after the mailbox loop
+  (`rust/crates/core/src/domain/sync/initial.rs:213`, op at
+  `rust/crates/core/src/infra/db/writer.rs:691-704`).
+- MAILSLATE-48 — M2: `add_imap_account`/`add_oauth_account` store the
+  secret under a freshly reserved id before the row write; a later DB
+  failure orphans the keyring entry — sweep unreferenced secrets at
+  startup (`rust/crates/core/src/domain/accounts.rs:99,145`).
+- MAILSLATE-49 — M2: dispatch handlers lock `ctx.sync`/`ctx.oauth` with
+  `.lock().expect` (11 sites); a panic while holding either poisons the
+  lock and every later dispatch panics its connection task — map poisoned
+  locks to bridge errors (`rust/crates/daemon/src/dispatch.rs`).
+- MAILSLATE-50 — M2: the IMAP/SMTP TLS connector hardcodes the webpki root
+  store, so the `Tls`/`StartTls` arms cannot be integration-tested against
+  a local fake CA; add a trust-store injection seam
+  (`rust/crates/core/src/infra/imap/tls.rs:17`).
+- MAILSLATE-51 — M2: minor test gaps in sync/writer/mime paths —
+  `refresh_oauth` failure sub-branches (`actor.rs:100-124`), reauth park
+  ignores SyncNow (`actor.rs:324-329`), event-stream garbage-frame recycle
+  (`events.rs:172-177`), `MessageUpsert` soft-fail and gmail fresh-INSERT
+  (`writer.rs:491-509,600-602`), probe `read_reply_line` EOF
+  (`probe.rs:160-163`), mailbox `flag_string` arms (`mailbox.rs:102-113`),
+  mime address-group flattening (`mime.rs:134-140`).
+- MAILSLATE-52 — M3: subject-only thread clustering merges unrelated
+  conversations that share a normalized subject; replace with JWZ threading
+  in the M3 slice (`rust/crates/core/src/infra/db/writer.rs:510-522`).
 - MAILSLATE-43 — M2: the account settings dialog offers 30d/90d/1y sync
   windows but not "all" (PRD F2.2) — the `update_account` wire carries a
   plain i64 where NULL means "unchanged", so the DB's NULL-everything state
@@ -109,3 +148,11 @@ gain logic):
 - `MigrationError::Version` arm —
   `rust/crates/core/src/infra/db/migrations.rs:27-28`.
 - `FrameError` Display strings — `rust/crates/protocol/src/framing.rs:31-42`.
+
+M2 accepted constraints (recorded by the round-3 QA review; no Plane item —
+revisit only if these gain decisions or logic):
+
+- The `id_token` email is read without JWT signature validation — acceptable
+  per OIDC §3.1.3.7 because the token arrives directly over TLS and is used
+  for display only; validate against the provider JWKS if it ever drives
+  decisions (`rust/crates/core/src/infra/oauth/grant.rs:123-135`).

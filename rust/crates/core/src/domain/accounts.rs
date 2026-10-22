@@ -85,7 +85,7 @@ pub enum AccountError {
 ///
 /// The DB write goes through the single-writer actor; the secret goes
 /// ONLY to the key store (ARCHITECTURE §12). If the key store fails,
-/// nothing is written to the database.
+/// no account row is written — only the reserved id counter advances.
 pub fn add_imap_account(
     keystore: &dyn KeyStore,
     writer: &WriterActor,
