@@ -23,6 +23,9 @@ CREATE TABLE accounts_v2 (
     archive_mailbox_id    INTEGER,
     created_at            INTEGER NOT NULL
 );
+-- Remediate legacy plaintext rows before narrowing the CHECK constraint.
+UPDATE accounts SET imap_security = 'starttls' WHERE imap_security = 'plaintext';
+UPDATE accounts SET smtp_security = 'starttls' WHERE smtp_security = 'plaintext';
 INSERT INTO accounts_v2 SELECT * FROM accounts;
 DROP TABLE accounts;
 ALTER TABLE accounts_v2 RENAME TO accounts;

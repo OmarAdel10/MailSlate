@@ -159,6 +159,16 @@ fn add_imap_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value,
 /// (USER_FLOW §3 steps 4-5).
 fn test_connection_dispatch(_ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
     let (draft, password) = conn_and_password(params)?;
+    // Plaintext is rejected at the test_connection boundary — credentials
+    // must never traverse cleartext TCP (CWE-319). Probe functions accept
+    // Plaintext for unit-test compatibility; the security gate is here.
+    if draft.imap_security == mailslate_core::domain::accounts::Security::Plaintext
+        || draft.smtp_security == mailslate_core::domain::accounts::Security::Plaintext
+    {
+        return Err(validation(
+            "plaintext security is not allowed: credentials sent in cleartext",
+        ));
+    }
     // The daemon runs a multi-thread runtime (main.rs), so blocking a worker
     // here is legal; each probe enforces its own timeout inside core. The two
     // probes run concurrently (tokio::join!) so a slow IMAP server cannot

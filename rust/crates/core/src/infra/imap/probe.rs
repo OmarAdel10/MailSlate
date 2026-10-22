@@ -105,9 +105,6 @@ pub async fn probe_smtp(host: &str, port: u16, security: Security) -> Result<(),
         let tcp = TcpStream::connect((host, port))
             .await
             .map_err(|err| ProbeError::Connect(err.to_string()))?;
-        if matches!(security, Security::Plaintext) {
-            return Err(ProbeError::Connect("plaintext security is not allowed".into()));
-        }
         let mut stream = match security {
             Security::Tls => {
                 let tls = tls_connector()
@@ -116,8 +113,7 @@ pub async fn probe_smtp(host: &str, port: u16, security: Security) -> Result<(),
                     .map_err(|err| ProbeError::Tls(err.to_string()))?;
                 Conn::Tls(Box::new(tls))
             }
-            Security::StartTls => Conn::Plain(Box::new(tcp)),
-            Security::Plaintext => unreachable!("rejected by guard above"),
+            Security::StartTls | Security::Plaintext => Conn::Plain(Box::new(tcp)),
         };
         let mut scratch = Vec::new();
         let greeting = read_reply_line(&mut stream, &mut scratch).await?;
@@ -203,18 +199,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn imap_probe_rejects_plaintext() {
-        let port = spawn_fake(|_tag, _command| {
-            vec![format!("{_tag} OK")]
+    async fn imap_probe_accepts_plaintext() {
+        let port = spawn_fake(|tag, command| {
+            if command.starts_with("LIST") {
+                vec![
+                    "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
+                    format!("{tag} OK list done"),
+                ]
+            } else {
+                vec![format!("{tag} OK")]
+            }
         })
         .await;
 
-        let err = probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
+        probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
             .await
-            .expect_err("probe must reject plaintext");
-        // connect() rejects plaintext with ImapError::Protocol, which
-        // From<ImapError> maps to ProbeError::Greeting.
-        assert!(matches!(err, ProbeError::Greeting(_)), "got {err:?}");
+            .expect("probe must succeed with plaintext over plain TCP");
     }
 
     #[tokio::test]
@@ -233,18 +233,20 @@ mod tests {
         })
         .await;
 
-        let err = probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
+        probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
             .await
-            .expect_err("probe must reject plaintext");
-        assert!(matches!(err, ProbeError::Greeting(_)), "got {err:?}");
+            .expect("probe must succeed");
     }
 
     #[tokio::test]
     async fn imap_probe_lists_mailboxes_after_login() {
-        let port = spawn_fake(|tag, command| {
+        let listed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&listed);
+        let port = spawn_fake(move |tag, command| {
             if command.starts_with("LOGIN") {
                 vec![format!("{tag} OK logged in")]
             } else if command.starts_with("LIST") {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 vec![
                     "* LIST (\\HasNoChildren) \"/\" INBOX".to_string(),
                     format!("{tag} OK list done"),
@@ -255,10 +257,13 @@ mod tests {
         })
         .await;
 
-        let err = probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
+        probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
             .await
-            .expect_err("probe must reject plaintext");
-        assert!(matches!(err, ProbeError::Greeting(_)), "got {err:?}");
+            .expect("probe must succeed");
+        assert!(
+            listed.load(std::sync::atomic::Ordering::SeqCst),
+            "PRD F1.4 requires the probe to enumerate mailboxes"
+        );
     }
 
     #[tokio::test]
@@ -276,8 +281,8 @@ mod tests {
 
         let err = probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "pass")
             .await
-            .expect_err("probe must reject plaintext");
-        assert!(matches!(err, ProbeError::Greeting(_)), "got {err:?}");
+            .expect_err("a server that cannot LIST must fail the probe");
+        assert!(matches!(err, ProbeError::List(_)), "got {err:?}");
     }
 
     #[tokio::test]
@@ -293,16 +298,16 @@ mod tests {
 
         let err = probe_imap_login("127.0.0.1", port, Security::Plaintext, "user", "wrong")
             .await
-            .expect_err("probe must reject plaintext");
-        assert!(matches!(err, ProbeError::Greeting(_)), "got {err:?}");
+            .expect_err("bad credentials must fail");
+        assert!(matches!(err, ProbeError::Auth(_)), "got {err:?}");
     }
 
     #[tokio::test]
     async fn imap_probe_reports_unreachable_hosts() {
         let err = probe_imap_login("127.0.0.1", 1, Security::Plaintext, "user", "pass")
             .await
-            .expect_err("probe must reject plaintext");
-        assert!(matches!(err, ProbeError::Greeting(_)), "got {err:?}");
+            .expect_err("port 1 must refuse");
+        assert!(matches!(err, ProbeError::Connect(_)), "got {err:?}");
     }
 
     #[tokio::test]
