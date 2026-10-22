@@ -20,6 +20,7 @@ use mailslate_core::infra::oauth::{OAuthError, tokens};
 use mailslate_protocol::message::Event;
 use mailslate_protocol::{BridgeError, ErrorKind, PROTOCOL_VERSION, PingResult, methods};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +52,10 @@ pub struct PendingAuth {
     /// `Some(account_id)` when the flow re-authorizes an existing
     /// account instead of creating a new one.
     pub reauth_account: Option<i64>,
+    /// Set to true when `abort_oauth_account_dispatch` is called, so
+    /// the in-flight waiter becomes a no-op instead of re-staging
+    /// tokens under `PENDING_ACCOUNT_ID`.
+    pub aborted: Arc<AtomicBool>,
 }
 
 /// State shared by every dispatched call: the single-writer handle,
@@ -360,7 +365,7 @@ fn start_flow(
         &pkce::challenge_for(&verifier),
     );
 
-    {
+    let abort_flag = {
         let mut session = ctx.oauth.lock().expect("oauth session lock");
         if session.is_some() {
             return Err(validation(
@@ -373,8 +378,10 @@ fn start_flow(
             state: state.clone(),
             redirect_uri: redirect_uri.clone(),
             reauth_account,
+            aborted: Arc::new(AtomicBool::new(false)),
         });
-    }
+        Arc::clone(&session.as_ref().expect("just inserted").aborted)
+    };
 
     ctx.bus.publish(Event::new(
         "oauth_url_ready",
@@ -394,6 +401,7 @@ fn start_flow(
             state,
             redirect_uri,
             reauth_account,
+            aborted: abort_flag,
         },
         tokio::runtime::Handle::try_current().ok(),
     );
@@ -408,6 +416,9 @@ struct OauthFlow {
     state: String,
     redirect_uri: String,
     reauth_account: Option<i64>,
+    /// Set by `abort_oauth_account_dispatch`; when true the waiter
+    /// becomes a no-op instead of re-staging tokens.
+    aborted: Arc<AtomicBool>,
 }
 
 /// Waits for the browser callback out-of-band: when it arrives the flow
@@ -428,6 +439,7 @@ fn spawn_oauth_waiter(
     let sync = Arc::clone(&ctx.sync);
     let session_slot = Arc::clone(&ctx.oauth);
     let deadline = ctx.oauth_deadline;
+    let aborted = Arc::clone(&flow.aborted);
     std::thread::spawn(move || {
         let OauthFlow {
             provider,
@@ -436,11 +448,18 @@ fn spawn_oauth_waiter(
             state,
             redirect_uri,
             reauth_account,
+            aborted: _,
         } = flow;
         let outcome: Result<Option<String>, String> = (|| {
             let (code, _) = waiter
                 .wait_for_code(&state, deadline)
                 .map_err(|err| err.to_string())?;
+            // Aborted by the wizard (back / timeout / retry): do not
+            // save staged tokens, do not publish oauth_completed — just
+            // release the session slot so a new flow can start.
+            if aborted.load(Ordering::SeqCst) {
+                return Ok(None);
+            }
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -465,7 +484,7 @@ fn spawn_oauth_waiter(
         })();
         let mut release_session = true;
         match outcome {
-            Ok(email) => match reauth_account {
+            Ok(Some(email)) => match reauth_account {
                 Some(account_id) => {
                     bus.publish(Event::new(
                         "oauth_reconnected",
@@ -502,6 +521,11 @@ fn spawn_oauth_waiter(
                     ));
                 }
             },
+            Ok(None) => {
+                // Aborted by the wizard (back / timeout / retry): session
+                // slot already cleared by `abort_oauth_account_dispatch`;
+                // nothing to publish, no staged tokens to clean up.
+            }
             Err(reason) => bus.publish(Event::new(
                 "oauth_failed",
                 json!({
@@ -593,6 +617,12 @@ fn restart_actor(
 /// new flow can start immediately instead of waiting for the daemon's
 /// deadline. Called from the wizard on back / timeout / retry.
 fn abort_oauth_account_dispatch(ctx: &DispatchCtx) -> Result<Value, BridgeError> {
+    // Mark the flow aborted so the in-flight waiter becomes a no-op
+    // instead of re-staging tokens under PENDING_ACCOUNT_ID on a late
+    // browser callback.
+    if let Some(pending) = ctx.oauth.lock().expect("oauth session lock").as_mut() {
+        pending.aborted.store(true, Ordering::SeqCst);
+    }
     // Release the session slot if one is pending.
     *ctx.oauth.lock().expect("oauth session lock") = None;
     // Drop any staged tokens so they don't orphan under PENDING_ACCOUNT_ID.
@@ -1323,6 +1353,7 @@ mod tests {
             state: "state".into(),
             redirect_uri: "http://127.0.0.1:1/callback".into(),
             reauth_account: None,
+            aborted: Arc::new(AtomicBool::new(false)),
         });
         tokens::save(
             ctx.keystore.as_ref(),
@@ -1543,6 +1574,7 @@ mod tests {
             state: "state".into(),
             redirect_uri: "http://127.0.0.1:1/callback".into(),
             reauth_account: Some(7),
+            aborted: Arc::new(AtomicBool::new(false)),
         });
 
         let err = dispatch(
@@ -1566,6 +1598,7 @@ mod tests {
             state: "state".into(),
             redirect_uri: "http://127.0.0.1:1/callback".into(),
             reauth_account: None,
+            aborted: Arc::new(AtomicBool::new(false)),
         });
 
         let err = dispatch(
