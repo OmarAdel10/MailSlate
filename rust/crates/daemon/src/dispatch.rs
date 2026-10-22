@@ -231,13 +231,29 @@ fn update_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, B
         Some(Value::String(color)) => Some(Some(color.clone())),
         Some(_) => return Err(validation("patch.color must be a string or null")),
     };
+    let sync_window_days = match patch.get("sync_window_days") {
+        None => None,
+        Some(Value::Null) => None,
+        Some(Value::Number(n)) => {
+            let v = n
+                .as_i64()
+                .ok_or_else(|| validation("patch.sync_window_days must be an integer"))?;
+            if !(1..=3650).contains(&v) {
+                return Err(validation(
+                    "patch.sync_window_days must be between 1 and 3650 days",
+                ));
+            }
+            Some(v)
+        }
+        Some(_) => return Err(validation("patch.sync_window_days must be an integer")),
+    };
     let parsed = AccountPatch {
         display_name: patch
             .get("display_name")
             .and_then(Value::as_str)
             .map(str::to_string),
         color,
-        sync_window_days: patch.get("sync_window_days").and_then(Value::as_i64),
+        sync_window_days,
     };
     blocking(|| update_account(&ctx.writer, account_id, parsed).map_err(account_error))?;
     Ok(json!({ "ok": true }))
@@ -599,14 +615,10 @@ fn complete_oauth_account_dispatch(
         .map_err(|err| BridgeError::new(ErrorKind::Internal, err.to_string()))?
         .ok_or_else(|| validation("oauth token snapshot missing from the keyring"))?;
 
-    // Every fallible check passed: consume the session now. The waiter
-    // never clears a wizard session, so the slot still holds ours.
-    ctx.oauth
-        .lock()
-        .expect("oauth session lock")
-        .take()
-        .expect("the wizard session cannot vanish before completion");
-
+    // Consume the session only after account creation succeeds. On
+    // completion failure the session is released so the flow can be
+    // retried, and the staged tokens are dropped so they don't orphan
+    // under PENDING_ACCOUNT_ID.
     let account_id = blocking(|| {
         add_oauth_account(
             ctx.keystore.as_ref(),
@@ -620,9 +632,24 @@ fn complete_oauth_account_dispatch(
             &staged,
         )
         .map_err(account_error)
-    })?;
-    ensure_sync_actor(ctx, account_id)?;
-    Ok(json!({ "account_id": account_id }))
+    });
+
+    match account_id {
+        Ok(account_id) => {
+            ctx.oauth
+                .lock()
+                .expect("oauth session lock")
+                .take()
+                .expect("the wizard session cannot vanish before completion");
+            ensure_sync_actor(ctx, account_id)?;
+            Ok(json!({ "account_id": account_id }))
+        }
+        Err(err) => {
+            let _ = ctx.oauth.lock().expect("oauth session lock").take();
+            let _ = tokens::delete(ctx.keystore.as_ref(), PENDING_ACCOUNT_ID);
+            Err(err)
+        }
+    }
 }
 
 /// Maps an OAuth failure onto the wire error vocabulary.
