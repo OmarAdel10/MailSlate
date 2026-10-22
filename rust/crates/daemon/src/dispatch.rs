@@ -138,8 +138,10 @@ fn conn_and_password(params: &Value) -> Result<(ImapAccountDraft, String), Bridg
 /// sync begins immediately (USER_FLOW §3 step 7).
 fn add_imap_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
     let (draft, password) = conn_and_password(params)?;
-    let account_id = add_imap_account(ctx.keystore.as_ref(), &ctx.writer, &draft, &password)
-        .map_err(account_error)?;
+    let account_id = blocking(|| {
+        add_imap_account(ctx.keystore.as_ref(), &ctx.writer, &draft, &password)
+            .map_err(account_error)
+    })?;
     ensure_sync_actor(ctx, account_id)?;
     Ok(json!({ "account_id": account_id }))
 }
@@ -181,6 +183,25 @@ fn probe_step(step: Result<(), ProbeError>) -> Value {
     }
 }
 
+/// Runs a database-flushing account op without parking an async
+/// worker: on the daemon's multi-thread runtime the closure moves off
+/// the worker thread, so a stalled fsync blocks one blocking-pool
+/// thread instead of a connection worker (writer flushes wait up to
+/// 30 s). Tests without a multi-thread runtime run it inline.
+fn blocking<T>(op: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if matches!(
+                handle.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            ) =>
+        {
+            tokio::task::block_in_place(op)
+        }
+        _ => op(),
+    }
+}
+
 /// Parses and applies `remove_account`, stopping the sync actor first
 /// (so the running task can no longer write rows for an account whose
 /// rows are about to disappear) and scrubbing the keyring after.
@@ -194,7 +215,9 @@ fn remove_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, B
     {
         handle.try_shutdown();
     }
-    remove_account(ctx.keystore.as_ref(), &ctx.writer, account_id).map_err(account_error)?;
+    blocking(|| {
+        remove_account(ctx.keystore.as_ref(), &ctx.writer, account_id).map_err(account_error)
+    })?;
     Ok(json!({ "ok": true }))
 }
 
@@ -216,7 +239,7 @@ fn update_account_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, B
         color,
         sync_window_days: patch.get("sync_window_days").and_then(Value::as_i64),
     };
-    update_account(&ctx.writer, account_id, parsed).map_err(account_error)?;
+    blocking(|| update_account(&ctx.writer, account_id, parsed).map_err(account_error))?;
     Ok(json!({ "ok": true }))
 }
 
@@ -584,18 +607,20 @@ fn complete_oauth_account_dispatch(
         .take()
         .expect("the wizard session cannot vanish before completion");
 
-    let account_id = add_oauth_account(
-        ctx.keystore.as_ref(),
-        &ctx.writer,
-        session.provider.db_name(),
-        &display_name,
-        &email,
-        color,
-        (profile.imap_host, profile.imap_port, profile.imap_security),
-        (profile.smtp_host, profile.smtp_port, profile.smtp_security),
-        &staged,
-    )
-    .map_err(account_error)?;
+    let account_id = blocking(|| {
+        add_oauth_account(
+            ctx.keystore.as_ref(),
+            &ctx.writer,
+            session.provider.db_name(),
+            &display_name,
+            &email,
+            color,
+            (profile.imap_host, profile.imap_port, profile.imap_security),
+            (profile.smtp_host, profile.smtp_port, profile.smtp_security),
+            &staged,
+        )
+        .map_err(account_error)
+    })?;
     ensure_sync_actor(ctx, account_id)?;
     Ok(json!({ "account_id": account_id }))
 }
