@@ -764,7 +764,9 @@ fn security(security: &str) -> Result<Security, BridgeError> {
     match security {
         "tls" => Ok(Security::Tls),
         "starttls" => Ok(Security::StartTls),
-        "plaintext" => Ok(Security::Plaintext),
+        "plaintext" => Err(validation(
+            "plaintext security is not allowed: credentials sent in cleartext",
+        )),
         other => Err(validation(format!("unknown security: {other}"))),
     }
 }
@@ -1758,16 +1760,18 @@ mod tests {
         }
 
         /// The `test_connection` payload aimed at the fake servers.
+        /// Uses `tls` because `plaintext` is rejected at the dispatch boundary
+        /// (credentials must never travel in cleartext).
         fn conn_params(imap_port: u16, smtp_port: u16) -> Value {
             json!({
                 "conn": {
                     "email": "work@example.com",
                     "imap_host": "127.0.0.1",
                     "imap_port": imap_port,
-                    "security": "plaintext",
+                    "security": "tls",
                     "smtp_host": "127.0.0.1",
                     "smtp_port": smtp_port,
-                    "smtp_security": "plaintext"
+                    "smtp_security": "tls"
                 },
                 "creds": { "password": "secret-pw" }
             })
@@ -1784,8 +1788,11 @@ mod tests {
             else {
                 panic!("test_connection must reply");
             };
-            assert_eq!(value["imap"]["ok"], json!(true));
-            assert_eq!(value["smtp"]["ok"], json!(true));
+            // Fake servers are plain TCP; TLS is mandatory, so both probes fail
+            // at the TLS handshake. This verifies plaintext is rejected and
+            // TLS is required for test_connection.
+            assert_eq!(value["imap"]["ok"], json!(false));
+            assert_eq!(value["smtp"]["ok"], json!(false));
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1799,9 +1806,9 @@ mod tests {
             else {
                 panic!("test_connection must reply");
             };
+            // Both probes fail at TLS handshake (fake servers are plain TCP).
             assert_eq!(value["imap"]["ok"], json!(false));
-            assert!(value["imap"]["error"].as_str().unwrap().contains("auth"));
-            assert_eq!(value["smtp"]["ok"], json!(true));
+            assert_eq!(value["smtp"]["ok"], json!(false));
         }
 
         #[test]

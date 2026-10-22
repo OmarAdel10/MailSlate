@@ -1,7 +1,6 @@
 /// Host presets for the Other IMAP wizard path (USER_FLOW §3 step 4).
 ///
-/// Security values are the daemon wire strings (`tls`, `starttls`,
-/// `plaintext`); the form labels map them to `SSL` / `STARTTLS`.
+/// Security values are the daemon wire strings (`tls`, `starttls`);
 class ImapPreset {
   const ImapPreset({
     required this.label,

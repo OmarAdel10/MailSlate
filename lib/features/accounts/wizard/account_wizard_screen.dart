@@ -391,11 +391,7 @@ class _ImapFormViewState extends State<_ImapFormView> {
     setState(() => _testedDraft = null);
   }
 
-  static const _securityChoices = {
-    'SSL': 'tls',
-    'STARTTLS': 'starttls',
-    'Plaintext': 'plaintext',
-  };
+  static const _securityChoices = {'SSL': 'tls', 'STARTTLS': 'starttls'};
 
   @override
   void dispose() {
