@@ -20,8 +20,8 @@ use mailslate_core::infra::oauth::{OAuthError, tokens};
 use mailslate_protocol::message::Event;
 use mailslate_protocol::{BridgeError, ErrorKind, PROTOCOL_VERSION, PingResult, methods};
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use mailslate_core::domain::events::EventBus;
@@ -109,9 +109,7 @@ pub fn dispatch(
         methods::COMPLETE_OAUTH_ACCOUNT => {
             complete_oauth_account_dispatch(ctx, params).map(Dispatched::Reply)
         }
-        methods::ABORT_OAUTH_ACCOUNT => {
-            abort_oauth_account_dispatch(ctx).map(Dispatched::Reply)
-        }
+        methods::ABORT_OAUTH_ACCOUNT => abort_oauth_account_dispatch(ctx).map(Dispatched::Reply),
         methods::SYNC_NOW => sync_now_dispatch(ctx, params).map(Dispatched::Reply),
         methods::GET_STATUS => get_status_dispatch(ctx).map(Dispatched::Reply),
         other => Err(BridgeError::new(

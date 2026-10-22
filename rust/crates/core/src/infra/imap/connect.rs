@@ -205,10 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn plaintext_connect_succeeds() {
-        let port = spawn_fake(|_tag, _command| {
-            vec![format!("{_tag} OK")]
-        })
-        .await;
+        let port = spawn_fake(|_tag, _command| vec![format!("{_tag} OK")]).await;
 
         let client = connect("127.0.0.1", port, Security::Plaintext)
             .await
@@ -218,10 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn plaintext_xoauth2_connect_succeeds() {
-        let port = spawn_fake(|_tag, _command| {
-            vec![format!("{_tag} OK")]
-        })
-        .await;
+        let port = spawn_fake(|_tag, _command| vec![format!("{_tag} OK")]).await;
 
         let client = connect("127.0.0.1", port, Security::Plaintext)
             .await

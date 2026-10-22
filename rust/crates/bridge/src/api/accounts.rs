@@ -157,7 +157,10 @@ pub async fn complete_oauth_account(
 /// (wizard back / timeout / retry).
 pub async fn abort_oauth_account() -> Result<(), DaemonError> {
     let mut client = connect().await?;
-    client.abort_oauth_account().await.map_err(DaemonError::from)?;
+    client
+        .abort_oauth_account()
+        .await
+        .map_err(DaemonError::from)?;
     Ok(())
 }
 
