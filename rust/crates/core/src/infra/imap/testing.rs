@@ -99,7 +99,7 @@ pub(crate) async fn spawn_fake_multi(
 /// A logged-in plaintext session against the wire fake: convenience for
 /// slices that only care about post-authentication commands.
 pub(crate) async fn fake_session(port: u16) -> Session<Conn> {
-    let client = connect("127.0.0.1", port, Security::Plaintext)
+    let client = connect("127.0.0.1", port, Security::StartTls)
         .await
         .expect("connect");
     login_password(client, "user", "pass").await.expect("login")

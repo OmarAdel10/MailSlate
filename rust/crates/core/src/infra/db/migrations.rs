@@ -14,11 +14,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "init",
-    sql: include_str!("migrations/0001_init.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "init",
+        sql: include_str!("migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "narrow_imap_smtp_security",
+        sql: include_str!("migrations/0002_narrow_imap_smtp_security.sql"),
+    },
+];
 
 /// Errors while running migrations.
 #[derive(Debug, thiserror::Error)]
@@ -106,14 +113,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut conn = open_rw(&dir.path().join(DB_FILE_NAME)).expect("open");
         let version = run(&mut conn).expect("migrate");
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         (dir, conn)
     }
 
     #[test]
     fn creates_schema_v1_and_is_idempotent() {
         let (_dir, mut conn) = migrated();
-        assert_eq!(schema_version(&conn).unwrap(), 1);
+        assert_eq!(schema_version(&conn).unwrap(), 2);
 
         let tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -127,7 +134,7 @@ mod tests {
         }
 
         // Re-running is a no-op.
-        assert_eq!(run(&mut conn).expect("re-run"), 1);
+        assert_eq!(run(&mut conn).expect("re-run"), 2);
     }
 
     #[test]
@@ -168,7 +175,7 @@ mod tests {
             err,
             MigrationError::TooNew {
                 found: 999,
-                supported: 1
+                supported: 2
             }
         ));
     }

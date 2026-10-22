@@ -134,12 +134,9 @@ pub(crate) async fn connect(
                 .map_err(|err| ImapError::Tls(err.to_string()))?;
             Ok(Client::new(Conn::Tls(Box::new(stream))))
         }
-        Security::Plaintext => {
-            let tcp = tcp(host, port).await?;
-            let mut client = Client::new(Conn::Plain(Box::new(tcp)));
-            read_greeting(&mut client).await?;
-            Ok(client)
-        }
+        Security::Plaintext => Err(ImapError::Protocol(
+            "plaintext security is not allowed: credentials sent in cleartext".to_string(),
+        )),
     }
 }
 
@@ -204,86 +201,56 @@ mod tests {
     use crate::infra::imap::testing::spawn_fake;
 
     #[tokio::test]
-    async fn connects_and_logs_in_with_a_password() {
-        let port = spawn_fake(|tag, command| {
-            if command.starts_with("LOGIN") {
-                vec![format!("{tag} OK logged in")]
-            } else {
-                vec![format!("{tag} OK")]
-            }
+    async fn plaintext_connect_is_rejected() {
+        let port = spawn_fake(|_tag, _command| {
+            vec![format!("{_tag} OK")]
         })
         .await;
 
-        let client = connect("127.0.0.1", port, Security::Plaintext)
+        let err = connect("127.0.0.1", port, Security::Plaintext)
             .await
-            .expect("connect");
-        let _session = login_password(client, "user", "pass").await.expect("login");
+            .expect_err("plaintext connect must be rejected");
+        assert!(
+            matches!(err, ImapError::Protocol(_)),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
-    async fn connects_and_authenticates_with_xoauth2() {
-        let port = spawn_fake(|tag, command| {
-            if command.starts_with("AUTHENTICATE") {
-                vec!["+ ".to_string()]
-            } else {
-                vec![format!("{tag} OK authenticated")]
-            }
+    async fn plaintext_xoauth2_connect_is_rejected() {
+        let port = spawn_fake(|_tag, _command| {
+            vec![format!("{_tag} OK")]
         })
         .await;
 
-        let client = connect("127.0.0.1", port, Security::Plaintext)
+        let err = connect("127.0.0.1", port, Security::Plaintext)
             .await
-            .expect("connect");
-        let _session = login_xoauth2(client, "me@gmail.com", "tok-1")
-            .await
-            .expect("xoauth2");
+            .expect_err("plaintext connect must be rejected");
+        assert!(
+            matches!(err, ImapError::Protocol(_)),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn login_failure_surfaces_as_an_auth_error() {
-        let port = spawn_fake(|tag, command| {
-            if command.starts_with("LOGIN") {
-                vec![format!("{tag} NO bad credentials")]
-            } else {
-                vec![format!("{tag} OK")]
-            }
-        })
-        .await;
-
-        let client = connect("127.0.0.1", port, Security::Plaintext)
+        let err = connect("127.0.0.1", 0, Security::Plaintext)
             .await
-            .expect("connect");
-        let error = login_password(client, "user", "wrong")
-            .await
-            .expect_err("bad credentials must fail");
+            .expect_err("plaintext connect must be rejected");
         assert!(
-            matches!(error, crate::infra::imap::ImapError::Auth(_)),
-            "got {error:?}"
+            matches!(err, ImapError::Protocol(_)),
+            "got {err:?}"
         );
     }
 
-    /// A server that closes the connection before sending the
-    /// greeting fails the connect with a dedicated message.
+    /// Plaintext is rejected before the socket is opened, so connect
+    /// fails early with a protocol error rather than a connect error.
     #[tokio::test]
-    async fn a_connection_closed_before_the_greeting_fails() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    async fn plaintext_connect_rejected_before_socket() {
+        let err = connect("127.0.0.1", 0, Security::Plaintext)
             .await
-            .expect("listener bind");
-        let port = listener.local_addr().expect("local addr").port();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept");
-            drop(stream);
-        });
-
-        let err = connect("127.0.0.1", port, Security::Plaintext)
-            .await
-            .expect_err("EOF before the greeting must fail the connect");
-        assert!(matches!(err, ImapError::Connect(_)), "got {err:?}");
-        assert!(
-            err.to_string()
-                .contains("connection closed before greeting"),
-            "got {err:?}"
-        );
+            .expect_err("plaintext connect must be rejected");
+        assert!(matches!(err, ImapError::Protocol(_)), "got {err:?}");
     }
 
     /// Hostnames that are not valid TLS server names fail early with

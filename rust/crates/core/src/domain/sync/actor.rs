@@ -396,7 +396,7 @@ mod tests {
         crate::infra::db::migrations::run(&mut conn).expect("migrate");
         conn.execute(
             "INSERT INTO accounts(id, display_name, email, provider, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, auth_type, created_at)
-             VALUES (1, 'Seed', 'seed@example.com', ?1, '127.0.0.1', 143, 'plaintext', 'smtp.example.com', 465, 'tls', ?2, 0)",
+             VALUES (1, 'Seed', 'seed@example.com', ?1, '127.0.0.1', 143, 'tls', 'smtp.example.com', 465, 'tls', ?2, 0)",
             [provider, auth_type],
         )
         .expect("seed account");
@@ -474,7 +474,7 @@ mod tests {
                 email: "seed@example.com".into(),
                 imap_host: "127.0.0.1".into(),
                 imap_port: port,
-                imap_security: crate::domain::accounts::Security::Plaintext,
+                imap_security: crate::domain::accounts::Security::StartTls,
                 auth_type: "password".into(),
                 provider: "imap".into(),
             },
@@ -754,7 +754,7 @@ mod tests {
                 email: "me@gmail.com".into(),
                 imap_host: "127.0.0.1".into(),
                 imap_port: port,
-                imap_security: crate::domain::accounts::Security::Plaintext,
+                imap_security: crate::domain::accounts::Security::StartTls,
                 auth_type: "oauth2".into(),
                 provider: "gmail".into(),
             },
@@ -789,7 +789,7 @@ mod tests {
             email: "seed@example.com".into(),
             imap_host: "127.0.0.1".into(),
             imap_port: port,
-            imap_security: crate::domain::accounts::Security::Plaintext,
+            imap_security: crate::domain::accounts::Security::StartTls,
             auth_type: "password".into(),
             provider: "imap".into(),
         }
@@ -801,7 +801,7 @@ mod tests {
             email: "me@gmail.com".into(),
             imap_host: "127.0.0.1".into(),
             imap_port: port,
-            imap_security: crate::domain::accounts::Security::Plaintext,
+            imap_security: crate::domain::accounts::Security::StartTls,
             auth_type: "oauth2".into(),
             provider: "gmail".into(),
         }
