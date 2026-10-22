@@ -432,6 +432,19 @@ mod tests {
                 methods::COMPLETE_OAUTH_ACCOUNT => {
                     Response::ok(request.id, json!({ "account_id": 11 }))
                 }
+                methods::START_REAUTH => {
+                    if request.params["account_id"] == json!(9) {
+                        Response::ok(
+                            request.id,
+                            json!({ "url": "https://accounts.example.test/reauth" }),
+                        )
+                    } else {
+                        Response::err(
+                            request.id,
+                            BridgeError::new(ErrorKind::Validation, "wrong account"),
+                        )
+                    }
+                }
                 methods::REMOVE_ACCOUNT | methods::UPDATE_ACCOUNT => {
                     Response::ok(request.id, json!({ "ok": true }))
                 }
@@ -486,6 +499,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply["account_id"], json!(11));
+    }
+
+    /// The reauth wrapper round-trips the account id and the url.
+    #[tokio::test]
+    async fn reauth_method_wrapper_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = start_fake_server(&dir);
+        let mut client = Client::connect(&socket).await.unwrap();
+
+        let reply = client.start_reauth(9).await.unwrap();
+        assert_eq!(reply["url"], json!("https://accounts.example.test/reauth"));
+
+        // The fake server only accepts account 9, proving the wrapper
+        // sends the id in the request params.
+        let err = client.start_reauth(1).await.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Validation);
     }
 
     /// sync_now / get_status wrappers round-trip the wire shapes.

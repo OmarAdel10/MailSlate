@@ -336,6 +336,8 @@ mod tests {
         MalformedConnection,
         /// `test_connection` reports the IMAP step as failed.
         ImapFails,
+        /// `start_reauth` replies without a `url`.
+        MalformedReauth,
     }
 
     /// The canned result payload for one request.
@@ -371,6 +373,7 @@ mod tests {
                 "smtp": { "ok": true },
             }),
             methods::START_OAUTH => json!({ "url": "https://accounts.example.test/auth" }),
+            methods::START_REAUTH => json!({ "url": "https://accounts.example.test/reauth" }),
             methods::COMPLETE_OAUTH_ACCOUNT => json!({ "account_id": 11 }),
             methods::UPDATE_ACCOUNT | methods::REMOVE_ACCOUNT => json!({ "ok": true }),
             _ => json!({}),
@@ -406,6 +409,9 @@ mod tests {
                                 "imap": { "ok": false, "error": "auth failed (rejected credentials)" },
                                 "smtp": { "ok": true },
                             })
+                        }
+                        Behavior::MalformedReauth if request.method == methods::START_REAUTH => {
+                            json!({ "nope": true })
                         }
                         _ => canned(&request.method),
                     };
@@ -589,6 +595,37 @@ mod tests {
         assert_eq!(url, "https://accounts.example.test/auth");
         let params = recorded_request(&recorded, methods::START_OAUTH);
         assert_eq!(params["provider"], json!("google"));
+
+        daemon.restore();
+    }
+
+    #[tokio::test]
+    async fn start_reauth_returns_the_reconnect_url() {
+        let _guard = ENV_LOCK.lock().await;
+        let recorded = Recorded::default();
+        let daemon = fake_daemon(&recorded, Behavior::Normal).await;
+
+        let url = start_reauth(7).await.expect("start reauth");
+
+        assert_eq!(url, "https://accounts.example.test/reauth");
+        let params = recorded_request(&recorded, methods::START_REAUTH);
+        assert_eq!(params["account_id"], json!(7));
+
+        daemon.restore();
+    }
+
+    #[tokio::test]
+    async fn start_reauth_without_a_url_is_internal() {
+        let _guard = ENV_LOCK.lock().await;
+        let recorded = Recorded::default();
+        let daemon = fake_daemon(&recorded, Behavior::MalformedReauth).await;
+
+        let error = start_reauth(7)
+            .await
+            .expect_err("malformed reply must fail");
+
+        assert_eq!(error.kind, "internal");
+        assert_eq!(error.message, "start_reauth reply carries no url");
 
         daemon.restore();
     }

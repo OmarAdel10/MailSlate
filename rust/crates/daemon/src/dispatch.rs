@@ -1546,6 +1546,96 @@ mod tests {
         );
     }
 
+    /// A non-string patch color is rejected before any write runs.
+    #[test]
+    fn update_account_rejects_a_non_string_color() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+
+        let err = dispatch(
+            &ctx,
+            methods::UPDATE_ACCOUNT,
+            &json!({ "account_id": 1, "patch": { "color": 42 } }),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Validation);
+        assert_eq!(err.message, "patch.color must be a string or null");
+    }
+
+    /// A keyring that rejects the secret must leave no account row
+    /// behind: the secret is stored before the row is written.
+    #[test]
+    fn add_imap_account_without_a_keyring_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx_with_doubles(
+            &dir,
+            Duration::from_secs(5),
+            Arc::new(FakePoster),
+            Arc::new(FailingKeyStore),
+        );
+
+        let err = dispatch(&ctx, methods::ADD_IMAP_ACCOUNT, &add_params()).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::Internal);
+        assert!(err.message.contains("key store rejected the secret"));
+        let conn = ctx.reader.acquire().unwrap();
+        let accounts = get_accounts(&conn).unwrap();
+        assert!(accounts.is_empty(), "no row may reference a lost secret");
+    }
+
+    /// When the post-reconnect actor respawn fails (here: every pooled
+    /// read connection is held), the flow reports the failure instead
+    /// of silently leaving the account parked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reauth_flow_reports_a_failed_actor_restart() {
+        let _env = OAUTH_ENV_LOCK.lock().unwrap();
+        let _id = ClientIdGuard::set("google-app-id");
+        let dir = tempfile::tempdir().unwrap();
+        let account_id = seed_oauth_account(&dir, "restart@example.com");
+        let ctx = test_ctx_with(&dir, Duration::from_secs(5));
+        let mut events = ctx.bus.subscribe();
+
+        dispatch(
+            &ctx,
+            methods::START_REAUTH,
+            &json!({ "account_id": account_id }),
+        )
+        .unwrap();
+        let _ready = wait_event(&mut events, "oauth_url_ready");
+
+        // Hold every pooled read connection so the respawn cannot
+        // re-read the account row.
+        let mut held = Vec::new();
+        for _ in 0..mailslate_core::infra::db::pool::READ_POOL_SIZE {
+            held.push(ctx.reader.acquire().unwrap());
+        }
+
+        deliver_oauth_callback(&ctx, "cd-rs");
+
+        let reconnected = wait_event(&mut events, "oauth_reconnected");
+        assert_eq!(reconnected.data["account"], json!(account_id));
+        let failed = wait_event(&mut events, "oauth_failed");
+        let reason = failed.data["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("could not restart"),
+            "restart failure must surface, got: {reason}"
+        );
+
+        drop(held);
+        // The refreshed tokens still landed under the account key.
+        let saved = ctx
+            .keystore
+            .get(&oauth_key(account_id))
+            .unwrap()
+            .expect("reconnected tokens");
+        assert!(saved.contains("at-1"), "saved snapshot: {saved}");
+        assert!(
+            !saved.contains("at-old"),
+            "the refresh must survive a failed respawn"
+        );
+    }
+
     #[test]
     fn sync_now_without_an_actor_is_not_found() {
         let dir = tempfile::tempdir().unwrap();
