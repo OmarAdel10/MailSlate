@@ -42,6 +42,12 @@ project (global `AGENTS.md` §4 and §13).
   (`writer.rs:491-509,600-602`), probe `read_reply_line` EOF
   (`probe.rs:160-163`), mailbox `flag_string` arms (`mailbox.rs:102-113`),
   mime address-group flattening (`mime.rs:134-140`).
+- MAILSLATE-53 — M2: the accept loop enforces MAX_CONNECTIONS=8 with same-uid
+  slot accounting but has no per-connection read timeout or idle cutoff, so a
+  same-uid peer can exhaust slots (resource exhaustion, CWE-400); harden
+  accept-loop slot lifecycle before M2 widens the surface. Pre-existing code,
+  not introduced by M2 — track only, do not fix in this branch
+  (`rust/crates/daemon/src/server.rs:30`).
 - MAILSLATE-52 — M3: subject-only thread clustering merges unrelated
   conversations that share a normalized subject; replace with JWZ threading
   in the M3 slice (`rust/crates/core/src/infra/db/writer.rs:510-522`).
