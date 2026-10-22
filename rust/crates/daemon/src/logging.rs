@@ -27,7 +27,7 @@ pub struct LoggingGuard(#[allow(dead_code)] tracing_appender::non_blocking::Work
 /// Initializes tracing: stderr plus `daemon.log` in `logs_dir` (daily
 /// rotation, seven files kept).
 pub fn init(logs_dir: &Path) -> Result<LoggingGuard, LoggingError> {
-    std::fs::create_dir_all(logs_dir)?;
+    crate::secure_dir(logs_dir)?;
     let file = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("daemon")

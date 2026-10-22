@@ -7,6 +7,39 @@
 
 mod dispatch;
 mod logging;
+
+/// Creates `path` and restricts it to this user (0700): the data dir
+/// holds the plaintext-by-design mail database (ADR 9) and the logs dir
+/// rotated mail contents, so other local accounts must not read them
+/// even where the home dir permits traversal. Non-unix platforms keep
+/// the platform defaults.
+#[cfg(unix)]
+fn secure_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_dir(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
+#[cfg(all(test, unix))]
+mod secure_dir_tests {
+    use super::secure_dir;
+
+    #[test]
+    fn secure_dir_restricts_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("mailslate-data");
+        secure_dir(&target).unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+}
 mod server;
 
 use std::process::ExitCode;
@@ -62,7 +95,7 @@ fn main() -> ExitCode {
 #[cfg(unix)]
 fn run() -> Result<(), ServerError> {
     let data_dir = paths::data_dir();
-    std::fs::create_dir_all(&data_dir)?;
+    secure_dir(&data_dir)?;
     let _logs = logging::init(&paths::logs_dir())?;
 
     let db_path = paths::db_path();
