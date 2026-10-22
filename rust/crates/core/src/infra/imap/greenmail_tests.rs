@@ -96,7 +96,7 @@ async fn adapter_drives_a_real_greenmail_server() {
     let _server = spawn_server();
     wait_ready();
 
-    let client = connect::connect("127.0.0.1", IMAP_PORT, Security::StartTls)
+    let client = connect::connect("127.0.0.1", IMAP_PORT, Security::Plaintext)
         .await
         .expect("connect to greenmail");
     let mut session = connect::login_password(client, USER, PASSWORD)
