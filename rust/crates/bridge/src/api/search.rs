@@ -100,11 +100,11 @@ fn internal(message: impl Into<String>) -> DaemonError {
 mod tests {
     use super::*;
     use crate::api::system::tests::ENV_LOCK;
-    use mailslate_protocol::methods;
-    use serde_json::json;
     use mailslate_protocol::async_io::{read_json_frame_async, write_json_frame_async};
     use mailslate_protocol::message::{Request, Response};
+    use mailslate_protocol::methods;
     use mailslate_protocol::{BridgeError, ErrorKind, PROTOCOL_VERSION};
+    use serde_json::json;
     use std::sync::{Arc, Mutex};
     use tokio::net::UnixListener;
 
