@@ -22,7 +22,10 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustls = { version = "0.23", features = ["ring"] }
 serde_json = "1"
 sha2 = "0.10"
+hex = "0.4"
 thiserror = "2.0.21"
+# HTML sanitizer for reader rendering: allow-list style, no JS/plugins (ARCHITECTURE §7 reader path).
+ammonia = "4"
 tiny_http = "0.12"
 # `macros` backs `tokio::select!` in the event-stream loop; it must be a
 # main feature (not just dev) because flutter_rust_bridge codegen expands
