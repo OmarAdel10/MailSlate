@@ -247,6 +247,16 @@ impl Client {
         self.request(methods::GET_STATUS, json!({})).await
     }
 
+    /// Full-text search across one account's messages; replies with
+    /// `{ messages: [{ id, account_id, subject, snippet }], total }`.
+    pub async fn search(&mut self, account_id: i64, query: &str) -> Result<Value, BridgeError> {
+        self.request(
+            methods::SEARCH,
+            json!({ "account_id": account_id, "query": query }),
+        )
+        .await
+    }
+
     /// Overrides the per-request timeout; tests use short values.
     #[cfg(test)]
     pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {

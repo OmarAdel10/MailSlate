@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/core/failures/failures.dart';
+import 'package:mailslate/src/rust/api/search.dart';
 import 'package:mailslate/src/rust/api/system.dart';
 import 'package:mailslate/src/rust/frb_generated.dart';
 
@@ -182,6 +183,18 @@ class FakeRustLibApi extends RustLibApi {
       throw failure;
     }
     abortCalled = true;
+  }
+
+  @override
+  Future<SearchResult> crateApiSearchSearch({
+    required int accountId,
+    required String query,
+  }) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    return const SearchResult(messages: [], total: 0);
   }
 
   @override

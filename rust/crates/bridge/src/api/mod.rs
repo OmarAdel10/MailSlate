@@ -4,4 +4,5 @@
 //! a Dart function in `lib/src/rust/` after codegen.
 
 pub mod accounts;
+pub mod search;
 pub mod system;

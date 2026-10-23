@@ -1,0 +1,384 @@
+//! Full-text search query builder (ARCHITECTURE.md §3.1, §7.3; PRD F7).
+//!
+//! Parses the search syntax subset — `from:/to:/subject:/in:/tag:/`
+//! `is:unread:/is:starred:/has:attachment` plus free text — into one
+//! FTS5 `MATCH` expression plus a list of parameterized SQL `WHERE`
+//! clauses. Everything from the raw query string is bound as a
+//! parameter; nothing is interpolated into SQL.
+
+/// One parsed search request: the FTS5 `MATCH` expression and the
+/// account-scoped `WHERE` clauses that refine it.
+#[derive(Debug, Clone, Default)]
+pub struct SearchQuery {
+    /// The FTS5 `MATCH` expression (prefix-matched free text plus
+    /// column-scoped field terms), empty for `WHERE`-only filtering.
+    pub match_expr: String,
+    /// SQL `WHERE` fragments (without the leading `WHERE`), each
+    /// parameterized with `?N` using 1-based global parameter numbers.
+    pub where_clauses: Vec<String>,
+    /// Bound parameter values in `where_clauses` order.
+    pub params: Vec<String>,
+    /// Limit applied to the result page.
+    pub limit: u32,
+}
+
+/// A single result row from `messages_fts` joined against `messages`.
+#[derive(Debug, Clone)]
+pub struct MessageHit {
+    pub message_id: i64,
+    pub account_id: i64,
+    pub subject: Option<String>,
+    pub snippet: Option<String>,
+}
+
+/// Parses `query` into [`SearchQuery`].
+///
+/// Free text is split on whitespace; each term becomes a quoted prefix
+/// expression (`'term*'`). Phrases in double quotes become a single
+/// quoted expression. Field prefixes map to FTS5 column-scoped
+/// terms:
+///   - `from:`/`to:`/`subject:` → `from_text:`/`to_text:`/`subject:` in
+///     `match_expr`
+///   - `tag:` → a `WHERE` clause on `message_tags`/`tags`
+///   - `in:` → a `WHERE` clause on `message_locations`/`mailboxes` `kind`
+///   - `is:unread` → `seen = 0` on `message_locations`
+///   - `is:starred` → `flagged = 1` on `message_locations`
+///   - `has:attachment` → `has_attachments = 1` on `messages`
+///
+/// An empty query returns the default: match everything, no `WHERE`.
+pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(SearchQuery {
+            match_expr: String::new(),
+            where_clauses: Vec::new(),
+            params: Vec::new(),
+            limit: 50,
+        });
+    }
+
+    let tokens = tokenize(trimmed)?;
+
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    let mut match_terms: Vec<String> = Vec::new();
+    for token in &tokens {
+        // Split `field:value` on the first `:`; free text has no `:`.
+        let (field, value) = match token.find(':') {
+            Some(colon) if colon > 0 => (&token[..colon], &token[colon + 1..]),
+            _ => ("", token.as_str()),
+        };
+        if field.is_empty() {
+            // A trailing colon on free text (e.g. `:` alone) is not a field.
+            if token.ends_with(':') {
+                return Err(SearchError::UnknownField(token.clone()));
+            }
+            match_terms.push(format!("{}*", escape_fts(token)));
+            continue;
+        }
+        // Known fields consume their value; anything else is an error.
+        let Some(value) = (!value.is_empty()).then_some(value) else {
+            return Err(SearchError::MissingArgument(field.to_string()));
+        };
+        match field {
+            "from" => {
+                match_terms.push(format!("from_text:{}", escape_fts(value)));
+            }
+            "to" => {
+                match_terms.push(format!("to_text:{}", escape_fts(value)));
+            }
+            "subject" => {
+                match_terms.push(format!("subject:{}", escape_fts(value)));
+            }
+            "tag" => {
+                clauses.push(
+                    "EXISTS (SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id \
+                     WHERE mt.message_id = messages.id AND t.name = ?)"
+                        .to_string(),
+                );
+                params.push(value.to_string());
+            }
+            "in" => {
+                clauses.push(
+                    "EXISTS (SELECT 1 FROM message_locations ml JOIN mailboxes mb \
+                     ON mb.id = ml.mailbox_id WHERE ml.message_id = messages.id AND mb.kind = ?)"
+                        .to_string(),
+                );
+                params.push(value.to_string());
+            }
+            "is" => match value {
+                "unread" => clauses.push(
+                    "EXISTS (SELECT 1 FROM message_locations ml \
+                     WHERE ml.message_id = messages.id AND ml.seen = 0 AND NOT ml.deleted)"
+                        .to_string(),
+                ),
+                "starred" => clauses.push(
+                    "EXISTS (SELECT 1 FROM message_locations ml \
+                     WHERE ml.message_id = messages.id AND ml.flagged = 1 AND NOT ml.deleted)"
+                        .to_string(),
+                ),
+                other => return Err(SearchError::UnknownField(format!("is:{other}"))),
+            },
+            "has" => match value {
+                "attachment" => clauses.push("messages.has_attachments = 1".to_string()),
+                other => return Err(SearchError::UnknownField(format!("has:{other}"))),
+            },
+            _ => return Err(SearchError::UnknownField(format!("{field}:{value}"))),
+        }
+    }
+
+    let match_expr = match_terms.join(" ");
+
+    Ok(SearchQuery {
+        match_expr,
+        where_clauses: clauses,
+        params,
+        limit: 50,
+    })
+}
+
+/// The raw SQL that runs against `messages_fts` (external-content
+/// table) joined to `messages` for the account scope and the hit row.
+///
+/// The base ends at the `WHERE m.account_id = ?` clause; callers append
+/// `AND ...` fragments for `WHERE` clauses and an optional `AND
+/// messages_fts MATCH ?`, then `ORDER BY ... LIMIT ?`. Parameters are
+/// bound positionally via [`rusqlite::params_from_iter`].
+pub fn search_sql_base() -> &'static str {
+    "SELECT m.id, m.account_id, m.subject, NULL as snippet \
+     FROM messages_fts \
+     JOIN messages m ON m.id = messages_fts.rowid \
+     WHERE m.account_id = ?"
+}
+
+/// Runs [`parse`] then `search_sql()` and returns the hits. HTML
+/// snippets are sanitized through [`sanitize`] before shipping.
+pub fn search(
+    conn: &rusqlite::Connection,
+    account_id: i64,
+    query: &str,
+) -> Result<Vec<MessageHit>, SearchError> {
+    let SearchQuery {
+        match_expr,
+        where_clauses,
+        params,
+        limit,
+    } = parse(query)?;
+
+    let mut sql = search_sql_base().to_string();
+    for clause in &where_clauses {
+        sql.push_str(" AND ");
+        sql.push_str(clause);
+    }
+    if !match_expr.is_empty() {
+        sql.push_str(" AND messages_fts MATCH ?");
+    }
+    sql.push_str(" ORDER BY bm25(messages_fts, 0, 5.0, 2.0, 1.0, 1.0) LIMIT ?");
+
+    let mut binds: Vec<Bind> = Vec::with_capacity(2 + where_clauses.len());
+    binds.push(Bind::I64(account_id));
+    for p in &params {
+        binds.push(Bind::Str(p.clone()));
+    }
+    if !match_expr.is_empty() {
+        binds.push(Bind::Str(match_expr.clone()));
+    }
+    binds.push(Bind::I64(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+        Ok(MessageHit {
+            message_id: row.get(0)?,
+            account_id: row.get(1)?,
+            subject: row.get(2)?,
+            snippet: row.get(3)?,
+        })
+    })?;
+
+    let mut hits: Vec<MessageHit> = Vec::new();
+    for hit in rows {
+        hits.push(hit.expect("row maps"));
+    }
+
+    Ok(hits)
+}
+
+/// Splits `input` into whitespace-separated tokens, honoring double
+/// quotes for phrases. Returns [`SearchError::UnterminatedPhrase`] when
+/// an opening quote has no matching close.
+fn tokenize(input: &str) -> Result<Vec<String>, SearchError> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut tokens: Vec<String> = Vec::new();
+    let mut pos = 0;
+    while pos < chars.len() {
+        // Skip whitespace.
+        while pos < chars.len() && chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        if pos >= chars.len() {
+            break;
+        }
+        if chars[pos] == '"' {
+            pos += 1; // consume opening quote
+            let mut buf = String::new();
+            let mut closed = false;
+            while pos < chars.len() {
+                if chars[pos] == '"' {
+                    pos += 1;
+                    closed = true;
+                    break;
+                }
+                buf.push(chars[pos]);
+                pos += 1;
+            }
+            if !closed {
+                return Err(SearchError::UnterminatedPhrase);
+            }
+            tokens.push(buf);
+        } else {
+            let mut buf = String::new();
+            while pos < chars.len() && !chars[pos].is_whitespace() && chars[pos] != '"' {
+                buf.push(chars[pos]);
+                pos += 1;
+            }
+            tokens.push(buf);
+        }
+    }
+    Ok(tokens)
+}
+
+/// Escapes FTS5 special characters so a user value cannot change the
+/// shape of a `MATCH` expression. Values containing special characters
+/// are wrapped in double quotes; internal quotes are doubled. Bare
+/// alphanumeric values pass through unchanged.
+fn escape_fts(value: &str) -> String {
+    const SPECIAL: &[char] = &[
+        ':', ' ', '(', ')', '"', '*', '^', '-', '+', '<', '>', '~', '/', '\\', '[', ']', '{', '}',
+        '|',
+    ];
+    if !value.chars().any(|c| SPECIAL.contains(&c)) {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        if c == '"' {
+            out.push('"');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// A dynamically-bound query parameter: rusqlite only binds one concrete
+/// type per `?N`, so `account_id` (i64) and `params` (String) are
+/// unified here.
+enum Bind {
+    Str(String),
+    I64(i64),
+}
+
+impl rusqlite::types::ToSql for Bind {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>, rusqlite::Error> {
+        match self {
+            Bind::Str(s) => Ok(rusqlite::types::ToSqlOutput::Owned(
+                rusqlite::types::Value::Text(s.clone()),
+            )),
+            Bind::I64(n) => Ok(rusqlite::types::ToSqlOutput::Owned(
+                rusqlite::types::Value::Integer(*n),
+            )),
+        }
+    }
+}
+
+/// Errors while parsing or running a search.
+#[derive(Debug, thiserror::Error)]
+pub enum SearchError {
+    #[error("unknown search field: {0}")]
+    UnknownField(String),
+    #[error("missing argument for field: {0}")]
+    MissingArgument(String),
+    #[error("unterminated quoted phrase")]
+    UnterminatedPhrase,
+    #[error("sqlite: {0}")]
+    Storage(#[from] rusqlite::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_query_matches_everything() {
+        let q = parse("").unwrap();
+        assert_eq!(q.match_expr, "");
+        assert!(q.where_clauses.is_empty());
+        assert_eq!(q.limit, 50);
+    }
+
+    #[test]
+    fn free_text_becomes_prefix_terms() {
+        let q = parse("hello world").unwrap();
+        assert_eq!(q.match_expr, "hello* world*");
+        assert!(q.where_clauses.is_empty());
+    }
+
+    #[test]
+    fn quoted_phrase_is_one_term() {
+        let q = parse("\"budgets look fine\"").unwrap();
+        assert_eq!(q.match_expr, "\"budgets look fine\"*");
+    }
+
+    #[test]
+    fn field_prefixes_map_to_match_terms() {
+        let q = parse("from:ana to:bo subject:report").unwrap();
+        assert_eq!(q.match_expr, "from_text:ana to_text:bo subject:report");
+        assert!(q.where_clauses.is_empty());
+    }
+
+    #[test]
+    fn tag_in_is_flags_are_where_clauses() {
+        let q = parse("tag:invoices in:inbox is:unread is:starred has:attachment").unwrap();
+        assert_eq!(q.match_expr, "");
+        assert_eq!(q.where_clauses.len(), 5);
+        assert_eq!(q.params.len(), 2);
+    }
+
+    #[test]
+    fn free_text_with_fields_both_apply() {
+        let q = parse("budgets from:ana").unwrap();
+        assert_eq!(q.match_expr, "budgets* from_text:ana");
+        assert_eq!(q.where_clauses.len(), 0);
+    }
+
+    #[test]
+    fn unknown_field_is_an_error() {
+        let err = parse("cc:ana").unwrap_err();
+        assert!(matches!(err, SearchError::UnknownField(_)));
+    }
+
+    #[test]
+    fn missing_argument_is_an_error() {
+        let err = parse("from:").unwrap_err();
+        assert!(matches!(err, SearchError::MissingArgument(_)));
+    }
+
+    #[test]
+    fn unterminated_phrase_is_an_error() {
+        let err = parse("\"unclosed").unwrap_err();
+        assert!(matches!(err, SearchError::UnterminatedPhrase));
+    }
+
+    #[test]
+    fn fts_special_chars_are_escaped() {
+        let q = parse("from:john.doe+spam@example.com").unwrap();
+        assert_eq!(q.match_expr, "from_text:\"john.doe+spam@example.com\"");
+    }
+
+    #[test]
+    fn phrase_with_quotes_strips_them() {
+        let q = parse("\"hello world\" from:boss").unwrap();
+        assert_eq!(q.match_expr, "\"hello world\"* from_text:boss");
+    }
+}
