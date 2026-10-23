@@ -54,3 +54,11 @@ pub const GET_STATUS: &str = "get_status";
 /// Full-text search across all messages of one account (M3 F7); the
 /// daemon replies with `{ messages: [...], total: n }`.
 pub const SEARCH: &str = "search";
+
+/// Lists one account's threads newest-first (M3 F3.3); the daemon
+/// replies with `{ threads: [...], total: n }`.
+pub const GET_THREADS: &str = "get_threads";
+
+/// Lists one thread's messages newest-first (M3 F3.4); the daemon
+/// replies with `{ messages: [...], total: n }`.
+pub const GET_THREAD_MESSAGES: &str = "get_thread_messages";

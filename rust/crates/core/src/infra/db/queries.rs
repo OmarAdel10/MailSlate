@@ -78,6 +78,75 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadRow> {
     })
 }
 
+/// One row of the thread message projection.
+#[derive(Debug, PartialEq)]
+pub struct MessageRow {
+    pub id: i64,
+    pub subject: Option<String>,
+    pub from_json: Option<String>,
+    pub date_utc: Option<i64>,
+    pub snippet: Option<String>,
+    pub has_attachments: bool,
+    pub body_state: String,
+}
+
+/// Lists one thread's messages newest-first with keyset pagination.
+/// `cursor = None` starts the first page; otherwise rows strictly
+/// after the cursor's position are returned. Never uses `OFFSET`.
+pub fn messages_in_thread(
+    conn: &Connection,
+    thread_id: i64,
+    limit: u32,
+    cursor: Option<ThreadCursor>,
+) -> rusqlite::Result<Vec<MessageRow>> {
+    match cursor {
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT id, subject, from_json, date_utc, snippet,
+                        has_attachments, body_state
+                 FROM messages
+                 WHERE thread_id = ?1
+                 ORDER BY date_utc DESC, id DESC
+                 LIMIT ?2",
+            )?;
+            collect_messages(stmt.query_map([thread_id, limit as i64], map_message_row)?)
+        }
+        Some(cursor) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, subject, from_json, date_utc, snippet,
+                        has_attachments, body_state
+                 FROM messages
+                 WHERE thread_id = ?1
+                   AND (date_utc < ?2 OR (date_utc = ?2 AND id < ?3))
+                 ORDER BY date_utc DESC, id DESC
+                 LIMIT ?4",
+            )?;
+            collect_messages(stmt.query_map(
+                rusqlite::params![thread_id, cursor.last_date, cursor.thread_id, limit as i64],
+                map_message_row,
+            )?)
+        }
+    }
+}
+
+fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
+    Ok(MessageRow {
+        id: row.get(0)?,
+        subject: row.get(1)?,
+        from_json: row.get(2)?,
+        date_utc: row.get(3)?,
+        snippet: row.get(4)?,
+        has_attachments: row.get(5)?,
+        body_state: row.get(6)?,
+    })
+}
+
+fn collect_messages(
+    iterator: impl Iterator<Item = rusqlite::Result<MessageRow>>,
+) -> rusqlite::Result<Vec<MessageRow>> {
+    iterator.collect()
+}
+
 fn collect(
     iterator: impl Iterator<Item = rusqlite::Result<ThreadRow>>,
 ) -> rusqlite::Result<Vec<ThreadRow>> {
@@ -132,6 +201,19 @@ mod tests {
             [],
         )
         .expect("seed tie b");
+        // Seed messages for thread 1000 (newest-first by date_utc desc).
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject,
+                                      from_json, date_utc, snippet,
+                                      has_attachments, body_state, thread_id)
+                 VALUES (?1, 42, ?2, 'Thread subject',
+                         '[{\"name\":\"Alice\",\"address\":\"alice@example.com\"}]',
+                         ?3, 'Snippet for message', 0, 'full', 1000)",
+                rusqlite::params![2000 + i, format!("msg-1000-{i}"), 5000 - i as i64],
+            )
+            .expect("seed message");
+        }
         (dir, conn)
     }
 
@@ -191,5 +273,43 @@ mod tests {
         let page = threads_page(&conn, 42, 50, None).expect("query");
         assert!(page.iter().all(|r| r.account_id == 42));
         assert_eq!(page.len(), 9);
+    }
+
+    /// messages_in_thread returns the thread's messages newest-first.
+    #[test]
+    fn messages_in_thread_lists_newest_first() {
+        let (_dir, conn) = seeded_db();
+        let page = messages_in_thread(&conn, 1000, 10, None).expect("query");
+        assert_eq!(page.len(), 3);
+        assert_eq!(page[0].id, 2000);
+        assert_eq!(page[1].id, 2001);
+        assert_eq!(page[2].id, 2002);
+    }
+
+    /// messages_in_thread pages through the keyset cursor without
+    /// overlap or repeats.
+    #[test]
+    fn messages_in_thread_pages_without_overlap() {
+        let (_dir, conn) = seeded_db();
+        let first = messages_in_thread(&conn, 1000, 2, None).expect("page 1");
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].id, 2000);
+        assert_eq!(first[1].id, 2001);
+        let cursor = ThreadCursor {
+            last_date: first[1].date_utc.expect("seeded date"),
+            thread_id: first[1].id,
+        };
+        let second = messages_in_thread(&conn, 1000, 2, Some(cursor)).expect("page 2");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, 2002);
+    }
+
+    /// messages_in_thread returns an empty page for a thread with no
+    /// messages and for a nonexistent thread.
+    #[test]
+    fn messages_in_thread_empty_for_unknown_thread() {
+        let (_dir, conn) = seeded_db();
+        let page = messages_in_thread(&conn, 9999, 10, None).expect("query");
+        assert!(page.is_empty());
     }
 }
