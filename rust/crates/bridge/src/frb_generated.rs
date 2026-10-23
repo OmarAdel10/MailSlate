@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1619135192;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 200457607;
 
 // Section: executor
 
@@ -402,6 +402,44 @@ fn wire__crate__api__accounts__remove_account_impl(
                     (move || async move {
                         let output_ok =
                             crate::api::accounts::remove_account(api_account_id).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__search__search_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "search",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_account_id = <i64>::sse_decode(&mut deserializer);
+            let api_query = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::system::DaemonError>(
+                    (move || async move {
+                        let output_ok =
+                            crate::api::search::search(api_account_id, api_query).await?;
                         std::result::Result::Ok(output_ok)
                     })()
                     .await,
@@ -853,6 +891,18 @@ impl SseDecode for Vec<u8> {
     }
 }
 
+impl SseDecode for Vec<crate::api::search::SearchHit> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::search::SearchHit>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Option<String> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -894,6 +944,34 @@ impl SseDecode for crate::api::system::PingInfo {
         return crate::api::system::PingInfo {
             protocol_version: var_protocolVersion,
             daemon_version: var_daemonVersion,
+        };
+    }
+}
+
+impl SseDecode for crate::api::search::SearchHit {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_messageId = <i64>::sse_decode(deserializer);
+        let mut var_accountId = <i64>::sse_decode(deserializer);
+        let mut var_subject = <Option<String>>::sse_decode(deserializer);
+        let mut var_snippet = <Option<String>>::sse_decode(deserializer);
+        return crate::api::search::SearchHit {
+            message_id: var_messageId,
+            account_id: var_accountId,
+            subject: var_subject,
+            snippet: var_snippet,
+        };
+    }
+}
+
+impl SseDecode for crate::api::search::SearchResult {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_messages = <Vec<crate::api::search::SearchHit>>::sse_decode(deserializer);
+        let mut var_total = <i64>::sse_decode(deserializer);
+        return crate::api::search::SearchResult {
+            messages: var_messages,
+            total: var_total,
         };
     }
 }
@@ -950,11 +1028,12 @@ fn pde_ffi_dispatcher_primary_impl(
         8 => wire__crate__api__accounts__list_accounts_impl(port, ptr, rust_vec_len, data_len),
         9 => wire__crate__api__system__ping_impl(port, ptr, rust_vec_len, data_len),
         10 => wire__crate__api__accounts__remove_account_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__system__start_daemon_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__accounts__start_oauth_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__accounts__start_reauth_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__accounts__test_connection_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__accounts__update_account_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__search__search_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__system__start_daemon_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__accounts__start_oauth_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__accounts__start_reauth_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__accounts__test_connection_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__accounts__update_account_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1231,6 +1310,47 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::system::PingInfo>
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::search::SearchHit {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.message_id.into_into_dart().into_dart(),
+            self.account_id.into_into_dart().into_dart(),
+            self.subject.into_into_dart().into_dart(),
+            self.snippet.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::search::SearchHit {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::search::SearchHit>
+    for crate::api::search::SearchHit
+{
+    fn into_into_dart(self) -> crate::api::search::SearchHit {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::search::SearchResult {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.messages.into_into_dart().into_dart(),
+            self.total.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::search::SearchResult
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::search::SearchResult>
+    for crate::api::search::SearchResult
+{
+    fn into_into_dart(self) -> crate::api::search::SearchResult {
+        self
+    }
+}
 
 impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1434,6 +1554,16 @@ impl SseEncode for Vec<u8> {
     }
 }
 
+impl SseEncode for Vec<crate::api::search::SearchHit> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::search::SearchHit>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<String> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1469,6 +1599,24 @@ impl SseEncode for crate::api::system::PingInfo {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <u32>::sse_encode(self.protocol_version, serializer);
         <String>::sse_encode(self.daemon_version, serializer);
+    }
+}
+
+impl SseEncode for crate::api::search::SearchHit {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i64>::sse_encode(self.message_id, serializer);
+        <i64>::sse_encode(self.account_id, serializer);
+        <Option<String>>::sse_encode(self.subject, serializer);
+        <Option<String>>::sse_encode(self.snippet, serializer);
+    }
+}
+
+impl SseEncode for crate::api::search::SearchResult {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::search::SearchHit>>::sse_encode(self.messages, serializer);
+        <i64>::sse_encode(self.total, serializer);
     }
 }
 

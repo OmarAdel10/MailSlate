@@ -50,3 +50,7 @@ pub const SYNC_NOW: &str = "sync_now";
 
 /// Lists every account with its current sync state (M2).
 pub const GET_STATUS: &str = "get_status";
+
+/// Full-text search across all messages of one account (M3 F7); the
+/// daemon replies with `{ messages: [...], total: n }`.
+pub const SEARCH: &str = "search";

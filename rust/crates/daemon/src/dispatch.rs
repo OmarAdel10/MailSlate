@@ -7,6 +7,7 @@ use mailslate_core::domain::accounts::{
     AccountPatch, AuthKind, ImapAccountDraft, PENDING_ACCOUNT_ID, Security, add_imap_account,
     add_oauth_account, get_account_connections, get_accounts, remove_account, update_account,
 };
+use mailslate_core::domain::search::search;
 use mailslate_core::infra::db::pool::ReadPool;
 use mailslate_core::infra::db::writer::WriterActor;
 use mailslate_core::infra::imap::probe::{ProbeError, probe_imap_login, probe_smtp};
@@ -112,6 +113,7 @@ pub fn dispatch(
         methods::ABORT_OAUTH_ACCOUNT => abort_oauth_account_dispatch(ctx).map(Dispatched::Reply),
         methods::SYNC_NOW => sync_now_dispatch(ctx, params).map(Dispatched::Reply),
         methods::GET_STATUS => get_status_dispatch(ctx).map(Dispatched::Reply),
+        methods::SEARCH => search_dispatch(ctx, params).map(Dispatched::Reply),
         other => Err(BridgeError::new(
             ErrorKind::NotFound,
             format!("unknown method: {other}"),
@@ -784,6 +786,34 @@ fn get_status_dispatch(ctx: &DispatchCtx) -> Result<Value, BridgeError> {
     Ok(json!({ "accounts": accounts }))
 }
 
+/// Full-text search across one account's messages: parse the syntax
+/// subset into an FTS5 `MATCH` + `WHERE` clauses, run against the
+/// external-content index, sanitize snippets, reply with hits + total.
+fn search_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let query = string(params, "query")?;
+    let hits = blocking(|| {
+        let conn = ctx
+            .reader
+            .acquire()
+            .map_err(|err| BridgeError::new(ErrorKind::Internal, format!("read pool: {err}")))?;
+        search(&conn, account_id, &query)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("search: {err}")))
+    })?;
+    let messages: Vec<Value> = hits
+        .into_iter()
+        .map(|hit| {
+            json!({
+                "id": hit.message_id,
+                "account_id": hit.account_id,
+                "subject": hit.subject,
+                "snippet": hit.snippet,
+            })
+        })
+        .collect();
+    Ok(json!({ "messages": messages, "total": messages.len() }))
+}
+
 /// Unix seconds; token expiry arithmetic uses whole seconds only.
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -866,6 +896,7 @@ mod tests {
     use mailslate_core::infra::db::writer::WriterActor;
     use mailslate_core::infra::db::{DB_FILE_NAME, migrations};
     use mailslate_core::infra::keyring::{FakeKeyStore, KeyStore, KeyStoreError};
+    use rusqlite;
     use std::sync::Arc;
 
     /// A dispatch context over a fresh migrated database in `dir`.
@@ -1982,6 +2013,68 @@ mod tests {
                     .contains_key(&account_id),
                 "removing an account must stop its sync actor"
             );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn search_dispatch_returns_hits_for_account() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let account_id = 42;
+            // Seed account, message + FTS rows directly (writer normally keeps these in sync).
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![account_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject, date_utc)
+                 VALUES (?1, ?2, 'msg-1', 'Quarterly report', 1000)",
+                rusqlite::params![1, account_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
+                 VALUES (?1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine')",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (?1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine')",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::SEARCH,
+                &json!({ "account_id": account_id, "query": "budgets" }),
+            )
+            .unwrap() else {
+                panic!("search must reply");
+            };
+            let messages = value["messages"].as_array().expect("messages array");
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["id"], json!(1));
+            assert_eq!(messages[0]["account_id"], json!(42));
+            assert_eq!(messages[0]["subject"], json!("Quarterly report"));
+            assert_eq!(value["total"], json!(1));
+        }
+
+        #[test]
+        fn search_dispatch_missing_account_id_is_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = dispatch(&ctx, methods::SEARCH, &json!({ "query": "budgets" })).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+            assert!(err.message.contains("account_id"));
         }
     }
 }
