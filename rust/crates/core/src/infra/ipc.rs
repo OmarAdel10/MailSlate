@@ -302,6 +302,31 @@ impl Client {
         .await
     }
 
+    /// Lists one account's mailboxes; replies with
+    /// `{ mailboxes: [{ id, account_id, name, kind, special_use,
+    /// color, sort_order, uidvalidity, uidnext, highest_modseq,
+    /// last_synced_at }], total }`.
+    pub async fn get_mailboxes(
+        &mut self,
+        account_id: i64,
+        limit: u32,
+        last_sort_order: Option<i64>,
+        last_kind: Option<&str>,
+        last_name: Option<&str>,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_MAILBOXES,
+            json!({
+                "account_id": account_id,
+                "limit": limit,
+                "last_sort_order": last_sort_order,
+                "last_kind": last_kind,
+                "last_name": last_name,
+            }),
+        )
+        .await
+    }
+
     /// Returns one message's headers; replies with
     /// `{ id, account_id, subject, from_json, to_json, date_utc,
     /// snippet, has_attachments, body_state }`.

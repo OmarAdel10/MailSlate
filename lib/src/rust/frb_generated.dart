@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/accounts.dart';
+import 'api/mailbox.dart';
 import 'api/reader.dart';
 import 'api/search.dart';
 import 'api/system.dart';
@@ -73,7 +74,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 568066268;
+  int get rustContentHash => -1947246993;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -120,6 +121,14 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiSystemInitApp();
 
   Future<List<AccountSummary>> crateApiAccountsListAccounts();
+
+  Future<MailboxList> crateApiMailboxListMailboxes({
+    required PlatformInt64 accountId,
+    required int limit,
+    PlatformInt64? lastSortOrder,
+    String? lastKind,
+    String? lastName,
+  });
 
   Future<ThreadMessageList> crateApiThreadingListThreadMessages({
     required PlatformInt64 threadId,
@@ -519,6 +528,53 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "list_accounts", argNames: []);
 
   @override
+  Future<MailboxList> crateApiMailboxListMailboxes({
+    required PlatformInt64 accountId,
+    required int limit,
+    PlatformInt64? lastSortOrder,
+    String? lastKind,
+    String? lastName,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(accountId, serializer);
+          sse_encode_u_32(limit, serializer);
+          sse_encode_opt_box_autoadd_i_64(lastSortOrder, serializer);
+          sse_encode_opt_String(lastKind, serializer);
+          sse_encode_opt_String(lastName, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 12,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_mailbox_list,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiMailboxListMailboxesConstMeta,
+        argValues: [accountId, limit, lastSortOrder, lastKind, lastName],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiMailboxListMailboxesConstMeta =>
+      const TaskConstMeta(
+        debugName: "list_mailboxes",
+        argNames: [
+          "accountId",
+          "limit",
+          "lastSortOrder",
+          "lastKind",
+          "lastName",
+        ],
+      );
+
+  @override
   Future<ThreadMessageList> crateApiThreadingListThreadMessages({
     required PlatformInt64 threadId,
     required int limit,
@@ -536,7 +592,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 13,
             port: port_,
           );
         },
@@ -575,7 +631,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 14,
             port: port_,
           );
         },
@@ -612,7 +668,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 15,
             port: port_,
           );
         },
@@ -641,7 +697,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 16,
             port: port_,
           );
         },
@@ -671,7 +727,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 16,
+            funcId: 17,
             port: port_,
           );
         },
@@ -703,7 +759,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 18,
             port: port_,
           );
         },
@@ -732,7 +788,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 19,
             port: port_,
           );
         },
@@ -760,7 +816,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 20,
             port: port_,
           );
         },
@@ -790,7 +846,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 21,
             port: port_,
           );
         },
@@ -822,7 +878,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 22,
             port: port_,
           );
         },
@@ -857,7 +913,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -1120,6 +1176,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<MailboxSummary> dco_decode_list_mailbox_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_mailbox_summary).toList();
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
@@ -1141,6 +1203,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<ThreadSummary> dco_decode_list_thread_summary(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_thread_summary).toList();
+  }
+
+  @protected
+  MailboxList dco_decode_mailbox_list(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return MailboxList(
+      mailboxes: dco_decode_list_mailbox_summary(arr[0]),
+      total: dco_decode_i_64(arr[1]),
+    );
+  }
+
+  @protected
+  MailboxSummary dco_decode_mailbox_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    return MailboxSummary(
+      id: dco_decode_i_64(arr[0]),
+      accountId: dco_decode_i_64(arr[1]),
+      name: dco_decode_String(arr[2]),
+      kind: dco_decode_String(arr[3]),
+      specialUse: dco_decode_opt_String(arr[4]),
+      color: dco_decode_opt_String(arr[5]),
+      sortOrder: dco_decode_i_64(arr[6]),
+      uidvalidity: dco_decode_opt_box_autoadd_i_64(arr[7]),
+      uidnext: dco_decode_opt_box_autoadd_i_64(arr[8]),
+      highestModseq: dco_decode_opt_box_autoadd_i_64(arr[9]),
+      lastSyncedAt: dco_decode_opt_box_autoadd_i_64(arr[10]),
+    );
   }
 
   @protected
@@ -1604,6 +1699,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<MailboxSummary> sse_decode_list_mailbox_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <MailboxSummary>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_mailbox_summary(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -1648,6 +1757,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       ans_.add(sse_decode_thread_summary(deserializer));
     }
     return ans_;
+  }
+
+  @protected
+  MailboxList sse_decode_mailbox_list(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_mailboxes = sse_decode_list_mailbox_summary(deserializer);
+    var var_total = sse_decode_i_64(deserializer);
+    return MailboxList(mailboxes: var_mailboxes, total: var_total);
+  }
+
+  @protected
+  MailboxSummary sse_decode_mailbox_summary(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_i_64(deserializer);
+    var var_accountId = sse_decode_i_64(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_kind = sse_decode_String(deserializer);
+    var var_specialUse = sse_decode_opt_String(deserializer);
+    var var_color = sse_decode_opt_String(deserializer);
+    var var_sortOrder = sse_decode_i_64(deserializer);
+    var var_uidvalidity = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_uidnext = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_highestModseq = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_lastSyncedAt = sse_decode_opt_box_autoadd_i_64(deserializer);
+    return MailboxSummary(
+      id: var_id,
+      accountId: var_accountId,
+      name: var_name,
+      kind: var_kind,
+      specialUse: var_specialUse,
+      color: var_color,
+      sortOrder: var_sortOrder,
+      uidvalidity: var_uidvalidity,
+      uidnext: var_uidnext,
+      highestModseq: var_highestModseq,
+      lastSyncedAt: var_lastSyncedAt,
+    );
   }
 
   @protected
@@ -2102,6 +2248,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_mailbox_summary(
+    List<MailboxSummary> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_mailbox_summary(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -2145,6 +2303,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     for (final item in self) {
       sse_encode_thread_summary(item, serializer);
     }
+  }
+
+  @protected
+  void sse_encode_mailbox_list(MailboxList self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_mailbox_summary(self.mailboxes, serializer);
+    sse_encode_i_64(self.total, serializer);
+  }
+
+  @protected
+  void sse_encode_mailbox_summary(
+    MailboxSummary self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.id, serializer);
+    sse_encode_i_64(self.accountId, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.kind, serializer);
+    sse_encode_opt_String(self.specialUse, serializer);
+    sse_encode_opt_String(self.color, serializer);
+    sse_encode_i_64(self.sortOrder, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.uidvalidity, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.uidnext, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.highestModseq, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.lastSyncedAt, serializer);
   }
 
   @protected

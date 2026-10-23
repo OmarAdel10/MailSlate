@@ -63,6 +63,10 @@ pub const GET_THREADS: &str = "get_threads";
 /// replies with `{ messages: [...], total: n }`.
 pub const GET_THREAD_MESSAGES: &str = "get_thread_messages";
 
+/// Lists one account's mailboxes (M3 F3); the daemon replies with
+/// `{ mailboxes: [...], total: n }`.
+pub const GET_MAILBOXES: &str = "get_mailboxes";
+
 /// Returns one message's headers and body state (M3 F3.4); the daemon
 /// replies with `{ id, account_id, subject, from_json, to_json,
 /// date_utc, snippet, has_attachments, body_state }`.
