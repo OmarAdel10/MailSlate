@@ -302,6 +302,55 @@ impl Client {
         .await
     }
 
+    /// Returns one message's headers; replies with
+    /// `{ id, account_id, subject, from_json, to_json, date_utc,
+    /// snippet, has_attachments, body_state }`.
+    pub async fn get_message(
+        &mut self,
+        account_id: i64,
+        message_id: i64,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_MESSAGE,
+            json!({ "account_id": account_id, "message_id": message_id }),
+        )
+        .await
+    }
+
+    /// Returns one message's decoded body; replies with
+    /// `{ message_id, text_body, html_clean }`.
+    pub async fn get_message_body(&mut self, message_id: i64) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_MESSAGE_BODY,
+            json!({ "message_id": message_id }),
+        )
+        .await
+    }
+
+    /// Returns one message's attachments; replies with
+    /// `{ attachments: [...] }`.
+    pub async fn get_attachments(&mut self, message_id: i64) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_ATTACHMENTS,
+            json!({ "message_id": message_id }),
+        )
+        .await
+    }
+
+    /// Marks a message as read or unread; replies with `{ ok: true }`.
+    pub async fn mark_read(
+        &mut self,
+        account_id: i64,
+        message_id: i64,
+        seen: bool,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::MARK_READ,
+            json!({ "account_id": account_id, "message_id": message_id, "seen": seen }),
+        )
+        .await
+    }
+
     /// Overrides the per-request timeout; tests use short values.
     #[cfg(test)]
     pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {
