@@ -3,6 +3,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/core/failures/failures.dart';
 import 'package:mailslate/src/rust/api/mailbox.dart';
+import 'package:mailslate/src/rust/api/reader.dart';
 import 'package:mailslate/src/rust/api/search.dart';
 import 'package:mailslate/src/rust/api/system.dart';
 import 'package:mailslate/src/rust/api/threading.dart';
@@ -226,6 +227,68 @@ class FakeRustLibApi extends RustLibApi {
       throw failure;
     }
     return const ThreadMessageList(messages: [], total: 0);
+  }
+
+  @override
+  Future<MessageResult> crateApiReaderGetMessage({
+    required PlatformInt64 accountId,
+    required PlatformInt64 messageId,
+  }) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    return const MessageResult(
+      message: MessageDetail(
+        id: 1,
+        accountId: 42,
+        subject: 'Reader subject',
+        fromJson: '[{"name":"Alice","address":"alice@example.com"}]',
+        toJson: '[{"name":"Bob","address":"bob@example.com"}]',
+        dateUtc: 1000,
+        snippet: 'reader snippet',
+        hasAttachments: false,
+        bodyState: 'full',
+      ),
+    );
+  }
+
+  @override
+  Future<MessageBody> crateApiReaderGetMessageBody({
+    required PlatformInt64 messageId,
+  }) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    return const MessageBody(
+      messageId: 1,
+      textBody: 'Plain text body',
+      htmlClean: '<b>HTML body</b>',
+    );
+  }
+
+  @override
+  Future<AttachmentList> crateApiReaderGetAttachments({
+    required PlatformInt64 messageId,
+  }) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    return const AttachmentList(attachments: [], total: 0);
+  }
+
+  @override
+  Future<void> crateApiReaderMarkRead({
+    required PlatformInt64 accountId,
+    required PlatformInt64 messageId,
+    required bool seen,
+  }) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
   }
 
   @override

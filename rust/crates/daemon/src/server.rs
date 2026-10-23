@@ -470,6 +470,7 @@ mod tests {
             reader: Arc::new(
                 mailslate_core::infra::db::pool::ReadPool::open(&db_path).expect("pool"),
             ),
+            db_path: db_path.clone(),
             bus: mailslate_core::domain::events::EventBus::new(),
             oauth: Arc::new(std::sync::Mutex::new(None)),
             token_poster: Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),

@@ -8,6 +8,7 @@
 
 import 'api/accounts.dart';
 import 'api/mailbox.dart';
+import 'api/reader.dart';
 import 'api/search.dart';
 import 'api/system.dart';
 import 'api/threading.dart';
@@ -44,6 +45,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AppEvent dco_decode_app_event(dynamic raw);
+
+  @protected
+  AttachmentList dco_decode_attachment_list(dynamic raw);
+
+  @protected
+  AttachmentSummary dco_decode_attachment_summary(dynamic raw);
 
   @protected
   bool dco_decode_bool(dynamic raw);
@@ -88,6 +95,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<AccountSummary> dco_decode_list_account_summary(dynamic raw);
 
   @protected
+  List<AttachmentSummary> dco_decode_list_attachment_summary(dynamic raw);
+
+  @protected
   List<MailboxSummary> dco_decode_list_mailbox_summary(dynamic raw);
 
   @protected
@@ -107,6 +117,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MailboxSummary dco_decode_mailbox_summary(dynamic raw);
+
+  @protected
+  MessageBody dco_decode_message_body(dynamic raw);
+
+  @protected
+  MessageDetail dco_decode_message_detail(dynamic raw);
+
+  @protected
+  MessageResult dco_decode_message_result(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -171,6 +190,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AppEvent sse_decode_app_event(SseDeserializer deserializer);
 
   @protected
+  AttachmentList sse_decode_attachment_list(SseDeserializer deserializer);
+
+  @protected
+  AttachmentSummary sse_decode_attachment_summary(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
@@ -217,6 +242,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<AttachmentSummary> sse_decode_list_attachment_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<MailboxSummary> sse_decode_list_mailbox_summary(
     SseDeserializer deserializer,
   );
@@ -242,6 +272,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MailboxSummary sse_decode_mailbox_summary(SseDeserializer deserializer);
+
+  @protected
+  MessageBody sse_decode_message_body(SseDeserializer deserializer);
+
+  @protected
+  MessageDetail sse_decode_message_detail(SseDeserializer deserializer);
+
+  @protected
+  MessageResult sse_decode_message_result(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -315,6 +354,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_app_event(AppEvent self, SseSerializer serializer);
 
   @protected
+  void sse_encode_attachment_list(
+    AttachmentList self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_attachment_summary(
+    AttachmentSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
@@ -375,6 +426,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_attachment_summary(
+    List<AttachmentSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_mailbox_summary(
     List<MailboxSummary> self,
     SseSerializer serializer,
@@ -412,6 +469,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     MailboxSummary self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_message_body(MessageBody self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message_detail(MessageDetail self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message_result(MessageResult self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);

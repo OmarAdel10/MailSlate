@@ -121,6 +121,7 @@ fn run() -> Result<(), ServerError> {
         writer,
         keystore,
         reader: std::sync::Arc::new(db::pool::ReadPool::open(&db_path)?),
+        db_path: db_path.clone(),
         bus: mailslate_core::domain::events::EventBus::new(),
         oauth: std::sync::Arc::new(std::sync::Mutex::new(None)),
         token_poster: std::sync::Arc::new(mailslate_core::infra::oauth::grant::HttpTokenEndpoint),

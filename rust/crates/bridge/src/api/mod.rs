@@ -5,6 +5,7 @@
 
 pub mod accounts;
 pub mod mailbox;
+pub mod reader;
 pub mod search;
 pub mod system;
 pub mod threading;
