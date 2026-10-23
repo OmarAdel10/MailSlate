@@ -7,10 +7,11 @@ use mailslate_core::domain::accounts::{
     AccountPatch, AuthKind, ImapAccountDraft, PENDING_ACCOUNT_ID, Security, add_imap_account,
     add_oauth_account, get_account_connections, get_accounts, remove_account, update_account,
 };
+use mailslate_core::domain::mailbox::list_mailboxes;
 use mailslate_core::domain::search::search;
 use mailslate_core::domain::threading::{list_thread_messages, list_threads};
 use mailslate_core::infra::db::pool::ReadPool;
-use mailslate_core::infra::db::queries::ThreadCursor;
+use mailslate_core::infra::db::queries::{MailboxCursor, ThreadCursor};
 use mailslate_core::infra::db::writer::WriterActor;
 use mailslate_core::infra::imap::probe::{ProbeError, probe_imap_login, probe_smtp};
 use mailslate_core::infra::keyring::KeyStore;
@@ -120,6 +121,7 @@ pub fn dispatch(
         methods::GET_THREAD_MESSAGES => {
             get_thread_messages_dispatch(ctx, params).map(Dispatched::Reply)
         }
+        methods::GET_MAILBOXES => get_mailboxes_dispatch(ctx, params).map(Dispatched::Reply),
         other => Err(BridgeError::new(
             ErrorKind::NotFound,
             format!("unknown method: {other}"),
@@ -878,6 +880,37 @@ fn get_thread_messages_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Val
     Ok(json!({ "messages": items, "total": items.len() }))
 }
 
+/// Lists one account's mailboxes: parse account_id + optional cursor,
+/// call `list_mailboxes`, reply with mailboxes + total.
+fn get_mailboxes_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let limit = optional_u32(params, "limit")?.unwrap_or(50);
+    let cursor = mailbox_cursor(params)?;
+    let mailboxes = blocking(|| {
+        list_mailboxes(&ctx.reader, account_id, limit, cursor)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("get_mailboxes: {err}")))
+    })?;
+    let items: Vec<Value> = mailboxes
+        .into_iter()
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "account_id": m.account_id,
+                "name": m.name,
+                "kind": m.kind,
+                "special_use": m.special_use,
+                "color": m.color,
+                "sort_order": m.sort_order,
+                "uidvalidity": m.uidvalidity,
+                "uidnext": m.uidnext,
+                "highest_modseq": m.highest_modseq,
+                "last_synced_at": m.last_synced_at,
+            })
+        })
+        .collect();
+    Ok(json!({ "mailboxes": items, "total": items.len() }))
+}
+
 /// Unix seconds; token expiry arithmetic uses whole seconds only.
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -968,6 +1001,33 @@ fn cursor(params: &Value) -> Result<Option<ThreadCursor>, BridgeError> {
         })),
         (None, None) => Ok(None),
         _ => Err(validation("cursor requires both last_date and last_id")),
+    }
+}
+
+/// Optional mailbox keyset cursor built from `last_sort_order` + `last_kind` + `last_name`.
+fn mailbox_cursor(params: &Value) -> Result<Option<MailboxCursor>, BridgeError> {
+    let last_sort_order = optional_i64(params, "last_sort_order")?;
+    let last_kind = optional_str(params, "last_kind")?;
+    let last_name = optional_str(params, "last_name")?;
+    match (last_sort_order, last_kind, last_name) {
+        (Some(sort_order), Some(kind), Some(name)) => Ok(Some(MailboxCursor {
+            sort_order,
+            kind,
+            name,
+        })),
+        (None, None, None) => Ok(None),
+        _ => Err(validation(
+            "mailbox cursor requires last_sort_order, last_kind, and last_name",
+        )),
+    }
+}
+
+/// Optional string parameter; None when absent or null.
+fn optional_str(params: &Value, key: &str) -> Result<Option<String>, BridgeError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(validation(format!("{key} must be a string"))),
     }
 }
 
@@ -2309,6 +2369,67 @@ mod tests {
                 dispatch(&ctx, methods::GET_THREAD_MESSAGES, &json!({ "limit": 50 })).unwrap_err();
             assert_eq!(err.kind, ErrorKind::Validation);
             assert!(err.message.contains("thread_id"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn get_mailboxes_dispatch_lists_mailboxes() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let account_id = 42;
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![account_id],
+            )
+            .unwrap();
+            for (i, (name, kind, sort_order)) in [
+                ("INBOX", "inbox", 0),
+                ("Sent", "sent", 10),
+                ("Drafts", "drafts", 20),
+            ]
+            .iter()
+            .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO mailboxes (id, account_id, name, kind, special_use, color,
+                                          sort_order, uidvalidity, uidnext, highest_modseq,
+                                          last_synced_at)
+                     VALUES (?1, 42, ?2, ?3, NULL, NULL, ?4, NULL, NULL, NULL, NULL)",
+                    rusqlite::params![(i + 1) as i64, name, kind, *sort_order as i64],
+                )
+                .unwrap();
+            }
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::GET_MAILBOXES,
+                &json!({ "account_id": account_id, "limit": 50 }),
+            )
+            .unwrap() else {
+                panic!("get_mailboxes must reply");
+            };
+            let mailboxes = value["mailboxes"].as_array().expect("mailboxes array");
+            assert_eq!(mailboxes.len(), 3);
+            assert_eq!(mailboxes[0]["name"], json!("INBOX"));
+            assert_eq!(mailboxes[0]["kind"], json!("inbox"));
+            assert_eq!(mailboxes[1]["name"], json!("Sent"));
+            assert_eq!(mailboxes[2]["name"], json!("Drafts"));
+            assert_eq!(value["total"], json!(3));
+        }
+
+        #[test]
+        fn get_mailboxes_dispatch_missing_account_id_is_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = dispatch(&ctx, methods::GET_MAILBOXES, &json!({ "limit": 50 })).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+            assert!(err.message.contains("account_id"));
         }
     }
 }
