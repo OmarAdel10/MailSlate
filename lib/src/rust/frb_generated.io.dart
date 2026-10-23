@@ -6,6 +6,7 @@
 import 'api/accounts.dart';
 import 'api/search.dart';
 import 'api/system.dart';
+import 'api/threading.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -90,6 +91,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SearchHit> dco_decode_list_search_hit(dynamic raw);
 
   @protected
+  List<ThreadMessage> dco_decode_list_thread_message(dynamic raw);
+
+  @protected
+  List<ThreadSummary> dco_decode_list_thread_summary(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
@@ -106,6 +113,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SearchResult dco_decode_search_result(dynamic raw);
+
+  @protected
+  ThreadList dco_decode_thread_list(dynamic raw);
+
+  @protected
+  ThreadMessage dco_decode_thread_message(dynamic raw);
+
+  @protected
+  ThreadMessageList dco_decode_thread_message_list(dynamic raw);
+
+  @protected
+  ThreadSummary dco_decode_thread_summary(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -192,6 +211,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<SearchHit> sse_decode_list_search_hit(SseDeserializer deserializer);
 
   @protected
+  List<ThreadMessage> sse_decode_list_thread_message(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ThreadSummary> sse_decode_list_thread_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
@@ -208,6 +237,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SearchResult sse_decode_search_result(SseDeserializer deserializer);
+
+  @protected
+  ThreadList sse_decode_thread_list(SseDeserializer deserializer);
+
+  @protected
+  ThreadMessage sse_decode_thread_message(SseDeserializer deserializer);
+
+  @protected
+  ThreadMessageList sse_decode_thread_message_list(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ThreadSummary sse_decode_thread_summary(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -321,6 +364,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_thread_message(
+    List<ThreadMessage> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_thread_summary(
+    List<ThreadSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
@@ -340,6 +395,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_search_result(SearchResult self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_thread_list(ThreadList self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_thread_message(ThreadMessage self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_thread_message_list(
+    ThreadMessageList self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_thread_summary(ThreadSummary self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_16(int self, SseSerializer serializer);

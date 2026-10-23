@@ -257,6 +257,51 @@ impl Client {
         .await
     }
 
+    /// Lists one account's threads; replies with
+    /// `{ threads: [{ id, account_id, subject, last_date,
+    /// message_count, unread_count, has_attachments, last_snippet }],
+    /// total }`.
+    pub async fn get_threads(
+        &mut self,
+        account_id: i64,
+        limit: u32,
+        last_date: Option<i64>,
+        last_thread_id: Option<i64>,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_THREADS,
+            json!({
+                "account_id": account_id,
+                "limit": limit,
+                "last_date": last_date,
+                "last_thread_id": last_thread_id,
+            }),
+        )
+        .await
+    }
+
+    /// Lists one thread's messages; replies with
+    /// `{ messages: [{ id, subject, from_json, date_utc, snippet,
+    /// has_attachments, body_state }], total }`.
+    pub async fn get_thread_messages(
+        &mut self,
+        thread_id: i64,
+        limit: u32,
+        last_date: Option<i64>,
+        last_message_id: Option<i64>,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_THREAD_MESSAGES,
+            json!({
+                "thread_id": thread_id,
+                "limit": limit,
+                "last_date": last_date,
+                "last_message_id": last_message_id,
+            }),
+        )
+        .await
+    }
+
     /// Overrides the per-request timeout; tests use short values.
     #[cfg(test)]
     pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {

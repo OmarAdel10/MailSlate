@@ -8,7 +8,9 @@ use mailslate_core::domain::accounts::{
     add_oauth_account, get_account_connections, get_accounts, remove_account, update_account,
 };
 use mailslate_core::domain::search::search;
+use mailslate_core::domain::threading::{list_thread_messages, list_threads};
 use mailslate_core::infra::db::pool::ReadPool;
+use mailslate_core::infra::db::queries::ThreadCursor;
 use mailslate_core::infra::db::writer::WriterActor;
 use mailslate_core::infra::imap::probe::{ProbeError, probe_imap_login, probe_smtp};
 use mailslate_core::infra::keyring::KeyStore;
@@ -114,6 +116,10 @@ pub fn dispatch(
         methods::SYNC_NOW => sync_now_dispatch(ctx, params).map(Dispatched::Reply),
         methods::GET_STATUS => get_status_dispatch(ctx).map(Dispatched::Reply),
         methods::SEARCH => search_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::GET_THREADS => get_threads_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::GET_THREAD_MESSAGES => {
+            get_thread_messages_dispatch(ctx, params).map(Dispatched::Reply)
+        }
         other => Err(BridgeError::new(
             ErrorKind::NotFound,
             format!("unknown method: {other}"),
@@ -814,6 +820,64 @@ fn search_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeErr
     Ok(json!({ "messages": messages, "total": messages.len() }))
 }
 
+/// Lists one account's threads: parse account_id + optional cursor,
+/// call `list_threads`, reply with threads + total.
+fn get_threads_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let limit = optional_u32(params, "limit")?.unwrap_or(50);
+    let cursor = cursor(params)?;
+    let threads = blocking(|| {
+        list_threads(&ctx.reader, account_id, limit, cursor)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("get_threads: {err}")))
+    })?;
+    let items: Vec<Value> = threads
+        .into_iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "account_id": t.account_id,
+                "subject": t.subject,
+                "last_date": t.last_date,
+                "message_count": t.message_count,
+                "unread_count": t.unread_count,
+                "has_attachments": t.has_attachments,
+                "last_snippet": t.last_snippet,
+            })
+        })
+        .collect();
+    Ok(json!({ "threads": items, "total": items.len() }))
+}
+
+/// Lists one thread's messages: parse thread_id + optional cursor,
+/// call `list_thread_messages`, reply with messages + total.
+fn get_thread_messages_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let thread_id = required(params, "thread_id")?
+        .as_i64()
+        .ok_or_else(|| validation("thread_id must be an integer"))?;
+    let limit = optional_u32(params, "limit")?.unwrap_or(50);
+    let cursor = cursor(params)?;
+    let messages = blocking(|| {
+        list_thread_messages(&ctx.reader, thread_id, limit, cursor).map_err(|err| {
+            BridgeError::new(ErrorKind::Storage, format!("get_thread_messages: {err}"))
+        })
+    })?;
+    let items: Vec<Value> = messages
+        .into_iter()
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "subject": m.subject,
+                "from_json": m.from_json,
+                "date_utc": m.date_utc,
+                "snippet": m.snippet,
+                "has_attachments": m.has_attachments,
+                "body_state": m.body_state,
+            })
+        })
+        .collect();
+    Ok(json!({ "messages": items, "total": items.len() }))
+}
+
 /// Unix seconds; token expiry arithmetic uses whole seconds only.
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -878,6 +942,45 @@ fn account_id(params: &Value) -> Result<i64, BridgeError> {
         .get("account_id")
         .and_then(Value::as_i64)
         .ok_or_else(|| validation("missing account_id"))
+}
+
+/// Optional u32 parameter; None when absent or null.
+fn optional_u32(params: &Value, key: &str) -> Result<Option<u32>, BridgeError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .map(Some)
+            .ok_or_else(|| validation(format!("{key} must be a u32"))),
+        Some(_) => Err(validation(format!("{key} must be a u32"))),
+    }
+}
+
+/// Optional keyset cursor built from `last_date` + `last_id` params.
+fn cursor(params: &Value) -> Result<Option<ThreadCursor>, BridgeError> {
+    let last_date = optional_i64(params, "last_date")?;
+    let last_id = optional_i64(params, "last_id")?;
+    match (last_date, last_id) {
+        (Some(date), Some(id)) => Ok(Some(ThreadCursor {
+            last_date: date,
+            thread_id: id,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(validation("cursor requires both last_date and last_id")),
+    }
+}
+
+/// Optional i64 parameter; None when absent or null.
+fn optional_i64(params: &Value, key: &str) -> Result<Option<i64>, BridgeError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| validation(format!("{key} must be an i64"))),
+        Some(_) => Err(validation(format!("{key} must be an i64"))),
+    }
 }
 
 /// The `ping` payload: both sides' versions for the handshake.
@@ -2075,6 +2178,137 @@ mod tests {
             let err = dispatch(&ctx, methods::SEARCH, &json!({ "query": "budgets" })).unwrap_err();
             assert_eq!(err.kind, ErrorKind::Validation);
             assert!(err.message.contains("account_id"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn get_threads_dispatch_lists_threads() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let account_id = 42;
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![account_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, account_id, subject_norm, last_date,
+                                      message_count, unread_count, has_attachments, last_snippet)
+                 VALUES (?1, 42, 'Project Alpha', 2000, 2, 1, 0, 'alpha snippet')",
+                rusqlite::params![100],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, account_id, subject_norm, last_date,
+                                      message_count, unread_count, has_attachments, last_snippet)
+                 VALUES (?1, 42, 'Weekly Report', 1000, 1, 0, 0, 'report snippet')",
+                rusqlite::params![101],
+            )
+            .unwrap();
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::GET_THREADS,
+                &json!({ "account_id": account_id, "limit": 50 }),
+            )
+            .unwrap() else {
+                panic!("get_threads must reply");
+            };
+            let threads = value["threads"].as_array().expect("threads array");
+            assert_eq!(threads.len(), 2);
+            assert_eq!(threads[0]["id"], json!(100));
+            assert_eq!(threads[0]["subject"], json!("Project Alpha"));
+            assert_eq!(threads[0]["message_count"], json!(2));
+            assert_eq!(threads[0]["unread_count"], json!(1));
+            assert_eq!(threads[1]["id"], json!(101));
+            assert_eq!(threads[1]["subject"], json!("Weekly Report"));
+            assert_eq!(value["total"], json!(2));
+        }
+
+        #[test]
+        fn get_threads_dispatch_missing_account_id_is_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = dispatch(&ctx, methods::GET_THREADS, &json!({ "limit": 50 })).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+            assert!(err.message.contains("account_id"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn get_thread_messages_dispatch_lists_messages() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let thread_id = 100;
+            let account_id = 42;
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![account_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, account_id, subject_norm, last_date,
+                                      message_count, unread_count, has_attachments, last_snippet)
+                 VALUES (?1, 42, 'Project Alpha', 2000, 2, 1, 0, 'alpha snippet')",
+                rusqlite::params![thread_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject, from_json,
+                                      date_utc, snippet, has_attachments, body_state, thread_id)
+                 VALUES (?1, 42, 'm-1', 'Alpha start',
+                         '[{\"name\":\"Alice\",\"address\":\"alice@example.com\"}]',
+                         2000, 'start snippet', 0, 'headers', 100)",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject, from_json,
+                                      date_utc, snippet, has_attachments, body_state, thread_id)
+                 VALUES (?1, 42, 'm-2', 'Alpha update',
+                         '[{\"name\":\"Bob\",\"address\":\"bob@example.com\"}]',
+                         2001, 'update snippet', 0, 'full', 100)",
+                rusqlite::params![2],
+            )
+            .unwrap();
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::GET_THREAD_MESSAGES,
+                &json!({ "thread_id": thread_id, "limit": 50 }),
+            )
+            .unwrap() else {
+                panic!("get_thread_messages must reply");
+            };
+            let messages = value["messages"].as_array().expect("messages array");
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0]["id"], json!(2));
+            assert_eq!(messages[0]["subject"], json!("Alpha update"));
+            assert_eq!(messages[1]["id"], json!(1));
+            assert_eq!(messages[1]["subject"], json!("Alpha start"));
+            assert_eq!(value["total"], json!(2));
+        }
+
+        #[test]
+        fn get_thread_messages_dispatch_missing_thread_id_is_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err =
+                dispatch(&ctx, methods::GET_THREAD_MESSAGES, &json!({ "limit": 50 })).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+            assert!(err.message.contains("thread_id"));
         }
     }
 }

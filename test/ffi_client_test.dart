@@ -1,8 +1,10 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/core/failures/failures.dart';
 import 'package:mailslate/src/rust/api/search.dart';
 import 'package:mailslate/src/rust/api/system.dart';
+import 'package:mailslate/src/rust/api/threading.dart';
 import 'package:mailslate/src/rust/frb_generated.dart';
 
 /// Fake of the generated [RustLibApi]: answers without the native library.
@@ -195,6 +197,34 @@ class FakeRustLibApi extends RustLibApi {
       throw failure;
     }
     return const SearchResult(messages: [], total: 0);
+  }
+
+  @override
+  Future<ThreadList> crateApiThreadingListThreads({
+    required PlatformInt64 accountId,
+    required int limit,
+    PlatformInt64? lastDate,
+    PlatformInt64? lastId,
+  }) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    return const ThreadList(threads: [], total: 0);
+  }
+
+  @override
+  Future<ThreadMessageList> crateApiThreadingListThreadMessages({
+    required PlatformInt64 threadId,
+    required int limit,
+    PlatformInt64? lastDate,
+    PlatformInt64? lastId,
+  }) async {
+    final failure = accountsError;
+    if (failure != null) {
+      throw failure;
+    }
+    return const ThreadMessageList(messages: [], total: 0);
   }
 
   @override
