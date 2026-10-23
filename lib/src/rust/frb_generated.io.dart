@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/accounts.dart';
+import 'api/mailbox.dart';
 import 'api/search.dart';
 import 'api/system.dart';
 import 'api/threading.dart';
@@ -85,6 +86,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<AccountSummary> dco_decode_list_account_summary(dynamic raw);
 
   @protected
+  List<MailboxSummary> dco_decode_list_mailbox_summary(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -95,6 +99,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ThreadSummary> dco_decode_list_thread_summary(dynamic raw);
+
+  @protected
+  MailboxList dco_decode_mailbox_list(dynamic raw);
+
+  @protected
+  MailboxSummary dco_decode_mailbox_summary(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -205,6 +215,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<MailboxSummary> sse_decode_list_mailbox_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -219,6 +234,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ThreadSummary> sse_decode_list_thread_summary(
     SseDeserializer deserializer,
   );
+
+  @protected
+  MailboxList sse_decode_mailbox_list(SseDeserializer deserializer);
+
+  @protected
+  MailboxSummary sse_decode_mailbox_summary(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -352,6 +373,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_mailbox_summary(
+    List<MailboxSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -372,6 +399,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_thread_summary(
     List<ThreadSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_mailbox_list(MailboxList self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_mailbox_summary(
+    MailboxSummary self,
     SseSerializer serializer,
   );
 

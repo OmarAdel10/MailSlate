@@ -62,3 +62,7 @@ pub const GET_THREADS: &str = "get_threads";
 /// Lists one thread's messages newest-first (M3 F3.4); the daemon
 /// replies with `{ messages: [...], total: n }`.
 pub const GET_THREAD_MESSAGES: &str = "get_thread_messages";
+
+/// Lists one account's mailboxes (M3 F3); the daemon replies with
+/// `{ mailboxes: [...], total: n }`.
+pub const GET_MAILBOXES: &str = "get_mailboxes";
