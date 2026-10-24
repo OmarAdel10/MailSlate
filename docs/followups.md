@@ -151,8 +151,9 @@ project (global `AGENTS.md` §4 and §13).
   handle all four in a search-test pass
   (`lib/features/search/search_bloc.dart:132,148,153`,
   `test/support/fake_ffi_client.dart`).
-  FIXED 2026-10-25 in `test/search-feature-tests` (20 new tests, fake
-  `search()` stub, dead timer removed, mount-time empty queries guarded) —
+  FIXED 2026-10-25 in `test/search-feature-tests` (33 new tests, fake
+  `search()` stub, dead timer removed, mount-time empty queries guarded,
+  stale-emits guards on the query and filter paths) —
   close on merge.
 - MAILSLATE-56 — M3: CI rust job red on the `feature/m3-reading-search` tip
   since PR #9/#13: `dispatch::tests::spawn_on_add::search_dispatch_returns_hits_for_account`
