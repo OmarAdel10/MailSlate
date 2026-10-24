@@ -93,7 +93,7 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
             "tag" => {
                 clauses.push(
                     "EXISTS (SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id \
-                     WHERE mt.message_id = messages.id AND t.name = ?)"
+                     WHERE mt.message_id = m.id AND t.name = ?)"
                         .to_string(),
                 );
                 params.push(value.to_string());
@@ -101,7 +101,7 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
             "in" => {
                 clauses.push(
                     "EXISTS (SELECT 1 FROM message_locations ml JOIN mailboxes mb \
-                     ON mb.id = ml.mailbox_id WHERE ml.message_id = messages.id AND mb.kind = ?)"
+                     ON mb.id = ml.mailbox_id WHERE ml.message_id = m.id AND mb.kind = ?)"
                         .to_string(),
                 );
                 params.push(value.to_string());
@@ -109,18 +109,18 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
             "is" => match value {
                 "unread" => clauses.push(
                     "EXISTS (SELECT 1 FROM message_locations ml \
-                     WHERE ml.message_id = messages.id AND ml.seen = 0 AND NOT ml.deleted)"
+                     WHERE ml.message_id = m.id AND ml.seen = 0 AND NOT ml.deleted)"
                         .to_string(),
                 ),
                 "starred" => clauses.push(
                     "EXISTS (SELECT 1 FROM message_locations ml \
-                     WHERE ml.message_id = messages.id AND ml.flagged = 1 AND NOT ml.deleted)"
+                     WHERE ml.message_id = m.id AND ml.flagged = 1 AND NOT ml.deleted)"
                         .to_string(),
                 ),
                 other => return Err(SearchError::UnknownField(format!("is:{other}"))),
             },
             "has" => match value {
-                "attachment" => clauses.push("messages.has_attachments = 1".to_string()),
+                "attachment" => clauses.push("m.has_attachments = 1".to_string()),
                 other => return Err(SearchError::UnknownField(format!("has:{other}"))),
             },
             _ => return Err(SearchError::UnknownField(format!("{field}:{value}"))),
@@ -325,7 +325,35 @@ mod tests {
             "CREATE TABLE messages (
                 id INTEGER PRIMARY KEY,
                 account_id INTEGER,
-                subject TEXT
+                subject TEXT,
+                has_attachments INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE mailboxes (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL
+            );
+            CREATE TABLE message_locations (
+                id INTEGER PRIMARY KEY,
+                message_id INTEGER NOT NULL,
+                mailbox_id INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                seen INTEGER NOT NULL DEFAULT 0,
+                flagged INTEGER NOT NULL DEFAULT 0,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (mailbox_id, uid)
+            );
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL
+            );
+            CREATE TABLE message_tags (
+                message_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (message_id, tag_id)
             );
             CREATE TABLE messages_fts_content (
                 message_id INTEGER PRIMARY KEY,
@@ -343,8 +371,20 @@ mod tests {
                 content_rowid = 'message_id',
                 tokenize = 'unicode61 remove_diacritics 2'
             );
-            INSERT INTO messages VALUES (1, 42, 'Quarterly report');
-            INSERT INTO messages VALUES (2, 7, 'Team budgets');
+            INSERT INTO messages (id, account_id, subject, has_attachments)
+                 VALUES (1, 42, 'Quarterly report', 1);
+            INSERT INTO messages (id, account_id, subject, has_attachments)
+                 VALUES (2, 7, 'Team budgets', 0);
+            INSERT INTO mailboxes VALUES (1, 42, 'Inbox', 'inbox');
+            INSERT INTO mailboxes VALUES (2, 7, 'Archive', 'archive');
+            INSERT INTO message_locations
+                 (id, message_id, mailbox_id, uid, seen, flagged, deleted)
+                 VALUES (1, 1, 1, 1, 1, 0, 0);
+            INSERT INTO message_locations
+                 (id, message_id, mailbox_id, uid, seen, flagged, deleted)
+                 VALUES (2, 2, 2, 1, 0, 1, 0);
+            INSERT INTO tags VALUES (1, 42, 'invoices', 'local');
+            INSERT INTO message_tags VALUES (1, 1);
             INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
                  VALUES (1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine');
             INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
@@ -367,10 +407,94 @@ mod tests {
         assert_eq!(hits[0].message_id, 1);
         assert_eq!(hits[0].account_id, 42);
         assert_eq!(hits[0].subject.as_deref(), Some("Quarterly report"));
+        assert!(hits[0].snippet.is_none());
 
         // -1 searches every account.
         let all = search(&conn, -1, "budgets").unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn tag_clause_hits_only_tagged_message() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "tag:invoices").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn is_unread_clause_hits_only_unseen_message() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "is:unread").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 2);
+    }
+
+    #[test]
+    fn is_starred_clause_hits_only_flagged_message() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "is:starred").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 2);
+    }
+
+    #[test]
+    fn has_attachment_clause_hits_only_attachment_message() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "has:attachment").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn in_clause_hits_only_that_mailbox_kind() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "in:inbox").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn empty_query_without_account_runs_without_where() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.snippet.is_none()));
+    }
+
+    #[test]
+    fn limit_truncates_the_result_page() {
+        let conn = open_fixture();
+        for id in 3..58 {
+            conn.execute(
+                "INSERT INTO messages (id, account_id, subject, has_attachments)
+                 VALUES (?1, 42, ?2, 0)",
+                rusqlite::params![id, format!("filler {id}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts_content
+                    (message_id, subject, from_text, to_text, body)
+                 VALUES (?1, ?2, 'x', 'x', 'filler body')",
+                rusqlite::params![id, format!("filler {id}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (?1, ?2, 'x', 'x', 'filler body')",
+                rusqlite::params![id, format!("filler {id}")],
+            )
+            .unwrap();
+        }
+
+        let hits = search(&conn, -1, "").unwrap();
+        assert_eq!(hits.len(), 50);
     }
 
     #[test]
