@@ -156,6 +156,26 @@ project (global `AGENTS.md` §4 and §13).
   panics at dispatch.rs:2334 (pre-existing; fails every M3 PR run, e.g.
   40055924645 and PR #14's 40097171641) — investigate and fix before M3
   close (`rust/crates/daemon/src/dispatch.rs:2334`).
+- MAILSLATE-57 — bridge search replies use `id` while the bridge parses
+  `message_id`, so every real end-to-end search fails at bridge parse;
+  `total` is page size, not the documented across-all-pages count
+  (`rust/crates/daemon/src/dispatch.rs:823`,
+  `rust/crates/bridge/src/api/search.rs:64`).
+- MAILSLATE-58 — `escape_fts` special-char set is incomplete vs the FTS5
+  bareword set: `from:john@example.com` hard-errors and bare `OR`/`NOT`
+  silently change the `MATCH` shape; literal-operator semantics must be
+  decided vs USER_FLOW §7.3 before quoting unconditionally
+  (`rust/crates/core/src/domain/search.rs:264-282`).
+- MAILSLATE-59 — bm25 weights rank subject at 0, contradicting the
+  spec's "subject ≫ from/to > body" intent; `heartbeat_pings…` timed out
+  once under parallel suite load (3/3 green solo) — tune weights, widen
+  the timeout (`rust/crates/core/src/domain/search.rs:195`,
+  `rust/crates/core/src/infra/events.rs:331`).
+- MAILSLATE-60 — remaining F7 polish: real sanitized snippets, bridge
+  `search(query, filters, cursor)` shape (ARCHITECTURE §257), F7.5
+  latency bench, empty-query UX (USER_FLOW §7.5), `-1` sentinel spec
+  sync (`rust/crates/core/src/domain/search.rs`,
+  `rust/crates/infra/ipc.rs:250`, `rust/crates/bridge/src/api/search.rs:34`).
 
 ## Acknowledged test deferrals
 
