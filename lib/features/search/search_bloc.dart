@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:mailslate/core/failures/failures.dart';
@@ -158,6 +156,8 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
         query: _buildQuery(event.query),
       );
       if (emit.isDone) return;
+      // The query may have been cleared while awaiting the daemon.
+      if (event.query != _currentQueryText) return;
       emit(
         SearchResults(
           hits: result.messages
@@ -176,10 +176,12 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       );
     } on AppFailure catch (failure) {
       if (emit.isDone) return;
+      if (event.query != _currentQueryText) return;
       emit(SearchErrorState(failure.message));
     } catch (error, stackTrace) {
       logError('search_failed', error: error, stackTrace: stackTrace);
       if (emit.isDone) return;
+      if (event.query != _currentQueryText) return;
       emit(const SearchErrorState('Search failed — try again.'));
     }
   }

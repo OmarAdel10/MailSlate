@@ -79,12 +79,14 @@ void main() {
 
     testWidgets('mount never sends a query to the daemon', (tester) async {
       final client = FakeFfiClient();
-      await _pump(tester, client: client);
+      final bloc = await _pump(tester, client: client);
 
       // Even past the debounce window the daemon must never have been
       // asked anything: the IME attach happens before any typing.
       await _settleAll(tester);
       expect(client.searchCalls, 0);
+      // The screen guard specifically: no query event ever left the bar.
+      expect(bloc.addedEvents.whereType<SearchQueryChanged>(), isEmpty);
 
       await _unmount(tester);
     });
@@ -166,7 +168,8 @@ void main() {
     });
 
     testWidgets('clear button resets to the placeholder', (tester) async {
-      await _pump(tester);
+      final client = FakeFfiClient();
+      final bloc = await _pump(tester, client: client);
 
       await tester.enterText(find.byType(TextField), 'budgets');
       await _settleAll(tester);
@@ -176,6 +179,16 @@ void main() {
       await _settleAll(tester);
 
       expect(find.text('Search messages'), findsOneWidget);
+      // The clear button clears the controller (which broadcasts the
+      // empty query) and then dispatches the explicit clear event.
+      expect(
+        bloc.addedEvents.whereType<SearchQueryChanged>().map((e) => e.query),
+        ['budgets', ''],
+      );
+      expect(bloc.addedEvents.whereType<SearchCleared>(), hasLength(1));
+      expect(client.searchCalls, 1);
+
+      await _unmount(tester);
     });
   });
 
@@ -211,6 +224,11 @@ void main() {
       await tester.tap(find.text('Try again'));
       await _settleAll(tester);
 
+      // Enshrined deviation (tracked as a follow-up): retry dispatches
+      // SearchCleared, so the controller keeps the typed text and the
+      // clear affordance stays visible while the placeholder lead shows.
+      // A follow-up decides whether retry should re-run the query
+      // instead of discarding it.
       expect(find.text('Search messages'), findsOneWidget);
 
       await _unmount(tester);
