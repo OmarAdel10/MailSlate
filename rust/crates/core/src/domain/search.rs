@@ -445,6 +445,49 @@ mod tests {
     }
 
     #[test]
+    fn deleted_locations_are_excluded_from_flag_clauses() {
+        let conn = open_fixture();
+
+        // A trashed message that would otherwise match both flag
+        // clauses (unseen and flagged) — its location row is marked
+        // deleted, so the NOT ml.deleted filter must keep it hidden.
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, has_attachments)
+             VALUES (3, 7, 'Ignore me', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_locations
+                (id, message_id, mailbox_id, uid, seen, flagged, deleted)
+             VALUES (3, 3, 2, 2, 0, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts_content
+                (message_id, subject, from_text, to_text, body)
+             VALUES (3, 'Ignore me', 'x', 'x', 'nothing to see')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+             VALUES (3, 'Ignore me', 'x', 'x', 'nothing to see')",
+            [],
+        )
+        .unwrap();
+
+        let unread = search(&conn, -1, "is:unread").unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].message_id, 2);
+
+        let starred = search(&conn, -1, "is:starred").unwrap();
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].message_id, 2);
+    }
+
+    #[test]
     fn has_attachment_clause_hits_only_attachment_message() {
         let conn = open_fixture();
 
@@ -521,6 +564,24 @@ mod tests {
         // seen, so is:unread filters it out.
         let hits = search(&conn, 42, "budgets is:unread").unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn multi_clause_bind_order_survives_three_params() {
+        let conn = open_fixture();
+
+        // Two clause params (tag, in) interleaved with the MATCH and
+        // limit binds: the positional vector is account i64, tag
+        // param, in param, MATCH, limit. A single drift in that order
+        // misaligns every later bind.
+        let hits = search(&conn, 42, "budgets tag:invoices in:inbox").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+        assert_eq!(hits[0].account_id, 42);
+
+        // The missing tag drops the row without shifting binds.
+        let none = search(&conn, 42, "budgets tag:missing in:inbox").unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]
