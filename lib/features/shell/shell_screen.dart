@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:mailslate/core/di/di.dart';
@@ -11,6 +12,8 @@ import 'package:mailslate/features/accounts/account_colors.dart';
 import 'package:mailslate/features/accounts/account_settings_dialog.dart';
 import 'package:mailslate/features/accounts/accounts_bloc.dart';
 import 'package:mailslate/features/accounts/wizard/account_wizard_screen.dart';
+import 'package:mailslate/features/search/search_bloc.dart';
+import 'package:mailslate/features/search/search_screen.dart';
 
 import 'app_events_bloc.dart';
 import 'daemon_status_bloc.dart';
@@ -87,49 +90,92 @@ class _ShellView extends StatefulWidget {
 
 class _ShellViewState extends State<_ShellView> {
   MailView _selectedView = MailView.inbox;
+  bool _searchActive = false;
+
+  void _openSearch() {
+    if (!_searchActive) {
+      setState(() => _searchActive = true);
+    }
+  }
+
+  void _closeSearch() {
+    if (_searchActive) {
+      setState(() => _searchActive = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final tokens = context.tokens;
-    return Scaffold(
-      backgroundColor: tokens.canvas,
-      body: Row(
-        children: [
-          _Sidebar(
-            key: const Key('shell-sidebar'),
-            selectedView: _selectedView,
-            onSelect: (view) => setState(() => _selectedView = view),
-          ),
-          VerticalDivider(width: 1, thickness: 1, color: tokens.hairline),
-          Expanded(
-            child: Column(
-              children: [
-                const _Toolbar(key: Key('shell-toolbar')),
-                Divider(height: 1, thickness: 1, color: tokens.hairline),
-                const _UnavailableBanner(),
-                const _ReconnectBanner(),
-                Expanded(
-                  child: Row(
-                    children: [
-                      _ConversationList(
-                        key: const Key('shell-list'),
-                        view: _selectedView,
+    // Shell-level search shortcuts (USER_FLOW §7.1, §11): `Cmd/Ctrl+F` opens
+    // search, `Esc` returns to the list. Routes with their own focus scope —
+    // dialogs, the wizard — are not in this node's focus chain, so the
+    // bindings never fire behind them.
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+            _openSearch,
+        const SingleActivator(LogicalKeyboardKey.keyF, meta: true): _openSearch,
+        const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          backgroundColor: tokens.canvas,
+          body: Row(
+            children: [
+              _Sidebar(
+                key: const Key('shell-sidebar'),
+                selectedView: _selectedView,
+                onSelect: (view) => setState(() => _selectedView = view),
+              ),
+              VerticalDivider(width: 1, thickness: 1, color: tokens.hairline),
+              Expanded(
+                child: Column(
+                  children: [
+                    _Toolbar(
+                      key: const Key('shell-toolbar'),
+                      onSearch: () => setState(() => _searchActive = true),
+                    ),
+                    Divider(height: 1, thickness: 1, color: tokens.hairline),
+                    const _UnavailableBanner(),
+                    const _ReconnectBanner(),
+                    Expanded(
+                      child: Row(
+                        children: [
+                          if (_searchActive)
+                            Expanded(
+                              child: BlocProvider(
+                                create: (_) => SearchBloc(getIt<FfiClient>()),
+                                child: SearchScreen(
+                                  key: const Key('shell-search-screen'),
+                                  onClose: () =>
+                                      setState(() => _searchActive = false),
+                                ),
+                              ),
+                            )
+                          else
+                            _ConversationList(
+                              key: const Key('shell-list'),
+                              view: _selectedView,
+                            ),
+                          VerticalDivider(
+                            width: 1,
+                            thickness: 1,
+                            color: tokens.hairline,
+                          ),
+                          const Expanded(
+                            child: _ReaderPane(key: Key('shell-reader')),
+                          ),
+                        ],
                       ),
-                      VerticalDivider(
-                        width: 1,
-                        thickness: 1,
-                        color: tokens.hairline,
-                      ),
-                      const Expanded(
-                        child: _ReaderPane(key: Key('shell-reader')),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -367,7 +413,9 @@ class _AddAccountItem extends StatelessWidget {
 }
 
 class _Toolbar extends StatelessWidget {
-  const _Toolbar({super.key});
+  const _Toolbar({super.key, this.onSearch});
+
+  final VoidCallback? onSearch;
 
   @override
   Widget build(BuildContext context) {
@@ -376,8 +424,18 @@ class _Toolbar extends StatelessWidget {
       height: 56,
       color: tokens.surfaceSoft,
       padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: const Row(
-        children: [_DaemonStatusCluster(), Spacer(), _RefreshButton()],
+      child: Row(
+        children: [
+          _DaemonStatusCluster(),
+          const Spacer(),
+          IconButton(
+            key: const Key('shell-search'),
+            icon: const Icon(Symbols.search, size: 18),
+            tooltip: 'Search (Cmd/Ctrl+F)',
+            onPressed: onSearch,
+          ),
+          const _RefreshButton(),
+        ],
       ),
     );
   }

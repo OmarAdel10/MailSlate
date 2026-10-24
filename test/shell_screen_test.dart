@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mailslate/core/di/di.dart';
@@ -595,5 +596,113 @@ void main() {
       find.byKey(const Key('account-reconnect-7')),
     );
     expect(button.onPressed, isNotNull);
+  });
+
+  testWidgets('Ctrl+F opens the search screen', (tester) async {
+    final client = FakeFfiClient(status: _running);
+    configureDependencies(client: client);
+
+    await tester.pumpWidget(shell(client));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('shell-list')), findsOneWidget);
+    expect(find.byKey(const Key('shell-search-screen')), findsNothing);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('shell-search-screen')), findsOneWidget);
+    expect(find.byKey(const Key('shell-list')), findsNothing);
+  });
+
+  testWidgets('Cmd+F (meta) also opens the search screen', (tester) async {
+    final client = FakeFfiClient(status: _running);
+    configureDependencies(client: client);
+
+    await tester.pumpWidget(shell(client));
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('shell-search-screen')), findsOneWidget);
+    expect(find.byKey(const Key('shell-list')), findsNothing);
+  });
+
+  testWidgets('Esc returns to the list while search is open', (tester) async {
+    final client = FakeFfiClient(status: _running);
+    configureDependencies(client: client);
+
+    await tester.pumpWidget(shell(client));
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('shell-search-screen')), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('shell-list')), findsOneWidget);
+    expect(find.byKey(const Key('shell-search-screen')), findsNothing);
+  });
+
+  testWidgets('Esc without search on does not change the view', (tester) async {
+    final client = FakeFfiClient(status: _running);
+    configureDependencies(client: client);
+
+    await tester.pumpWidget(shell(client));
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('shell-list')), findsOneWidget);
+  });
+
+  testWidgets('the toolbar search button opens the search screen', (
+    tester,
+  ) async {
+    final client = FakeFfiClient(status: _running);
+    configureDependencies(client: client);
+
+    await tester.pumpWidget(shell(client));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('shell-search')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('shell-search-screen')), findsOneWidget);
+    expect(find.byKey(const Key('shell-list')), findsNothing);
+  });
+
+  testWidgets('the close button in search returns to the list', (tester) async {
+    final client = FakeFfiClient(status: _running);
+    configureDependencies(client: client);
+
+    await tester.pumpWidget(shell(client));
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('shell-search-screen')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('search-close')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('shell-list')), findsOneWidget);
+    expect(find.byKey(const Key('shell-search-screen')), findsNothing);
   });
 }
