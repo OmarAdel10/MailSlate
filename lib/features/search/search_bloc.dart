@@ -207,6 +207,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     Emitter<SearchState> emit,
   ) async {
     final existing = _filters.indexWhere((f) => f.key == event.filter.key);
+    final hadFilter = existing >= 0;
     if (existing >= 0) {
       _filters.removeAt(existing);
     } else {
@@ -214,6 +215,13 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     }
     final currentQuery = _currentQueryText;
     if (currentQuery.isNotEmpty) {
+      // The query text or the filter set may change while the re-run is
+      // in flight; either makes the awaited result stale.
+      bool isStale() {
+        final stillHas = _filters.any((f) => f.key == event.filter.key);
+        return currentQuery != _currentQueryText || stillHas == hadFilter;
+      }
+
       emit(SearchLoading(currentQuery));
       try {
         final result = await _client.search(
@@ -221,6 +229,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
           query: _buildQuery(currentQuery),
         );
         if (emit.isDone) return;
+        if (isStale()) return;
         emit(
           SearchResults(
             hits: result.messages
@@ -239,10 +248,12 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
         );
       } on AppFailure catch (failure) {
         if (emit.isDone) return;
+        if (isStale()) return;
         emit(SearchErrorState(failure.message));
       } catch (error, stackTrace) {
         logError('search_filter_failed', error: error, stackTrace: stackTrace);
         if (emit.isDone) return;
+        if (isStale()) return;
         emit(const SearchErrorState('Search failed — try again.'));
       }
     } else {

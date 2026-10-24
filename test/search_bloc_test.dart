@@ -217,6 +217,66 @@ void main() {
       );
       expect(client.searchCalls, 2);
     });
+
+    test(
+      'a mid-flight clear keeps the filter re-run idle once the gate opens',
+      () async {
+        final gate = Completer<void>();
+        final client = FakeFfiClient(searchGate: gate);
+        final bloc = SearchBloc(client);
+        addTearDown(bloc.close);
+
+        bloc.add(const SearchQueryChanged('budgets'));
+        await _settle(bloc, () => client.searchCalls == 1);
+        bloc.add(const SearchFilterToggled(tag));
+        await _settle(bloc, () => client.searchCalls == 2);
+
+        bloc.add(const SearchCleared());
+        await _settle(bloc, () => bloc.state is SearchIdle);
+
+        gate.complete();
+        await pumpEventQueue();
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await pumpEventQueue();
+
+        // Neither the stale query run nor the stale filter re-run may
+        // overwrite the idle state once the gate opens.
+        expect(bloc.state, isA<SearchIdle>());
+        expect(client.searchCalls, 2);
+      },
+    );
+
+    test('an empty-text reset keeps the filters for the next query', () async {
+      final client = FakeFfiClient();
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      bloc.add(const SearchFilterToggled(tag));
+      await _settle(bloc, () => client.searchCalls == 2);
+
+      bloc.add(const SearchQueryChanged(''));
+      await _settle(bloc, () => bloc.state is SearchIdle);
+
+      bloc.add(const SearchQueryChanged('report'));
+      await _settle(bloc, () => bloc.state is SearchResults);
+
+      expect(client.lastSearchQuery, 'report tag:invoices');
+    });
+
+    test('an empty-value filter adds no clause to the query', () async {
+      final client = FakeFfiClient();
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      bloc.add(const SearchFilterToggled(SearchFilter(key: 'tag', value: '')));
+      await _settle(bloc, () => client.searchCalls == 2);
+
+      expect(client.lastSearchQuery, 'budgets');
+    });
   });
 
   group('SearchBloc clears', () {
@@ -316,6 +376,53 @@ void main() {
         expect(client.searchCalls, 1);
       },
     );
+
+    test('a mid-flight clear drops the stale daemon failure', () async {
+      final gate = Completer<void>();
+      final client = FakeFfiClient(searchGate: gate);
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      client.searchFailureAfterGate = const NetworkFailure(
+        message: 'daemon gone',
+      );
+
+      bloc.add(const SearchQueryChanged(''));
+      await _settle(bloc, () => bloc.state is SearchIdle);
+
+      gate.complete();
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+
+      // The stale failure must not surface after the clear.
+      expect(bloc.state, isA<SearchIdle>());
+      expect(client.searchCalls, 1);
+    });
+
+    test('a mid-flight clear drops the stale unexpected throw', () async {
+      final gate = Completer<void>();
+      final client = FakeFfiClient(searchGate: gate);
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      client.searchThrowAfterGate = StateError('boom');
+
+      bloc.add(const SearchQueryChanged(''));
+      await _settle(bloc, () => bloc.state is SearchIdle);
+
+      gate.complete();
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+
+      expect(bloc.state, isA<SearchIdle>());
+      expect(client.searchCalls, 1);
+    });
   });
 
   group('SearchBloc submit', () {
@@ -342,6 +449,24 @@ void main() {
 
       expect(client.searchCalls, 1);
       expect(bloc.state, isA<SearchResults>());
+    });
+  });
+
+  group('SearchBloc lifecycle', () {
+    test('closing mid-debounce does not search and does not throw', () async {
+      final client = FakeFfiClient();
+      final bloc = SearchBloc(client);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await bloc.close();
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      await pumpEventQueue();
+
+      // The debounce delay resolves before the isDone check, so a close
+      // inside the window never reaches the client.
+      expect(bloc.isClosed, isTrue);
+      expect(client.searchCalls, 0);
     });
   });
 }

@@ -179,6 +179,8 @@ void main() {
       await _settleAll(tester);
 
       expect(find.text('Search messages'), findsOneWidget);
+      // The rebuild also hides the clear affordance.
+      expect(find.byKey(const Key('search-clear')), findsNothing);
       // The clear button clears the controller (which broadcasts the
       // empty query) and then dispatches the explicit clear event.
       expect(

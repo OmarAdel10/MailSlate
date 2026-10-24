@@ -130,6 +130,14 @@ class FakeFfiClient extends FfiClient {
   /// widget tests can observe the loading state.
   Completer<void>? searchGate;
 
+  /// When set, [FfiClient.search] throws it after the [searchGate]
+  /// completes, so tests can fail an in-flight call after a clear.
+  AppFailure? searchFailureAfterGate;
+
+  /// When set, [FfiClient.search] throws it after the [searchGate]
+  /// completes (any object, for the generic catch arm).
+  Object? searchThrowAfterGate;
+
   /// How often [FfiClient.search] was called.
   int searchCalls = 0;
 
@@ -378,6 +386,14 @@ class FakeFfiClient extends FfiClient {
     final gate = searchGate;
     if (gate != null) {
       await gate.future;
+    }
+    final lateFailure = searchFailureAfterGate;
+    if (lateFailure != null) {
+      throw lateFailure;
+    }
+    final lateThrow = searchThrowAfterGate;
+    if (lateThrow != null) {
+      throw lateThrow;
     }
     return searchResult;
   }
