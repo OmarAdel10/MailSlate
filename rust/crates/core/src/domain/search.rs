@@ -148,7 +148,7 @@ pub fn search_sql_base() -> &'static str {
     "SELECT m.id, m.account_id, m.subject, NULL as snippet \
      FROM messages_fts \
      JOIN messages m ON m.id = messages_fts.rowid \
-     WHERE m.account_id = ?"
+     WHERE ?1 = -1 OR m.account_id = ?1"
 }
 
 /// Runs [`parse`] then `search_sql()` and returns the hits. HTML
@@ -175,7 +175,8 @@ pub fn search(
     }
     sql.push_str(" ORDER BY bm25(messages_fts, 0, 5.0, 2.0, 1.0, 1.0) LIMIT ?");
 
-    let mut binds: Vec<Bind> = Vec::with_capacity(2 + where_clauses.len());
+    let mut binds: Vec<Bind> = Vec::with_capacity(3 + where_clauses.len());
+    binds.push(Bind::I64(account_id));
     binds.push(Bind::I64(account_id));
     for p in &params {
         binds.push(Bind::Str(p.clone()));
