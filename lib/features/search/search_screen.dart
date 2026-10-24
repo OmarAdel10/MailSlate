@@ -62,7 +62,11 @@ class _SearchScreenState extends State<SearchScreen> {
                     return const _SearchEmptyState();
                   case SearchLoading(query: final query):
                     return _SearchLoading(query);
-                  case SearchResults(hits: final hits, total: final total, query: final query):
+                  case SearchResults(
+                    hits: final hits,
+                    total: final total,
+                    query: final query,
+                  ):
                     return _SearchResults(
                       hits: hits,
                       total: total,
@@ -82,11 +86,7 @@ class _SearchScreenState extends State<SearchScreen> {
 
 /// Search entry field: as-you-type with 150ms debounce (USER_FLOW §7 step 1).
 class _SearchBar extends StatelessWidget {
-  const _SearchBar({
-    super.key,
-    required this.controller,
-    required this.onClose,
-  });
+  const _SearchBar({required this.controller, required this.onClose});
 
   final TextEditingController controller;
   final VoidCallback onClose;
@@ -165,7 +165,7 @@ class _SearchEmptyState extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             'Type to search across all messages. Use from:, to:, subject:, '
-                'in:, tag:, is:unread, is:starred, has:attachment.',
+            'in:, tag:, is:unread, is:starred, has:attachment.',
             style: Theme.of(context).textTheme.bodyMedium
                 ?.copyWith(color: tokens.muted),
             textAlign: TextAlign.center,
@@ -193,7 +193,10 @@ class _SearchLoading extends StatelessWidget {
           SizedBox(
             width: 16,
             height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2, color: tokens.accent),
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: tokens.accent,
+            ),
           ),
           const SizedBox(height: 12),
           Text(
@@ -210,7 +213,6 @@ class _SearchLoading extends StatelessWidget {
 /// Results: ranked hits newest-first with snippets.
 class _SearchResults extends StatelessWidget {
   const _SearchResults({
-    super.key,
     required this.hits,
     required this.total,
     required this.query,
@@ -247,18 +249,18 @@ class _SearchResults extends StatelessWidget {
             ),
           )
         : ListView.builder(
-          itemCount: hits.length,
-          itemBuilder: (context, index) {
-            final hit = hits[index];
-            return _SearchHitRow(hit: hit);
-          },
-        );
+            itemCount: hits.length,
+            itemBuilder: (context, index) {
+              final hit = hits[index];
+              return _SearchHitRow(hit: hit);
+            },
+          );
   }
 }
 
 /// One search hit row: subject, snippet, metadata.
 class _SearchHitRow extends StatelessWidget {
-  const _SearchHitRow({super.key, required this.hit});
+  const _SearchHitRow({required this.hit});
 
   final SearchHitData hit;
 
@@ -335,7 +337,8 @@ class _SearchError extends StatelessWidget {
           ),
           const SizedBox(height: 16),
           FilledButton(
-            onPressed: () => context.read<SearchBloc>().add(const SearchCleared()),
+            onPressed: () =>
+                context.read<SearchBloc>().add(const SearchCleared()),
             child: const Text('Try again'),
           ),
         ],

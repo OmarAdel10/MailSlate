@@ -4,7 +4,6 @@ import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/core/failures/failures.dart';
 import 'package:mailslate/src/rust/api/mailbox.dart';
 import 'package:mailslate/src/rust/api/reader.dart';
-import 'package:mailslate/src/rust/api/search.dart';
 import 'package:mailslate/src/rust/api/system.dart';
 import 'package:mailslate/src/rust/api/threading.dart';
 import 'package:mailslate/src/rust/frb_generated.dart';
