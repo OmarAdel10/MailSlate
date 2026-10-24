@@ -183,6 +183,21 @@ void main() {
   });
 
   group('SearchBloc clears', () {
+    test('clearing back to empty goes idle without searching', () async {
+      final client = FakeFfiClient();
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => bloc.state is SearchResults);
+
+      bloc.add(const SearchQueryChanged(''));
+      await _settle(bloc, () => bloc.state is SearchIdle);
+
+      // Only the first, non-empty query ran.
+      expect(client.searchCalls, 1);
+    });
+
     test('returns to idle and drops filters', () async {
       final client = FakeFfiClient();
       final bloc = SearchBloc(client);

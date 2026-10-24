@@ -129,7 +129,6 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   }
 
   final FfiClient _client;
-  Timer? _debounceTimer;
 
   /// The current filter set; persisted across queries.
   final List<SearchFilter> _filters = [];
@@ -137,19 +136,17 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   /// The current free-text query text.
   String _currentQueryText = '';
 
-  @override
-  Future<void> close() async {
-    _debounceTimer?.cancel();
-    await super.close();
-  }
-
   /// Debounces user input by 150ms (USER_FLOW §7).
   Future<void> _onQueryChanged(
     SearchQueryChanged event,
     Emitter<SearchState> emit,
   ) async {
     _currentQueryText = event.query;
-    _debounceTimer?.cancel();
+    if (event.query.isEmpty) {
+      // Empty search text: back to the placeholder, never a query.
+      emit(const SearchIdle());
+      return;
+    }
     await Future.delayed(const Duration(milliseconds: 150));
     if (emit.isDone) return;
     // Only run if this is still the latest query.
@@ -198,7 +195,6 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     SearchCleared event,
     Emitter<SearchState> emit,
   ) async {
-    _debounceTimer?.cancel();
     _currentQueryText = '';
     _filters.clear();
     emit(const SearchIdle());
