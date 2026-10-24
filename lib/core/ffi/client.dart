@@ -79,8 +79,8 @@ class FfiClient {
     required rust_accounts.ImapDraft draft,
     required String password,
   }) => _guard(
-        () => rust_accounts.addImapAccount(draft: draft, password: password),
-      );
+    () => rust_accounts.addImapAccount(draft: draft, password: password),
+  );
 
   /// Starts the OAuth flow for [provider] and returns the authorize url.
   ///
@@ -106,12 +106,12 @@ class FfiClient {
     required String email,
     String? color,
   }) => _guard(
-        () => rust_accounts.completeOauthAccount(
-          displayName: displayName,
-          email: email,
-          color: color,
-        ),
-      );
+    () => rust_accounts.completeOauthAccount(
+      displayName: displayName,
+      email: email,
+      color: color,
+    ),
+  );
 
   /// Aborts an in-flight OAuth flow on the daemon: releases the session
   /// slot and drops staged tokens so a new flow can start immediately.
@@ -130,8 +130,8 @@ class FfiClient {
     required int accountId,
     required rust_accounts.AccountPatch patch,
   }) => _guard(
-        () => rust_accounts.updateAccount(accountId: accountId, patch: patch),
-      );
+    () => rust_accounts.updateAccount(accountId: accountId, patch: patch),
+  );
 
   /// Removes an account row.
   ///
@@ -147,8 +147,8 @@ class FfiClient {
     required rust_accounts.ImapDraft draft,
     required String password,
   }) => _guard(
-        () => rust_accounts.testConnection(draft: draft, password: password),
-      );
+    () => rust_accounts.testConnection(draft: draft, password: password),
+  );
 
   /// Full-text search across `account_id`'s messages using `query`.
   ///

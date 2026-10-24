@@ -32,7 +32,8 @@ final class SearchHitData {
 
 /// A filter chip applied to narrow the search scope.
 final class SearchFilter {
-  final String key; // 'account', 'tag', 'is:unread', 'is:starred', 'has:attachment'
+  final String
+  key; // 'account', 'tag', 'is:unread', 'is:starred', 'has:attachment'
   final String value;
 
   const SearchFilter({required this.key, required this.value});
@@ -98,7 +99,11 @@ final class SearchResults extends SearchState {
   final int total;
   final String query;
 
-  const SearchResults({required this.hits, required this.total, required this.query});
+  const SearchResults({
+    required this.hits,
+    required this.total,
+    required this.query,
+  });
 }
 
 /// Error: the daemon rejected the query.
@@ -156,16 +161,22 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
         query: _buildQuery(event.query),
       );
       if (emit.isDone) return;
-      emit(SearchResults(
-        hits: result.messages.map((h) => SearchHitData(
-          messageId: h.messageId.toInt(),
-          accountId: h.accountId.toInt(),
-          subject: h.subject,
-          snippet: h.snippet,
-        )).toList(),
-        total: result.total.toInt(),
-        query: event.query,
-      ));
+      emit(
+        SearchResults(
+          hits: result.messages
+              .map(
+                (h) => SearchHitData(
+                  messageId: h.messageId.toInt(),
+                  accountId: h.accountId.toInt(),
+                  subject: h.subject,
+                  snippet: h.snippet,
+                ),
+              )
+              .toList(),
+          total: result.total.toInt(),
+          query: event.query,
+        ),
+      );
     } on AppFailure catch (failure) {
       if (emit.isDone) return;
       emit(SearchErrorState(failure.message));
@@ -176,11 +187,17 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     }
   }
 
-  Future<void> _onSubmitted(SearchSubmitted event, Emitter<SearchState> emit) async {
+  Future<void> _onSubmitted(
+    SearchSubmitted event,
+    Emitter<SearchState> emit,
+  ) async {
     // Already loading from debounce; the result will arrive.
   }
 
-  Future<void> _onCleared(SearchCleared event, Emitter<SearchState> emit) async {
+  Future<void> _onCleared(
+    SearchCleared event,
+    Emitter<SearchState> emit,
+  ) async {
     _debounceTimer?.cancel();
     _currentQueryText = '';
     _filters.clear();
@@ -206,16 +223,22 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
           query: _buildQuery(currentQuery),
         );
         if (emit.isDone) return;
-        emit(SearchResults(
-          hits: result.messages.map((h) => SearchHitData(
-            messageId: h.messageId.toInt(),
-            accountId: h.accountId.toInt(),
-            subject: h.subject,
-            snippet: h.snippet,
-          )).toList(),
-          total: result.total.toInt(),
-          query: _buildQuery(currentQuery),
-        ));
+        emit(
+          SearchResults(
+            hits: result.messages
+                .map(
+                  (h) => SearchHitData(
+                    messageId: h.messageId.toInt(),
+                    accountId: h.accountId.toInt(),
+                    subject: h.subject,
+                    snippet: h.snippet,
+                  ),
+                )
+                .toList(),
+            total: result.total.toInt(),
+            query: _buildQuery(currentQuery),
+          ),
+        );
       } on AppFailure catch (failure) {
         if (emit.isDone) return;
         emit(SearchErrorState(failure.message));
@@ -229,7 +252,10 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     }
   }
 
-  Future<void> _onFocusRequested(SearchFocusRequested event, Emitter<SearchState> emit) async {
+  Future<void> _onFocusRequested(
+    SearchFocusRequested event,
+    Emitter<SearchState> emit,
+  ) async {
     // The shell widget focuses the text field when this event arrives.
   }
 
