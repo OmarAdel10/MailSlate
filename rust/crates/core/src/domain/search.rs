@@ -137,6 +137,9 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
     })
 }
 
+/// `account_id` value that searches every account instead of one.
+pub const ALL_ACCOUNTS: i64 = -1;
+
 /// The `SELECT ... FROM messages_fts JOIN messages m` prologue the
 /// search runs against ([`search`] appends `WHERE ... ORDER BY ...
 /// LIMIT ?`; parameters are bound positionally via
@@ -148,9 +151,8 @@ pub fn search_sql_base() -> &'static str {
 }
 
 /// Runs [`parse`] and executes the search against `conn`. The
-/// `account_id` scopes results to one account, or `-1` searches every
-/// account. HTML snippets are sanitized through [`sanitize`] before
-/// shipping.
+/// `account_id` scopes results to one account, or
+/// [`ALL_ACCOUNTS`] searches every account.
 ///
 /// The `WHERE` conditions — account scope, `where_clauses`, and the
 /// FTS `MATCH` — are all joined as top-level `AND` conjunctions:
@@ -168,15 +170,11 @@ pub fn search(
         limit,
     } = parse(query)?;
 
-    let mut sql = String::from(
-        "SELECT m.id, m.account_id, m.subject, NULL as snippet \
-         FROM messages_fts \
-         JOIN messages m ON m.id = messages_fts.rowid",
-    );
+    let mut sql = search_sql_base().to_string();
 
     let mut conds: Vec<String> = Vec::with_capacity(2 + where_clauses.len());
     let mut binds: Vec<Bind> = Vec::with_capacity(2 + where_clauses.len());
-    if account_id != -1 {
+    if account_id != ALL_ACCOUNTS {
         conds.push("m.account_id = ?".to_string());
         binds.push(Bind::I64(account_id));
     }
@@ -207,7 +205,7 @@ pub fn search(
 
     let mut hits: Vec<MessageHit> = Vec::new();
     for hit in rows {
-        hits.push(hit.expect("row maps"));
+        hits.push(hit?);
     }
 
     Ok(hits)
