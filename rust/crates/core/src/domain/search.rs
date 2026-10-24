@@ -137,22 +137,25 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
     })
 }
 
-/// The raw SQL that runs against `messages_fts` (external-content
-/// table) joined to `messages` for the account scope and the hit row.
-///
-/// The base ends at the `WHERE m.account_id = ?` clause; callers append
-/// `AND ...` fragments for `WHERE` clauses and an optional `AND
-/// messages_fts MATCH ?`, then `ORDER BY ... LIMIT ?`. Parameters are
-/// bound positionally via [`rusqlite::params_from_iter`].
+/// The `SELECT ... FROM messages_fts JOIN messages m` prologue the
+/// search runs against ([`search`] appends `WHERE ... ORDER BY ...
+/// LIMIT ?`; parameters are bound positionally via
+/// [`rusqlite::params_from_iter`]).
 pub fn search_sql_base() -> &'static str {
     "SELECT m.id, m.account_id, m.subject, NULL as snippet \
      FROM messages_fts \
-     JOIN messages m ON m.id = messages_fts.rowid \
-     WHERE ?1 = -1 OR m.account_id = ?1"
+     JOIN messages m ON m.id = messages_fts.rowid"
 }
 
-/// Runs [`parse`] then `search_sql()` and returns the hits. HTML
-/// snippets are sanitized through [`sanitize`] before shipping.
+/// Runs [`parse`] and executes the search against `conn`. The
+/// `account_id` scopes results to one account, or `-1` searches every
+/// account. HTML snippets are sanitized through [`sanitize`] before
+/// shipping.
+///
+/// The `WHERE` conditions — account scope, `where_clauses`, and the
+/// FTS `MATCH` — are all joined as top-level `AND` conjunctions:
+/// SQLite only admits `MATCH` as a direct conjunct of the fts table
+/// query, not inside an `OR` branch.
 pub fn search(
     conn: &rusqlite::Connection,
     account_id: i64,
@@ -165,25 +168,31 @@ pub fn search(
         limit,
     } = parse(query)?;
 
-    let mut sql = search_sql_base().to_string();
-    for clause in &where_clauses {
-        sql.push_str(" AND ");
-        sql.push_str(clause);
-    }
-    if !match_expr.is_empty() {
-        sql.push_str(" AND messages_fts MATCH ?");
-    }
-    sql.push_str(" ORDER BY bm25(messages_fts, 0, 5.0, 2.0, 1.0, 1.0) LIMIT ?");
+    let mut sql = String::from(
+        "SELECT m.id, m.account_id, m.subject, NULL as snippet \
+         FROM messages_fts \
+         JOIN messages m ON m.id = messages_fts.rowid",
+    );
 
-    let mut binds: Vec<Bind> = Vec::with_capacity(3 + where_clauses.len());
-    binds.push(Bind::I64(account_id));
-    binds.push(Bind::I64(account_id));
+    let mut conds: Vec<String> = Vec::with_capacity(2 + where_clauses.len());
+    let mut binds: Vec<Bind> = Vec::with_capacity(2 + where_clauses.len());
+    if account_id != -1 {
+        conds.push("m.account_id = ?".to_string());
+        binds.push(Bind::I64(account_id));
+    }
+    conds.extend(where_clauses.iter().cloned());
     for p in &params {
         binds.push(Bind::Str(p.clone()));
     }
     if !match_expr.is_empty() {
+        conds.push("messages_fts MATCH ?".to_string());
         binds.push(Bind::Str(match_expr.clone()));
     }
+    if !conds.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conds.join(" AND "));
+    }
+    sql.push_str(" ORDER BY bm25(messages_fts, 0, 5.0, 2.0, 1.0, 1.0) LIMIT ?");
     binds.push(Bind::I64(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
