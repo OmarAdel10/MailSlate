@@ -154,8 +154,10 @@ project (global `AGENTS.md` §4 and §13).
 - MAILSLATE-56 — M3: CI rust job red on the `feature/m3-reading-search` tip
   since PR #9/#13: `dispatch::tests::spawn_on_add::search_dispatch_returns_hits_for_account`
   panics at dispatch.rs:2334 (pre-existing; fails every M3 PR run, e.g.
-  40055924645 and PR #14's 40097171641) — investigate and fix before M3
-  close (`rust/crates/daemon/src/dispatch.rs:2334`).
+  40055924645 and PR #14's 40097171641) — FIXED 2026-10-25 in
+  `fix/search-account-bind` (flattened WHERE keeps MATCH top-level,
+  account bound once) — close on merge
+  (`rust/crates/daemon/src/dispatch.rs:2334`).
 - MAILSLATE-57 — bridge search replies use `id` while the bridge parses
   `message_id`, so every real end-to-end search fails at bridge parse;
   `total` is page size, not the documented across-all-pages count
