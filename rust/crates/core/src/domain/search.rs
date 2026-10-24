@@ -319,6 +319,60 @@ pub enum SearchError {
 mod tests {
     use super::*;
 
+    fn open_fixture() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER,
+                subject TEXT
+            );
+            CREATE TABLE messages_fts_content (
+                message_id INTEGER PRIMARY KEY,
+                subject TEXT,
+                from_text TEXT,
+                to_text TEXT,
+                body TEXT
+            );
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                subject,
+                from_text,
+                to_text,
+                body,
+                content = 'messages_fts_content',
+                content_rowid = 'message_id',
+                tokenize = 'unicode61 remove_diacritics 2'
+            );
+            INSERT INTO messages VALUES (1, 42, 'Quarterly report');
+            INSERT INTO messages VALUES (2, 7, 'Team budgets');
+            INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
+                 VALUES (1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine');
+            INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
+                 VALUES (2, 'Team budgets', 'cy', 'lin', 'the budget ramp');
+            INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine');
+            INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (2, 'Team budgets', 'cy', 'lin', 'the budget ramp');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn search_scopes_by_account_and_matches_free_text() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, 42, "budgets").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+        assert_eq!(hits[0].account_id, 42);
+        assert_eq!(hits[0].subject.as_deref(), Some("Quarterly report"));
+
+        // -1 searches every account.
+        let all = search(&conn, -1, "budgets").unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
     #[test]
     fn empty_query_matches_everything() {
         let q = parse("").unwrap();
