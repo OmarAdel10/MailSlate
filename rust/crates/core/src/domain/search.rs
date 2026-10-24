@@ -13,8 +13,8 @@ pub struct SearchQuery {
     /// The FTS5 `MATCH` expression (prefix-matched free text plus
     /// column-scoped field terms), empty for `WHERE`-only filtering.
     pub match_expr: String,
-    /// SQL `WHERE` fragments (without the leading `WHERE`), each
-    /// parameterized with `?N` using 1-based global parameter numbers.
+    /// SQL `WHERE` fragments (without the leading `WHERE`), each with a
+    /// single positional `?` bound in [`params`] order.
     pub where_clauses: Vec<String>,
     /// Bound parameter values in `where_clauses` order.
     pub params: Vec<String>,
@@ -144,6 +144,9 @@ pub const ALL_ACCOUNTS: i64 = -1;
 /// search runs against ([`search`] appends `WHERE ... ORDER BY ...
 /// LIMIT ?`; parameters are bound positionally via
 /// [`rusqlite::params_from_iter`]).
+///
+/// Kept `pub` for the upcoming snippet and result-count extension;
+/// [`search`] is its only caller today.
 pub fn search_sql_base() -> &'static str {
     "SELECT m.id, m.account_id, m.subject, NULL as snippet \
      FROM messages_fts \
@@ -279,9 +282,9 @@ fn escape_fts(value: &str) -> String {
     out
 }
 
-/// A dynamically-bound query parameter: rusqlite only binds one concrete
-/// type per `?N`, so `account_id` (i64) and `params` (String) are
-/// unified here.
+/// A dynamically-bound query parameter: unifies `i64` and `String`
+/// values so [`rusqlite::params_from_iter`] can bind the mixed vector
+/// positionally against the `?` placeholders.
 enum Bind {
     Str(String),
     I64(i64),
@@ -407,7 +410,9 @@ mod tests {
         assert_eq!(hits[0].subject.as_deref(), Some("Quarterly report"));
         assert!(hits[0].snippet.is_none());
 
-        // -1 searches every account.
+        // -1 searches every account. The literal (not ALL_ACCOUNTS)
+        // pins the IPC sentinel: the Dart client sends -1 verbatim,
+        // so a drifted const value fails this test.
         let all = search(&conn, -1, "budgets").unwrap();
         assert_eq!(all.len(), 2);
     }
@@ -493,6 +498,79 @@ mod tests {
 
         let hits = search(&conn, -1, "").unwrap();
         assert_eq!(hits.len(), 50);
+    }
+
+    #[test]
+    fn combined_free_text_and_tag_clause_hit_both_bind() {
+        let conn = open_fixture();
+
+        // Exercises the full bind vector in one query: the account
+        // i64, the clause param, the MATCH expression, and the limit,
+        // in that positional order.
+        let hits = search(&conn, 42, "budgets tag:invoices").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+        assert_eq!(hits[0].account_id, 42);
+    }
+
+    #[test]
+    fn combined_free_text_and_flag_clause_can_be_empty() {
+        let conn = open_fixture();
+
+        // Message 1 (the only account-42 match for "budgets") is
+        // seen, so is:unread filters it out.
+        let hits = search(&conn, 42, "budgets is:unread").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn account_scoped_empty_query_keeps_the_account_cond() {
+        let conn = open_fixture();
+
+        // Single-condition WHERE (account only), no MATCH: the scope
+        // still applies to the match-everything page.
+        let hits = search(&conn, 42, "").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn prepare_error_propagates_as_storage() {
+        // No tables at all: prepare must fail and surface as Storage
+        // instead of panicking.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let err = search(&conn, ALL_ACCOUNTS, "budgets").unwrap_err();
+        assert!(matches!(err, SearchError::Storage(_)));
+    }
+
+    #[test]
+    fn row_map_error_propagates_as_storage() {
+        let conn = open_fixture();
+
+        // A row whose account_id cannot map to i64 forces the
+        // row-mapping error path (`hits.push(hit?)`).
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, has_attachments)
+             VALUES (3, 'not-a-number', 'Text budgets', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts_content
+                (message_id, subject, from_text, to_text, body)
+             VALUES (3, 'Text budgets', 'x', 'x', 'budgets again')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+             VALUES (3, 'Text budgets', 'x', 'x', 'budgets again')",
+            [],
+        )
+        .unwrap();
+
+        let err = search(&conn, ALL_ACCOUNTS, "budgets").unwrap_err();
+        assert!(matches!(err, SearchError::Storage(_)));
     }
 
     #[test]
