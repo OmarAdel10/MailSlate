@@ -144,6 +144,19 @@ project (global `AGENTS.md` §4 and §13).
   server mutations (uid_store/uid_move, FIFO per target, retry jitter
   ≤60s) — absorbed by the M3 reading UI by necessity.
 
+- MAILSLATE-55 — M3: search feature shipped test-less (PR #13): no SearchBloc
+  unit test, no SearchScreen widget tests, FakeFfiClient has no `search()`
+  stub; also `_debounceTimer` is never assigned (all cancels are no-ops, the
+  real debounce is the 150ms `Future.delayed` guarded by `emit.isDone`) —
+  handle all four in a search-test pass
+  (`lib/features/search/search_bloc.dart:132,148,153`,
+  `test/support/fake_ffi_client.dart`).
+- MAILSLATE-56 — M3: CI rust job red on the `feature/m3-reading-search` tip
+  since PR #9/#13: `dispatch::tests::spawn_on_add::search_dispatch_returns_hits_for_account`
+  panics at dispatch.rs:2334 (pre-existing; fails every M3 PR run, e.g.
+  40055924645 and PR #14's 40097171641) — investigate and fix before M3
+  close (`rust/crates/daemon/src/dispatch.rs:2334`).
+
 ## Acknowledged test deferrals
 
 Trivial error-variant branches deliberately left untested in M1 (verified by
