@@ -37,6 +37,14 @@ Future<void> _settle(SearchBloc bloc, bool Function() done) async {
   fail('search bloc never reached the expected state');
 }
 
+/// Opens the gate and drains the queues so parked handlers resume.
+Future<void> _openGate(Completer<void> gate) async {
+  gate.complete();
+  await pumpEventQueue();
+  await Future<void>.delayed(const Duration(milliseconds: 50));
+  await pumpEventQueue();
+}
+
 void main() {
   group('SearchBloc idles', () {
     test('before any query', () {
@@ -102,6 +110,75 @@ void main() {
       expect(state.query, 'abc');
       expect(client.searchCalls, 1);
       expect(client.lastSearchQuery, 'abc');
+    });
+
+    test(
+      'a superseded in-flight query never emits once the gate opens',
+      () async {
+        final gate = Completer<void>();
+        final client = FakeFfiClient(searchGate: gate);
+        final bloc = SearchBloc(client);
+        addTearDown(bloc.close);
+
+        bloc.add(const SearchQueryChanged('a'));
+        await _settle(bloc, () => client.searchCalls == 1);
+        bloc.add(const SearchQueryChanged('ab'));
+        await _settle(bloc, () => client.searchCalls == 2);
+
+        await _openGate(gate);
+
+        // The newer query wins; the parked run for `a` is stale.
+        final state = bloc.state as SearchResults;
+        expect(state.query, 'ab');
+        expect(client.searchCalls, 2);
+        expect(client.lastSearchQuery, 'ab');
+      },
+    );
+
+    test(
+      'a superseded query failure surfaces only for the newer one',
+      () async {
+        final gate = Completer<void>();
+        final client = FakeFfiClient(searchGate: gate);
+        final bloc = SearchBloc(client);
+        addTearDown(bloc.close);
+
+        bloc.add(const SearchQueryChanged('a'));
+        await _settle(bloc, () => client.searchCalls == 1);
+        client.searchFailureAfterGate = const NetworkFailure(
+          message: 'daemon gone',
+        );
+        bloc.add(const SearchQueryChanged('ab'));
+        await _settle(bloc, () => client.searchCalls == 2);
+
+        await _openGate(gate);
+
+        expect(bloc.state, isA<SearchErrorState>());
+        expect((bloc.state as SearchErrorState).message, 'daemon gone');
+        expect(client.lastSearchQuery, 'ab');
+      },
+    );
+
+    test('a superseded query throw surfaces only for the newer one', () async {
+      final gate = Completer<void>();
+      final client = FakeFfiClient(searchGate: gate);
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('a'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      client.searchThrowAfterGate = StateError('boom');
+      bloc.add(const SearchQueryChanged('ab'));
+      await _settle(bloc, () => client.searchCalls == 2);
+
+      await _openGate(gate);
+
+      expect(bloc.state, isA<SearchErrorState>());
+      expect(
+        (bloc.state as SearchErrorState).message,
+        'Search failed — try again.',
+      );
+      expect(client.lastSearchQuery, 'ab');
     });
 
     test('maps a daemon failure into the error state', () async {
@@ -234,10 +311,7 @@ void main() {
         bloc.add(const SearchCleared());
         await _settle(bloc, () => bloc.state is SearchIdle);
 
-        gate.complete();
-        await pumpEventQueue();
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        await pumpEventQueue();
+        await _openGate(gate);
 
         // Neither the stale query run nor the stale filter re-run may
         // overwrite the idle state once the gate opens.
@@ -245,6 +319,94 @@ void main() {
         expect(client.searchCalls, 2);
       },
     );
+
+    test('a mid-flight clear drops the stale filter failure', () async {
+      final gate = Completer<void>();
+      final client = FakeFfiClient(searchGate: gate);
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      client.searchFailureAfterGate = const NetworkFailure(
+        message: 'daemon gone',
+      );
+      bloc.add(const SearchFilterToggled(tag));
+      await _settle(bloc, () => client.searchCalls == 2);
+
+      bloc.add(const SearchCleared());
+      await _settle(bloc, () => bloc.state is SearchIdle);
+
+      await _openGate(gate);
+
+      // The stale filter re-run's failure must not surface.
+      expect(bloc.state, isA<SearchIdle>());
+      expect(client.searchCalls, 2);
+    });
+
+    test('a mid-flight clear drops the stale filter throw', () async {
+      final gate = Completer<void>();
+      final client = FakeFfiClient(searchGate: gate);
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      client.searchThrowAfterGate = StateError('boom');
+      bloc.add(const SearchFilterToggled(tag));
+      await _settle(bloc, () => client.searchCalls == 2);
+
+      bloc.add(const SearchCleared());
+      await _settle(bloc, () => bloc.state is SearchIdle);
+
+      await _openGate(gate);
+
+      expect(bloc.state, isA<SearchIdle>());
+      expect(client.searchCalls, 2);
+    });
+
+    test(
+      'a re-toggle drops the stale re-run but keeps the fresh one',
+      () async {
+        final gate = Completer<void>();
+        final client = FakeFfiClient(searchGate: gate);
+        final bloc = SearchBloc(client);
+        addTearDown(bloc.close);
+
+        bloc.add(const SearchQueryChanged('budgets'));
+        await _settle(bloc, () => client.searchCalls == 1);
+        bloc.add(const SearchFilterToggled(tag));
+        await _settle(bloc, () => client.searchCalls == 2);
+        bloc.add(const SearchFilterToggled(tag));
+        await _settle(bloc, () => client.searchCalls == 3);
+
+        await _openGate(gate);
+
+        // The run that added the filter is stale (the second toggle
+        // removed it), so the latest filterless run is the final state.
+        final state = bloc.state as SearchResults;
+        expect(state.query, 'budgets');
+        expect(client.searchCalls, 3);
+        expect(client.lastSearchQuery, 'budgets');
+      },
+    );
+
+    test('the filter re-run reports the composed query', () async {
+      final client = FakeFfiClient();
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      bloc.add(const SearchFilterToggled(tag));
+      await _settle(
+        bloc,
+        () => client.searchCalls == 2 && bloc.state is SearchResults,
+      );
+
+      // The filter path reports the composed query, not the raw text.
+      expect((bloc.state as SearchResults).query, 'budgets tag:invoices');
+    });
 
     test('an empty-text reset keeps the filters for the next query', () async {
       final client = FakeFfiClient();
@@ -342,10 +504,7 @@ void main() {
         bloc.add(const SearchQueryChanged(''));
         await _settle(bloc, () => bloc.state is SearchIdle);
 
-        gate.complete();
-        await pumpEventQueue();
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        await pumpEventQueue();
+        await _openGate(gate);
 
         // The stale in-flight handler must not overwrite the idle state.
         expect(bloc.state, isA<SearchIdle>());
@@ -367,10 +526,7 @@ void main() {
         bloc.add(const SearchCleared());
         await _settle(bloc, () => bloc.state is SearchIdle);
 
-        gate.complete();
-        await pumpEventQueue();
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-        await pumpEventQueue();
+        await _openGate(gate);
 
         expect(bloc.state, isA<SearchIdle>());
         expect(client.searchCalls, 1);
@@ -392,10 +548,7 @@ void main() {
       bloc.add(const SearchQueryChanged(''));
       await _settle(bloc, () => bloc.state is SearchIdle);
 
-      gate.complete();
-      await pumpEventQueue();
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      await pumpEventQueue();
+      await _openGate(gate);
 
       // The stale failure must not surface after the clear.
       expect(bloc.state, isA<SearchIdle>());
@@ -415,10 +568,7 @@ void main() {
       bloc.add(const SearchQueryChanged(''));
       await _settle(bloc, () => bloc.state is SearchIdle);
 
-      gate.complete();
-      await pumpEventQueue();
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      await pumpEventQueue();
+      await _openGate(gate);
 
       expect(bloc.state, isA<SearchIdle>());
       expect(client.searchCalls, 1);

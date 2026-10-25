@@ -91,6 +91,33 @@ void main() {
       await _unmount(tester);
     });
 
+    testWidgets('selection-only edits broadcast no query event', (
+      tester,
+    ) async {
+      final bloc = await _pump(tester);
+
+      final controller = (tester
+          .widget<TextField>(find.byType(TextField))
+          .controller)!;
+      controller.text = 'budgets';
+      await tester.pump();
+      // Move only the caret: the listener fires with unchanged text.
+      controller.value = controller.value.copyWith(
+        selection: const TextSelection.collapsed(offset: 0),
+      );
+      // Advance the fake clock so the debounced handler drains and
+      // the tearDown close() cannot park on it.
+      await _settleAll(tester);
+
+      // The same-text guard: the second notification broadcasts nothing.
+      expect(
+        bloc.addedEvents.whereType<SearchQueryChanged>().map((e) => e.query),
+        ['budgets'],
+      );
+
+      await _unmount(tester);
+    });
+
     testWidgets('close button calls back to the shell', (tester) async {
       var closed = 0;
       await _pump(tester, onClose: () => closed += 1);
@@ -226,12 +253,13 @@ void main() {
       await tester.tap(find.text('Try again'));
       await _settleAll(tester);
 
-      // Enshrined deviation (tracked as a follow-up): retry dispatches
+      // Enshrined deviation (tracked as MAILSLATE-63): retry dispatches
       // SearchCleared, so the controller keeps the typed text and the
       // clear affordance stays visible while the placeholder lead shows.
       // A follow-up decides whether retry should re-run the query
       // instead of discarding it.
       expect(find.text('Search messages'), findsOneWidget);
+      expect(find.byKey(const Key('search-clear')), findsOneWidget);
 
       await _unmount(tester);
     });
