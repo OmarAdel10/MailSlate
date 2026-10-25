@@ -160,6 +160,13 @@ project (global `AGENTS.md` §4 and §13).
   panics at dispatch.rs:2334 (pre-existing; fails every M3 PR run, e.g.
   40055924645 and PR #14's 40097171641) — investigate and fix before M3
   close (`rust/crates/daemon/src/dispatch.rs:2334`).
+- MAILSLATE-63 — M3: search retry semantics — `Try again` dispatches
+  SearchCleared, so the typed text survives in the controller and the
+  clear affordance stays visible while the placeholder lead shows
+  (`lib/features/search/search_screen.dart:354-355`, pinned by the
+  retry widget test in `test/search_screen_test.dart`) — decide
+  whether retry should re-run the query instead of discarding it, and
+  align the USER_FLOW §7 states-matrix copy.
 
 ## Acknowledged test deferrals
 
