@@ -138,6 +138,11 @@ class FakeFfiClient extends FfiClient {
   /// completes (any object, for the generic catch arm).
   Object? searchThrowAfterGate;
 
+  /// When non-empty, each [FfiClient.search] call parks on its own
+  /// completer, consumed in call order; lets tests resolve calls in
+  /// inverted completion order. Falls back to [searchGate] when empty.
+  final List<Completer<void>> searchGates = [];
+
   /// How often [FfiClient.search] was called.
   int searchCalls = 0;
 
@@ -383,9 +388,13 @@ class FakeFfiClient extends FfiClient {
     if (failure != null) {
       throw failure;
     }
-    final gate = searchGate;
-    if (gate != null) {
-      await gate.future;
+    if (searchGates.isNotEmpty) {
+      await searchGates.removeAt(0).future;
+    } else {
+      final gate = searchGate;
+      if (gate != null) {
+        await gate.future;
+      }
     }
     final lateFailure = searchFailureAfterGate;
     if (lateFailure != null) {

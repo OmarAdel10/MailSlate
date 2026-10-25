@@ -134,12 +134,17 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
   /// The current free-text query text.
   String _currentQueryText = '';
 
+  /// Bumped by every state-mutating event; an awaited search may only
+  /// emit when its run is still the latest one.
+  int _searchEpoch = 0;
+
   /// Debounces user input by 150ms (USER_FLOW §7).
   Future<void> _onQueryChanged(
     SearchQueryChanged event,
     Emitter<SearchState> emit,
   ) async {
     _currentQueryText = event.query;
+    final int epoch = ++_searchEpoch;
     if (event.query.isEmpty) {
       // Empty search text: back to the placeholder, never a query.
       emit(const SearchIdle());
@@ -147,8 +152,8 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     }
     await Future.delayed(const Duration(milliseconds: 150));
     if (emit.isDone) return;
-    // Only run if this is still the latest query.
-    if (event.query != _currentQueryText) return;
+    // Only run if this is still the latest search.
+    if (epoch != _searchEpoch) return;
     emit(SearchLoading(event.query));
     try {
       final result = await _client.search(
@@ -157,7 +162,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       );
       if (emit.isDone) return;
       // The query may have been cleared while awaiting the daemon.
-      if (event.query != _currentQueryText) return;
+      if (epoch != _searchEpoch) return;
       emit(
         SearchResults(
           hits: result.messages
@@ -176,12 +181,12 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
       );
     } on AppFailure catch (failure) {
       if (emit.isDone) return;
-      if (event.query != _currentQueryText) return;
+      if (epoch != _searchEpoch) return;
       emit(SearchErrorState(failure.message));
     } catch (error, stackTrace) {
       logError('search_failed', error: error, stackTrace: stackTrace);
       if (emit.isDone) return;
-      if (event.query != _currentQueryText) return;
+      if (epoch != _searchEpoch) return;
       emit(const SearchErrorState('Search failed — try again.'));
     }
   }
@@ -197,6 +202,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     SearchCleared event,
     Emitter<SearchState> emit,
   ) async {
+    _searchEpoch += 1;
     _currentQueryText = '';
     _filters.clear();
     emit(const SearchIdle());
@@ -206,8 +212,8 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     SearchFilterToggled event,
     Emitter<SearchState> emit,
   ) async {
+    final int epoch = ++_searchEpoch;
     final existing = _filters.indexWhere((f) => f.key == event.filter.key);
-    final hadFilter = existing >= 0;
     if (existing >= 0) {
       _filters.removeAt(existing);
     } else {
@@ -215,13 +221,6 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
     }
     final currentQuery = _currentQueryText;
     if (currentQuery.isNotEmpty) {
-      // The query text or the filter set may change while the re-run is
-      // in flight; either makes the awaited result stale.
-      bool isStale() {
-        final stillHas = _filters.any((f) => f.key == event.filter.key);
-        return currentQuery != _currentQueryText || stillHas == hadFilter;
-      }
-
       emit(SearchLoading(currentQuery));
       try {
         final result = await _client.search(
@@ -229,7 +228,7 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
           query: _buildQuery(currentQuery),
         );
         if (emit.isDone) return;
-        if (isStale()) return;
+        if (epoch != _searchEpoch) return;
         emit(
           SearchResults(
             hits: result.messages
@@ -248,12 +247,12 @@ class SearchBloc extends Bloc<SearchEvent, SearchState> {
         );
       } on AppFailure catch (failure) {
         if (emit.isDone) return;
-        if (isStale()) return;
+        if (epoch != _searchEpoch) return;
         emit(SearchErrorState(failure.message));
       } catch (error, stackTrace) {
         logError('search_filter_failed', error: error, stackTrace: stackTrace);
         if (emit.isDone) return;
-        if (isStale()) return;
+        if (epoch != _searchEpoch) return;
         emit(const SearchErrorState('Search failed — try again.'));
       }
     } else {

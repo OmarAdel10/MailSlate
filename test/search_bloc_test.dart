@@ -619,4 +619,173 @@ void main() {
       expect(client.searchCalls, 0);
     });
   });
+
+  group('SearchBloc cross-path races', () {
+    test('an inverted filter toggle wins over the query run', () async {
+      final gateA = Completer<void>();
+      final gateB = Completer<void>();
+      final client = FakeFfiClient();
+      client.searchGates
+        ..add(gateA)
+        ..add(gateB);
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+      final states = <SearchState>[];
+      final subscription = bloc.stream.listen(states.add);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      bloc.add(
+        const SearchFilterToggled(SearchFilter(key: 'tag', value: 'invoices')),
+      );
+      await _settle(bloc, () => client.searchCalls == 2);
+
+      // Inverted completion order: the toggle resolves first, the
+      // older query run last.
+      await _openGate(gateB);
+      await _openGate(gateA);
+      await subscription.cancel();
+
+      expect(bloc.state, isA<SearchResults>());
+      expect((bloc.state as SearchResults).query, 'budgets tag:invoices');
+      expect(client.searchCalls, 2);
+      // The superseded query run must never surface its unfiltered
+      // hits.
+      expect(
+        states.whereType<SearchResults>().map((s) => s.query),
+        everyElement('budgets tag:invoices'),
+      );
+    });
+
+    test('an inverted other-key toggle wins over the first re-run', () async {
+      final client = FakeFfiClient();
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => bloc.state is SearchResults);
+
+      final gateA = Completer<void>();
+      final gateB = Completer<void>();
+      client.searchGates
+        ..add(gateA)
+        ..add(gateB);
+
+      bloc.add(
+        const SearchFilterToggled(SearchFilter(key: 'tag', value: 'invoices')),
+      );
+      await _settle(bloc, () => client.searchCalls == 2);
+      bloc.add(
+        const SearchFilterToggled(SearchFilter(key: 'in', value: 'inbox')),
+      );
+      await _settle(bloc, () => client.searchCalls == 3);
+
+      // Inverted completion order: the two-clause re-run resolves
+      // first and emits the composed results.
+      await _openGate(gateB);
+      expect(bloc.state, isA<SearchResults>());
+      expect(
+        (bloc.state as SearchResults).query,
+        'budgets tag:invoices in:inbox',
+      );
+
+      // The single-clause re-run fails late: its error must not
+      // clobber the newer composed results.
+      client.searchThrowAfterGate = StateError('boom');
+      await _openGate(gateA);
+
+      expect(bloc.state, isA<SearchResults>());
+      expect(
+        (bloc.state as SearchResults).query,
+        'budgets tag:invoices in:inbox',
+      );
+      expect(client.searchCalls, 3);
+    });
+
+    test('a late failure of the latest re-run surfaces', () async {
+      final client = FakeFfiClient();
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => bloc.state is SearchResults);
+
+      final gateA = Completer<void>();
+      final gateB = Completer<void>();
+      client.searchGates
+        ..add(gateA)
+        ..add(gateB);
+
+      bloc.add(
+        const SearchFilterToggled(SearchFilter(key: 'tag', value: 'invoices')),
+      );
+      await _settle(bloc, () => client.searchCalls == 2);
+      bloc.add(
+        const SearchFilterToggled(SearchFilter(key: 'tag', value: 'invoices')),
+      );
+      await _settle(bloc, () => client.searchCalls == 3);
+
+      client.searchThrowAfterGate = StateError('boom');
+      await _openGate(gateB);
+      expect(bloc.state, isA<SearchErrorState>());
+
+      client.searchThrowAfterGate = null;
+      await _openGate(gateA);
+
+      // The older re-run resolves last but must not overwrite the
+      // error state with its hits.
+      expect(bloc.state, isA<SearchErrorState>());
+      expect(client.searchCalls, 3);
+    });
+
+    test('a query followed by a filter toggle ends composed', () async {
+      final gateA = Completer<void>();
+      final gateB = Completer<void>();
+      final client = FakeFfiClient();
+      client.searchGates
+        ..add(gateA)
+        ..add(gateB);
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => client.searchCalls == 1);
+      bloc.add(
+        const SearchFilterToggled(SearchFilter(key: 'tag', value: 'invoices')),
+      );
+      await _settle(bloc, () => client.searchCalls == 2);
+
+      // FIFO completion: the older run resolves first.
+      await _openGate(gateA);
+      await _openGate(gateB);
+
+      expect(bloc.state, isA<SearchResults>());
+      expect((bloc.state as SearchResults).query, 'budgets tag:invoices');
+      expect(client.searchCalls, 2);
+    });
+
+    test('two filter toggles compose into one query', () async {
+      final client = FakeFfiClient();
+      final bloc = SearchBloc(client);
+      addTearDown(bloc.close);
+
+      bloc.add(const SearchQueryChanged('budgets'));
+      await _settle(bloc, () => bloc.state is SearchResults);
+      bloc.add(
+        const SearchFilterToggled(SearchFilter(key: 'tag', value: 'invoices')),
+      );
+      await _settle(bloc, () => bloc.state is SearchResults);
+      bloc.add(
+        const SearchFilterToggled(SearchFilter(key: 'in', value: 'inbox')),
+      );
+      await _settle(bloc, () => bloc.state is SearchResults);
+
+      expect(client.lastSearchQuery, 'budgets tag:invoices in:inbox');
+      expect(
+        (bloc.state as SearchResults).query,
+        'budgets tag:invoices in:inbox',
+      );
+      expect(client.searchCalls, 3);
+    });
+  });
 }
