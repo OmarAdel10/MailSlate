@@ -13,10 +13,13 @@ pub struct SearchQuery {
     /// The FTS5 `MATCH` expression (prefix-matched free text plus
     /// column-scoped field terms), empty for `WHERE`-only filtering.
     pub match_expr: String,
-    /// SQL `WHERE` fragments (without the leading `WHERE`), each with a
-    /// single positional `?` bound in [`params`] order.
+    /// SQL `WHERE` fragments (without the leading `WHERE`). Only the
+    /// `tag:` and `in:` clauses carry one positional `?` each; the `is:`
+    /// and `has:` fragments bind nothing.
     pub where_clauses: Vec<String>,
-    /// Bound parameter values in `where_clauses` order.
+    /// Bound parameter values, pairing 1:1 with the `?`-bearing
+    /// [`where_clauses`] in order. Future clause authors must keep
+    /// this invariant: every `?` a clause adds needs exactly one param.
     pub params: Vec<String>,
     /// Limit applied to the result page.
     pub limit: u32,
@@ -173,6 +176,16 @@ pub fn search(
         limit,
     } = parse(query)?;
 
+    // Invariant from the SearchQuery docs: every `?` carried by a
+    // where clause must have exactly one bound param, in order.
+    debug_assert_eq!(
+        where_clauses
+            .iter()
+            .map(|c| c.matches('?').count())
+            .sum::<usize>(),
+        params.len()
+    );
+
     let mut sql = search_sql_base().to_string();
 
     let mut conds: Vec<String> = Vec::with_capacity(2 + where_clauses.len());
@@ -320,6 +333,9 @@ pub enum SearchError {
 mod tests {
     use super::*;
 
+    /// The fixture DDL is hand-copied from
+    /// `rust/crates/core/src/infra/db/migrations/0001_init.sql:158-174`
+    /// — keep the shapes in sync whenever that migration changes.
     fn open_fixture() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -415,6 +431,10 @@ mod tests {
         // so a drifted const value fails this test.
         let all = search(&conn, -1, "budgets").unwrap();
         assert_eq!(all.len(), 2);
+
+        // Non-sentinel negatives are empty scopes, not all-accounts.
+        assert!(search(&conn, -5, "budgets").unwrap().is_empty());
+        assert!(search(&conn, -2, "budgets").unwrap().is_empty());
     }
 
     #[test]
@@ -424,6 +444,43 @@ mod tests {
         let hits = search(&conn, -1, "tag:invoices").unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn clause_only_search_keeps_the_account_scope() {
+        let conn = open_fixture();
+
+        // Bind shape [account, clause param, limit] — no MATCH.
+        let hits = search(&conn, 42, "tag:invoices").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+
+        // The tag lives only on the account-42 message.
+        assert!(search(&conn, 7, "tag:invoices").unwrap().is_empty());
+    }
+
+    #[test]
+    fn multi_clause_search_without_account_runs_clause_only_binds() {
+        let conn = open_fixture();
+
+        let inbox = search(&conn, -1, "tag:invoices in:inbox").unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].message_id, 1);
+
+        let archive = search(&conn, -1, "in:archive is:starred").unwrap();
+        assert_eq!(archive.len(), 1);
+        assert_eq!(archive[0].message_id, 2);
+    }
+
+    #[test]
+    fn parse_errors_propagate_through_search() {
+        let conn = open_fixture();
+
+        let unknown = search(&conn, ALL_ACCOUNTS, "cc:x").unwrap_err();
+        assert!(matches!(unknown, SearchError::UnknownField(_)));
+
+        let unterminated = search(&conn, 42, "\"unterminated").unwrap_err();
+        assert!(matches!(unterminated, SearchError::UnterminatedPhrase));
     }
 
     #[test]
@@ -609,7 +666,10 @@ mod tests {
         let conn = open_fixture();
 
         // A row whose account_id cannot map to i64 forces the
-        // row-mapping error path (`hits.push(hit?)`).
+        // row-mapping error path (`hits.push(hit?)`). The TEXT
+        // account_id is FK-impossible under the production NOT NULL
+        // integer schema; in-memory dynamic typing keeps it, which
+        // is exactly what forces the row-map failure.
         conn.execute(
             "INSERT INTO messages (id, account_id, subject, has_attachments)
              VALUES (3, 'not-a-number', 'Text budgets', 0)",
