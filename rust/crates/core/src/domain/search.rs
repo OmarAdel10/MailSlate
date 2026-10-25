@@ -334,8 +334,13 @@ mod tests {
     use super::*;
 
     /// The fixture DDL is hand-copied from
-    /// `rust/crates/core/src/infra/db/migrations/0001_init.sql:158-174`
-    /// — keep the shapes in sync whenever that migration changes.
+    /// `rust/crates/core/src/infra/db/migrations/0001_init.sql`
+    /// (the relational tables from lines 23-133, the FTS5 block from
+    /// lines 158-174) — keep the shapes in sync whenever that migration
+    /// changes. The fixture is deliberately looser than production
+    /// (nullable `account_id`, no FKs, no CHECKs, no `WITHOUT ROWID`)
+    /// — the relaxation is load-bearing for
+    /// `row_map_error_propagates_as_storage`.
     fn open_fixture() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(

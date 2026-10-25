@@ -167,7 +167,7 @@ project (global `AGENTS.md` §4 and §13).
   bareword set: `from:john@example.com` hard-errors and bare `OR`/`NOT`
   silently change the `MATCH` shape; literal-operator semantics must be
   decided vs USER_FLOW §7.3 before quoting unconditionally
-  (`rust/crates/core/src/domain/search.rs:264-282`).
+  (`rust/crates/core/src/domain/search.rs:278-296`).
   Round-4 review additions: escape_fts only has tests for space and
   plus — enumerate the full SPECIAL character class and one executing
   special-char search; also pin the untested parse arms (unknown
@@ -178,8 +178,10 @@ project (global `AGENTS.md` §4 and §13).
   bm25 weight — the table has four columns, the trailing 1.0 is inert;
   `heartbeat_pings…` timed out
   once under parallel suite load (3/3 green solo) — tune weights, widen
-  the timeout (`rust/crates/core/src/domain/search.rs:196`,
+  the timeout (`rust/crates/core/src/domain/search.rs:209`,
   `rust/crates/core/src/infra/events.rs:331`).
+  Round-5 QA: also pin the result order once the weights are tuned —
+  the current suite never asserts the ORDER BY output.
 - MAILSLATE-60 — remaining F7 polish: real sanitized snippets, bridge
   `search(query, filters, cursor)` shape (ARCHITECTURE.md:257), F7.5
   latency bench, empty-query UX (USER_FLOW §7.5), `-1` sentinel spec
@@ -187,7 +189,7 @@ project (global `AGENTS.md` §4 and §13).
   `rust/crates/core/src/infra/ipc.rs:250`, `rust/crates/bridge/src/api/search.rs:34`).
 - MAILSLATE-61 — cap the IPC search query length/token count at daemon
   dispatch and reject with `ErrorKind::Validation`
-  (`rust/crates/daemon/src/dispatch.rs:1047`,
+  (`rust/crates/daemon/src/dispatch.rs:810`,
   `rust/crates/protocol/src/framing.rs:15`; 64 MiB frames allow
   multi-MB `tag:a` spam → millions of EXISTS subqueries at prepare —
   self-DoS only, local single-user).
@@ -196,6 +198,11 @@ project (global `AGENTS.md` §4 and §13).
   instead of `ErrorKind::Storage` so a query typo is not
   indistinguishable from a DB failure
   (`rust/crates/daemon/src/dispatch.rs:817`; USER_FLOW states matrix).
+- MAILSLATE-67 — search clause semantics gaps surfaced by the round-5 QA:
+  (a) the `tag:` clause lacks a `t.account_id = m.account_id` guard, so
+  cross-account tag rows could leak hits; (b) `in:`/`tag:` clauses do
+  not exclude deleted locations, asymmetric with the `is:` clauses
+  (`rust/crates/core/src/domain/search.rs:96-111`).
 
 ## Acknowledged test deferrals
 
