@@ -151,9 +151,9 @@ project (global `AGENTS.md` §4 and §13).
   handle all four in a search-test pass
   (`lib/features/search/search_bloc.dart:132,148,153`,
   `test/support/fake_ffi_client.dart`).
-  FIXED 2026-10-25 in `test/search-feature-tests` (33 new tests, fake
+  FIXED 2026-10-25 in `test/search-feature-tests` (46 new tests, fake
   `search()` stub, dead timer removed, mount-time empty queries guarded,
-  stale-emits guards on the query and filter paths) —
+  epoch-stamped stale-emits guards on the query and filter paths) —
   close on merge.
 - MAILSLATE-56 — M3: CI rust job red on the `feature/m3-reading-search` tip
   since PR #9/#13: `dispatch::tests::spawn_on_add::search_dispatch_returns_hits_for_account`
@@ -167,6 +167,13 @@ project (global `AGENTS.md` §4 and §13).
   retry widget test in `test/search_screen_test.dart`) — decide
   whether retry should re-run the query instead of discarding it, and
   align the USER_FLOW §7 states-matrix copy.
+- MAILSLATE-68 — M3: search states-matrix copy deviations pinned by tests
+  but untracked until now: the loading state shows a spinner with
+  `Searching "…"` copy while USER_FLOW §7 mandates no skeleton, and
+  every AppFailure renders the error state while the spec says
+  `Search unavailable` only for DB errors — align the copy or amend
+  the spec (`lib/features/search/search_screen.dart`,
+  `specs/USER_FLOW.md:284`).
 
 ## Acknowledged test deferrals
 
