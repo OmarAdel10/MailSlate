@@ -2342,6 +2342,64 @@ mod tests {
             assert_eq!(value["total"], json!(1));
         }
 
+        #[tokio::test(flavor = "multi_thread")]
+        async fn search_dispatch_all_accounts_sentinel_hits_every_account() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            for (account_id, message_id) in [(42, 1), (7, 2)] {
+                conn.execute(
+                    "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                           imap_security, smtp_host, smtp_port, smtp_security,
+                                           auth_type, created_at)
+                     VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                             'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                    rusqlite::params![account_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO messages (id, account_id, dedupe_key, subject, date_utc)
+                     VALUES (?1, ?2, ?3, 'Quarterly report', 1000)",
+                    rusqlite::params![message_id, account_id, format!("msg-{message_id}")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
+                     VALUES (?1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine')",
+                    rusqlite::params![message_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                     VALUES (?1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine')",
+                    rusqlite::params![message_id],
+                )
+                .unwrap();
+            }
+            drop(conn);
+
+            // The -1 sentinel crosses the IPC boundary intact and the
+            // daemon searches every account.
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::SEARCH,
+                &json!({ "account_id": -1, "query": "budgets" }),
+            )
+            .unwrap() else {
+                panic!("search must reply");
+            };
+            let messages = value["messages"].as_array().expect("messages array");
+            assert_eq!(messages.len(), 2);
+            assert_eq!(value["total"], json!(2));
+            let account_ids: Vec<i64> = messages
+                .iter()
+                .map(|hit| hit["account_id"].as_i64().expect("account id"))
+                .collect();
+            assert!(account_ids.contains(&42));
+            assert!(account_ids.contains(&7));
+        }
+
         #[test]
         fn search_dispatch_missing_account_id_is_validation() {
             let dir = tempfile::tempdir().unwrap();

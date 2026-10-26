@@ -13,10 +13,13 @@ pub struct SearchQuery {
     /// The FTS5 `MATCH` expression (prefix-matched free text plus
     /// column-scoped field terms), empty for `WHERE`-only filtering.
     pub match_expr: String,
-    /// SQL `WHERE` fragments (without the leading `WHERE`), each
-    /// parameterized with `?N` using 1-based global parameter numbers.
+    /// SQL `WHERE` fragments (without the leading `WHERE`). Only the
+    /// `tag:` and `in:` clauses carry one positional `?` each; the `is:`
+    /// and `has:` fragments bind nothing.
     pub where_clauses: Vec<String>,
-    /// Bound parameter values in `where_clauses` order.
+    /// Bound parameter values, pairing 1:1 with the `?`-bearing
+    /// [`where_clauses`] in order. Future clause authors must keep
+    /// this invariant: every `?` a clause adds needs exactly one param.
     pub params: Vec<String>,
     /// Limit applied to the result page.
     pub limit: u32,
@@ -93,7 +96,7 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
             "tag" => {
                 clauses.push(
                     "EXISTS (SELECT 1 FROM message_tags mt JOIN tags t ON t.id = mt.tag_id \
-                     WHERE mt.message_id = messages.id AND t.name = ?)"
+                     WHERE mt.message_id = m.id AND t.name = ?)"
                         .to_string(),
                 );
                 params.push(value.to_string());
@@ -101,7 +104,7 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
             "in" => {
                 clauses.push(
                     "EXISTS (SELECT 1 FROM message_locations ml JOIN mailboxes mb \
-                     ON mb.id = ml.mailbox_id WHERE ml.message_id = messages.id AND mb.kind = ?)"
+                     ON mb.id = ml.mailbox_id WHERE ml.message_id = m.id AND mb.kind = ?)"
                         .to_string(),
                 );
                 params.push(value.to_string());
@@ -109,18 +112,18 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
             "is" => match value {
                 "unread" => clauses.push(
                     "EXISTS (SELECT 1 FROM message_locations ml \
-                     WHERE ml.message_id = messages.id AND ml.seen = 0 AND NOT ml.deleted)"
+                     WHERE ml.message_id = m.id AND ml.seen = 0 AND NOT ml.deleted)"
                         .to_string(),
                 ),
                 "starred" => clauses.push(
                     "EXISTS (SELECT 1 FROM message_locations ml \
-                     WHERE ml.message_id = messages.id AND ml.flagged = 1 AND NOT ml.deleted)"
+                     WHERE ml.message_id = m.id AND ml.flagged = 1 AND NOT ml.deleted)"
                         .to_string(),
                 ),
                 other => return Err(SearchError::UnknownField(format!("is:{other}"))),
             },
             "has" => match value {
-                "attachment" => clauses.push("messages.has_attachments = 1".to_string()),
+                "attachment" => clauses.push("m.has_attachments = 1".to_string()),
                 other => return Err(SearchError::UnknownField(format!("has:{other}"))),
             },
             _ => return Err(SearchError::UnknownField(format!("{field}:{value}"))),
@@ -137,22 +140,30 @@ pub fn parse(query: &str) -> Result<SearchQuery, SearchError> {
     })
 }
 
-/// The raw SQL that runs against `messages_fts` (external-content
-/// table) joined to `messages` for the account scope and the hit row.
+/// `account_id` value that searches every account instead of one.
+pub const ALL_ACCOUNTS: i64 = -1;
+
+/// The `SELECT ... FROM messages_fts JOIN messages m` prologue the
+/// search runs against ([`search`] appends `WHERE ... ORDER BY ...
+/// LIMIT ?`; parameters are bound positionally via
+/// [`rusqlite::params_from_iter`]).
 ///
-/// The base ends at the `WHERE m.account_id = ?` clause; callers append
-/// `AND ...` fragments for `WHERE` clauses and an optional `AND
-/// messages_fts MATCH ?`, then `ORDER BY ... LIMIT ?`. Parameters are
-/// bound positionally via [`rusqlite::params_from_iter`].
+/// Kept `pub` for the upcoming snippet and result-count extension;
+/// [`search`] is its only caller today.
 pub fn search_sql_base() -> &'static str {
     "SELECT m.id, m.account_id, m.subject, NULL as snippet \
      FROM messages_fts \
-     JOIN messages m ON m.id = messages_fts.rowid \
-     WHERE ?1 = -1 OR m.account_id = ?1"
+     JOIN messages m ON m.id = messages_fts.rowid"
 }
 
-/// Runs [`parse`] then `search_sql()` and returns the hits. HTML
-/// snippets are sanitized through [`sanitize`] before shipping.
+/// Runs [`parse`] and executes the search against `conn`. The
+/// `account_id` scopes results to one account, or
+/// [`ALL_ACCOUNTS`] searches every account.
+///
+/// The `WHERE` conditions — account scope, `where_clauses`, and the
+/// FTS `MATCH` — are all joined as top-level `AND` conjunctions:
+/// SQLite only admits `MATCH` as a direct conjunct of the fts table
+/// query, not inside an `OR` branch.
 pub fn search(
     conn: &rusqlite::Connection,
     account_id: i64,
@@ -165,25 +176,37 @@ pub fn search(
         limit,
     } = parse(query)?;
 
-    let mut sql = search_sql_base().to_string();
-    for clause in &where_clauses {
-        sql.push_str(" AND ");
-        sql.push_str(clause);
-    }
-    if !match_expr.is_empty() {
-        sql.push_str(" AND messages_fts MATCH ?");
-    }
-    sql.push_str(" ORDER BY bm25(messages_fts, 0, 5.0, 2.0, 1.0, 1.0) LIMIT ?");
+    // Invariant from the SearchQuery docs: every `?` carried by a
+    // where clause must have exactly one bound param, in order.
+    debug_assert_eq!(
+        where_clauses
+            .iter()
+            .map(|c| c.matches('?').count())
+            .sum::<usize>(),
+        params.len()
+    );
 
-    let mut binds: Vec<Bind> = Vec::with_capacity(3 + where_clauses.len());
-    binds.push(Bind::I64(account_id));
-    binds.push(Bind::I64(account_id));
+    let mut sql = search_sql_base().to_string();
+
+    let mut conds: Vec<String> = Vec::with_capacity(2 + where_clauses.len());
+    let mut binds: Vec<Bind> = Vec::with_capacity(2 + where_clauses.len());
+    if account_id != ALL_ACCOUNTS {
+        conds.push("m.account_id = ?".to_string());
+        binds.push(Bind::I64(account_id));
+    }
+    conds.extend(where_clauses.iter().cloned());
     for p in &params {
         binds.push(Bind::Str(p.clone()));
     }
     if !match_expr.is_empty() {
+        conds.push("messages_fts MATCH ?".to_string());
         binds.push(Bind::Str(match_expr.clone()));
     }
+    if !conds.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conds.join(" AND "));
+    }
+    sql.push_str(" ORDER BY bm25(messages_fts, 0, 5.0, 2.0, 1.0, 1.0) LIMIT ?");
     binds.push(Bind::I64(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
@@ -198,7 +221,7 @@ pub fn search(
 
     let mut hits: Vec<MessageHit> = Vec::new();
     for hit in rows {
-        hits.push(hit.expect("row maps"));
+        hits.push(hit?);
     }
 
     Ok(hits)
@@ -272,9 +295,9 @@ fn escape_fts(value: &str) -> String {
     out
 }
 
-/// A dynamically-bound query parameter: rusqlite only binds one concrete
-/// type per `?N`, so `account_id` (i64) and `params` (String) are
-/// unified here.
+/// A dynamically-bound query parameter: unifies `i64` and `String`
+/// values so [`rusqlite::params_from_iter`] can bind the mixed vector
+/// positionally against the `?` placeholders.
 enum Bind {
     Str(String),
     I64(i64),
@@ -309,6 +332,372 @@ pub enum SearchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fixture DDL is hand-copied from
+    /// `rust/crates/core/src/infra/db/migrations/0001_init.sql`
+    /// (the relational tables from lines 23-133, the FTS5 block from
+    /// lines 158-174) — keep the shapes in sync whenever that migration
+    /// changes. The fixture is deliberately looser than production
+    /// (nullable `account_id`, no FKs, no CHECKs, no `WITHOUT ROWID`)
+    /// — the relaxation is load-bearing for
+    /// `row_map_error_propagates_as_storage`.
+    fn open_fixture() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER,
+                subject TEXT,
+                has_attachments INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE mailboxes (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL
+            );
+            CREATE TABLE message_locations (
+                id INTEGER PRIMARY KEY,
+                message_id INTEGER NOT NULL,
+                mailbox_id INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                seen INTEGER NOT NULL DEFAULT 0,
+                flagged INTEGER NOT NULL DEFAULT 0,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (mailbox_id, uid)
+            );
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY,
+                account_id INTEGER,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL
+            );
+            CREATE TABLE message_tags (
+                message_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (message_id, tag_id)
+            );
+            CREATE TABLE messages_fts_content (
+                message_id INTEGER PRIMARY KEY,
+                subject TEXT,
+                from_text TEXT,
+                to_text TEXT,
+                body TEXT
+            );
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                subject,
+                from_text,
+                to_text,
+                body,
+                content = 'messages_fts_content',
+                content_rowid = 'message_id',
+                tokenize = 'unicode61 remove_diacritics 2'
+            );
+            INSERT INTO messages (id, account_id, subject, has_attachments)
+                 VALUES (1, 42, 'Quarterly report', 1);
+            INSERT INTO messages (id, account_id, subject, has_attachments)
+                 VALUES (2, 7, 'Team budgets', 0);
+            INSERT INTO mailboxes VALUES (1, 42, 'Inbox', 'inbox');
+            INSERT INTO mailboxes VALUES (2, 7, 'Archive', 'archive');
+            INSERT INTO message_locations
+                 (id, message_id, mailbox_id, uid, seen, flagged, deleted)
+                 VALUES (1, 1, 1, 1, 1, 0, 0);
+            INSERT INTO message_locations
+                 (id, message_id, mailbox_id, uid, seen, flagged, deleted)
+                 VALUES (2, 2, 2, 1, 0, 1, 0);
+            INSERT INTO tags VALUES (1, 42, 'invoices', 'local');
+            INSERT INTO message_tags VALUES (1, 1);
+            INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
+                 VALUES (1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine');
+            INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
+                 VALUES (2, 'Team budgets', 'cy', 'lin', 'the budget ramp');
+            INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine');
+            INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (2, 'Team budgets', 'cy', 'lin', 'the budget ramp');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn search_scopes_by_account_and_matches_free_text() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, 42, "budgets").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+        assert_eq!(hits[0].account_id, 42);
+        assert_eq!(hits[0].subject.as_deref(), Some("Quarterly report"));
+        assert!(hits[0].snippet.is_none());
+
+        // -1 searches every account. The literal (not ALL_ACCOUNTS)
+        // pins the IPC sentinel: the Dart client sends -1 verbatim,
+        // so a drifted const value fails this test.
+        let all = search(&conn, -1, "budgets").unwrap();
+        assert_eq!(all.len(), 2);
+
+        // Non-sentinel negatives are empty scopes, not all-accounts.
+        assert!(search(&conn, -5, "budgets").unwrap().is_empty());
+        assert!(search(&conn, -2, "budgets").unwrap().is_empty());
+    }
+
+    #[test]
+    fn tag_clause_hits_only_tagged_message() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "tag:invoices").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn clause_only_search_keeps_the_account_scope() {
+        let conn = open_fixture();
+
+        // Bind shape [account, clause param, limit] — no MATCH.
+        let hits = search(&conn, 42, "tag:invoices").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+
+        // The tag lives only on the account-42 message.
+        assert!(search(&conn, 7, "tag:invoices").unwrap().is_empty());
+    }
+
+    #[test]
+    fn multi_clause_search_without_account_runs_clause_only_binds() {
+        let conn = open_fixture();
+
+        let inbox = search(&conn, -1, "tag:invoices in:inbox").unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].message_id, 1);
+
+        let archive = search(&conn, -1, "in:archive is:starred").unwrap();
+        assert_eq!(archive.len(), 1);
+        assert_eq!(archive[0].message_id, 2);
+    }
+
+    #[test]
+    fn parse_errors_propagate_through_search() {
+        let conn = open_fixture();
+
+        let unknown = search(&conn, ALL_ACCOUNTS, "cc:x").unwrap_err();
+        assert!(matches!(unknown, SearchError::UnknownField(_)));
+
+        let unterminated = search(&conn, 42, "\"unterminated").unwrap_err();
+        assert!(matches!(unterminated, SearchError::UnterminatedPhrase));
+    }
+
+    #[test]
+    fn is_unread_clause_hits_only_unseen_message() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "is:unread").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 2);
+    }
+
+    #[test]
+    fn is_starred_clause_hits_only_flagged_message() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "is:starred").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 2);
+    }
+
+    #[test]
+    fn deleted_locations_are_excluded_from_flag_clauses() {
+        let conn = open_fixture();
+
+        // A trashed message that would otherwise match both flag
+        // clauses (unseen and flagged) — its location row is marked
+        // deleted, so the NOT ml.deleted filter must keep it hidden.
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, has_attachments)
+             VALUES (3, 7, 'Ignore me', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_locations
+                (id, message_id, mailbox_id, uid, seen, flagged, deleted)
+             VALUES (3, 3, 2, 2, 0, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts_content
+                (message_id, subject, from_text, to_text, body)
+             VALUES (3, 'Ignore me', 'x', 'x', 'nothing to see')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+             VALUES (3, 'Ignore me', 'x', 'x', 'nothing to see')",
+            [],
+        )
+        .unwrap();
+
+        let unread = search(&conn, -1, "is:unread").unwrap();
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].message_id, 2);
+
+        let starred = search(&conn, -1, "is:starred").unwrap();
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].message_id, 2);
+    }
+
+    #[test]
+    fn has_attachment_clause_hits_only_attachment_message() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "has:attachment").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn in_clause_hits_only_that_mailbox_kind() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "in:inbox").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn empty_query_without_account_runs_without_where() {
+        let conn = open_fixture();
+
+        let hits = search(&conn, -1, "").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.snippet.is_none()));
+    }
+
+    #[test]
+    fn limit_truncates_the_result_page() {
+        let conn = open_fixture();
+        for id in 3..58 {
+            conn.execute(
+                "INSERT INTO messages (id, account_id, subject, has_attachments)
+                 VALUES (?1, 42, ?2, 0)",
+                rusqlite::params![id, format!("filler {id}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts_content
+                    (message_id, subject, from_text, to_text, body)
+                 VALUES (?1, ?2, 'x', 'x', 'filler body')",
+                rusqlite::params![id, format!("filler {id}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (?1, ?2, 'x', 'x', 'filler body')",
+                rusqlite::params![id, format!("filler {id}")],
+            )
+            .unwrap();
+        }
+
+        let hits = search(&conn, -1, "").unwrap();
+        assert_eq!(hits.len(), 50);
+    }
+
+    #[test]
+    fn combined_free_text_and_tag_clause_hit_both_bind() {
+        let conn = open_fixture();
+
+        // Exercises the full bind vector in one query: the account
+        // i64, the clause param, the MATCH expression, and the limit,
+        // in that positional order.
+        let hits = search(&conn, 42, "budgets tag:invoices").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+        assert_eq!(hits[0].account_id, 42);
+    }
+
+    #[test]
+    fn combined_free_text_and_flag_clause_can_be_empty() {
+        let conn = open_fixture();
+
+        // Message 1 (the only account-42 match for "budgets") is
+        // seen, so is:unread filters it out.
+        let hits = search(&conn, 42, "budgets is:unread").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn multi_clause_bind_order_survives_three_params() {
+        let conn = open_fixture();
+
+        // Two clause params (tag, in) interleaved with the MATCH and
+        // limit binds: the positional vector is account i64, tag
+        // param, in param, MATCH, limit. A single drift in that order
+        // misaligns every later bind.
+        let hits = search(&conn, 42, "budgets tag:invoices in:inbox").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+        assert_eq!(hits[0].account_id, 42);
+
+        // The missing tag drops the row without shifting binds.
+        let none = search(&conn, 42, "budgets tag:missing in:inbox").unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn account_scoped_empty_query_keeps_the_account_cond() {
+        let conn = open_fixture();
+
+        // Single-condition WHERE (account only), no MATCH: the scope
+        // still applies to the match-everything page.
+        let hits = search(&conn, 42, "").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, 1);
+    }
+
+    #[test]
+    fn prepare_error_propagates_as_storage() {
+        // No tables at all: prepare must fail and surface as Storage
+        // instead of panicking.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let err = search(&conn, ALL_ACCOUNTS, "budgets").unwrap_err();
+        assert!(matches!(err, SearchError::Storage(_)));
+    }
+
+    #[test]
+    fn row_map_error_propagates_as_storage() {
+        let conn = open_fixture();
+
+        // A row whose account_id cannot map to i64 forces the
+        // row-mapping error path (`hits.push(hit?)`). The TEXT
+        // account_id is FK-impossible under the production NOT NULL
+        // integer schema; in-memory dynamic typing keeps it, which
+        // is exactly what forces the row-map failure.
+        conn.execute(
+            "INSERT INTO messages (id, account_id, subject, has_attachments)
+             VALUES (3, 'not-a-number', 'Text budgets', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts_content
+                (message_id, subject, from_text, to_text, body)
+             VALUES (3, 'Text budgets', 'x', 'x', 'budgets again')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+             VALUES (3, 'Text budgets', 'x', 'x', 'budgets again')",
+            [],
+        )
+        .unwrap();
+
+        let err = search(&conn, ALL_ACCOUNTS, "budgets").unwrap_err();
+        assert!(matches!(err, SearchError::Storage(_)));
+    }
 
     #[test]
     fn empty_query_matches_everything() {
