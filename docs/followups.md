@@ -221,6 +221,19 @@ project (global `AGENTS.md` §4 and §13).
   `Search unavailable` only for DB errors — align the copy or amend
   the spec (`lib/features/search/search_screen.dart`,
   `specs/USER_FLOW.md:284`).
+- MAILSLATE-69 — M3: USER_FLOW §7.3 says unknown search operators are
+  treated as literals with a subtle hint chip; the shipped parser
+  raises `SearchError::UnknownField` instead (e.g. `cc:x`) — implement
+  the literal-fallback + hint chip or amend the spec; related to but
+  distinct from MAILSLATE-58 (FTS special chars) and MAILSLATE-62
+  (parse-error kind mapping)
+  (`rust/crates/core/src/domain/search.rs:52`,
+  `specs/USER_FLOW.md:178`).
+- MAILSLATE-70 — M3: F4.2 remote-image policy — the reader pane ships
+  without the per-message *Load images* banner action (session-scoped);
+  verify the sanitizer's remote-image blocking and add the banner or
+  scope it in the spec (`lib/features/shell/shell_screen.dart`,
+  `rust/crates/core/src/domain/reader.rs`, `specs/PRD.md:103`).
 
 ## Acknowledged test deferrals
 
