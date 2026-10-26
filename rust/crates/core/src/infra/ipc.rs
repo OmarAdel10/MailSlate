@@ -247,6 +247,135 @@ impl Client {
         self.request(methods::GET_STATUS, json!({})).await
     }
 
+    /// Full-text search across one account's messages; replies with
+    /// `{ messages: [{ id, account_id, subject, snippet }], total }`.
+    pub async fn search(&mut self, account_id: i64, query: &str) -> Result<Value, BridgeError> {
+        self.request(
+            methods::SEARCH,
+            json!({ "account_id": account_id, "query": query }),
+        )
+        .await
+    }
+
+    /// Lists one account's threads; replies with
+    /// `{ threads: [{ id, account_id, subject, last_date,
+    /// message_count, unread_count, has_attachments, last_snippet }],
+    /// total }`.
+    pub async fn get_threads(
+        &mut self,
+        account_id: i64,
+        limit: u32,
+        last_date: Option<i64>,
+        last_thread_id: Option<i64>,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_THREADS,
+            json!({
+                "account_id": account_id,
+                "limit": limit,
+                "last_date": last_date,
+                "last_thread_id": last_thread_id,
+            }),
+        )
+        .await
+    }
+
+    /// Lists one thread's messages; replies with
+    /// `{ messages: [{ id, subject, from_json, date_utc, snippet,
+    /// has_attachments, body_state }], total }`.
+    pub async fn get_thread_messages(
+        &mut self,
+        thread_id: i64,
+        limit: u32,
+        last_date: Option<i64>,
+        last_message_id: Option<i64>,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_THREAD_MESSAGES,
+            json!({
+                "thread_id": thread_id,
+                "limit": limit,
+                "last_date": last_date,
+                "last_message_id": last_message_id,
+            }),
+        )
+        .await
+    }
+
+    /// Lists one account's mailboxes; replies with
+    /// `{ mailboxes: [{ id, account_id, name, kind, special_use,
+    /// color, sort_order, uidvalidity, uidnext, highest_modseq,
+    /// last_synced_at }], total }`.
+    pub async fn get_mailboxes(
+        &mut self,
+        account_id: i64,
+        limit: u32,
+        last_sort_order: Option<i64>,
+        last_kind: Option<&str>,
+        last_name: Option<&str>,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_MAILBOXES,
+            json!({
+                "account_id": account_id,
+                "limit": limit,
+                "last_sort_order": last_sort_order,
+                "last_kind": last_kind,
+                "last_name": last_name,
+            }),
+        )
+        .await
+    }
+
+    /// Returns one message's headers; replies with
+    /// `{ id, account_id, subject, from_json, to_json, date_utc,
+    /// snippet, has_attachments, body_state }`.
+    pub async fn get_message(
+        &mut self,
+        account_id: i64,
+        message_id: i64,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_MESSAGE,
+            json!({ "account_id": account_id, "message_id": message_id }),
+        )
+        .await
+    }
+
+    /// Returns one message's decoded body; replies with
+    /// `{ message_id, text_body, html_clean }`.
+    pub async fn get_message_body(&mut self, message_id: i64) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_MESSAGE_BODY,
+            json!({ "message_id": message_id }),
+        )
+        .await
+    }
+
+    /// Returns one message's attachments; replies with
+    /// `{ attachments: [...] }`.
+    pub async fn get_attachments(&mut self, message_id: i64) -> Result<Value, BridgeError> {
+        self.request(
+            methods::GET_ATTACHMENTS,
+            json!({ "message_id": message_id }),
+        )
+        .await
+    }
+
+    /// Marks a message as read or unread; replies with `{ ok: true }`.
+    pub async fn mark_read(
+        &mut self,
+        account_id: i64,
+        message_id: i64,
+        seen: bool,
+    ) -> Result<Value, BridgeError> {
+        self.request(
+            methods::MARK_READ,
+            json!({ "account_id": account_id, "message_id": message_id, "seen": seen }),
+        )
+        .await
+    }
+
     /// Overrides the per-request timeout; tests use short values.
     #[cfg(test)]
     pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {

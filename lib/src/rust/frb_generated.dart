@@ -4,7 +4,11 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/accounts.dart';
+import 'api/mailbox.dart';
+import 'api/reader.dart';
+import 'api/search.dart';
 import 'api/system.dart';
+import 'api/threading.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -70,7 +74,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 1619135192;
+  int get rustContentHash => -1947246993;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -101,14 +105,60 @@ abstract class RustLibApi extends BaseApi {
 
   Future<DaemonStatus> crateApiSystemDaemonStatus();
 
+  Future<AttachmentList> crateApiReaderGetAttachments({
+    required PlatformInt64 messageId,
+  });
+
+  Future<MessageResult> crateApiReaderGetMessage({
+    required PlatformInt64 accountId,
+    required PlatformInt64 messageId,
+  });
+
+  Future<MessageBody> crateApiReaderGetMessageBody({
+    required PlatformInt64 messageId,
+  });
+
   Future<void> crateApiSystemInitApp();
 
   Future<List<AccountSummary>> crateApiAccountsListAccounts();
+
+  Future<MailboxList> crateApiMailboxListMailboxes({
+    required PlatformInt64 accountId,
+    required int limit,
+    PlatformInt64? lastSortOrder,
+    String? lastKind,
+    String? lastName,
+  });
+
+  Future<ThreadMessageList> crateApiThreadingListThreadMessages({
+    required PlatformInt64 threadId,
+    required int limit,
+    PlatformInt64? lastDate,
+    PlatformInt64? lastId,
+  });
+
+  Future<ThreadList> crateApiThreadingListThreads({
+    required PlatformInt64 accountId,
+    required int limit,
+    PlatformInt64? lastDate,
+    PlatformInt64? lastId,
+  });
+
+  Future<void> crateApiReaderMarkRead({
+    required PlatformInt64 accountId,
+    required PlatformInt64 messageId,
+    required bool seen,
+  });
 
   Future<PingInfo> crateApiSystemPing();
 
   Future<void> crateApiAccountsRemoveAccount({
     required PlatformInt64 accountId,
+  });
+
+  Future<SearchResult> crateApiSearchSearch({
+    required PlatformInt64 accountId,
+    required String query,
   });
 
   Future<PingInfo> crateApiSystemStartDaemon();
@@ -324,6 +374,106 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "daemon_status", argNames: []);
 
   @override
+  Future<AttachmentList> crateApiReaderGetAttachments({
+    required PlatformInt64 messageId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(messageId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 7,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_attachment_list,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiReaderGetAttachmentsConstMeta,
+        argValues: [messageId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReaderGetAttachmentsConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_attachments",
+        argNames: ["messageId"],
+      );
+
+  @override
+  Future<MessageResult> crateApiReaderGetMessage({
+    required PlatformInt64 accountId,
+    required PlatformInt64 messageId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(accountId, serializer);
+          sse_encode_i_64(messageId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_message_result,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiReaderGetMessageConstMeta,
+        argValues: [accountId, messageId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReaderGetMessageConstMeta => const TaskConstMeta(
+    debugName: "get_message",
+    argNames: ["accountId", "messageId"],
+  );
+
+  @override
+  Future<MessageBody> crateApiReaderGetMessageBody({
+    required PlatformInt64 messageId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(messageId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 9,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_message_body,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiReaderGetMessageBodyConstMeta,
+        argValues: [messageId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReaderGetMessageBodyConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_message_body",
+        argNames: ["messageId"],
+      );
+
+  @override
   Future<void> crateApiSystemInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -332,7 +482,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 10,
             port: port_,
           );
         },
@@ -359,7 +509,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 11,
             port: port_,
           );
         },
@@ -378,6 +528,167 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "list_accounts", argNames: []);
 
   @override
+  Future<MailboxList> crateApiMailboxListMailboxes({
+    required PlatformInt64 accountId,
+    required int limit,
+    PlatformInt64? lastSortOrder,
+    String? lastKind,
+    String? lastName,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(accountId, serializer);
+          sse_encode_u_32(limit, serializer);
+          sse_encode_opt_box_autoadd_i_64(lastSortOrder, serializer);
+          sse_encode_opt_String(lastKind, serializer);
+          sse_encode_opt_String(lastName, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 12,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_mailbox_list,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiMailboxListMailboxesConstMeta,
+        argValues: [accountId, limit, lastSortOrder, lastKind, lastName],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiMailboxListMailboxesConstMeta =>
+      const TaskConstMeta(
+        debugName: "list_mailboxes",
+        argNames: [
+          "accountId",
+          "limit",
+          "lastSortOrder",
+          "lastKind",
+          "lastName",
+        ],
+      );
+
+  @override
+  Future<ThreadMessageList> crateApiThreadingListThreadMessages({
+    required PlatformInt64 threadId,
+    required int limit,
+    PlatformInt64? lastDate,
+    PlatformInt64? lastId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(threadId, serializer);
+          sse_encode_u_32(limit, serializer);
+          sse_encode_opt_box_autoadd_i_64(lastDate, serializer);
+          sse_encode_opt_box_autoadd_i_64(lastId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 13,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_thread_message_list,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiThreadingListThreadMessagesConstMeta,
+        argValues: [threadId, limit, lastDate, lastId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiThreadingListThreadMessagesConstMeta =>
+      const TaskConstMeta(
+        debugName: "list_thread_messages",
+        argNames: ["threadId", "limit", "lastDate", "lastId"],
+      );
+
+  @override
+  Future<ThreadList> crateApiThreadingListThreads({
+    required PlatformInt64 accountId,
+    required int limit,
+    PlatformInt64? lastDate,
+    PlatformInt64? lastId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(accountId, serializer);
+          sse_encode_u_32(limit, serializer);
+          sse_encode_opt_box_autoadd_i_64(lastDate, serializer);
+          sse_encode_opt_box_autoadd_i_64(lastId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_thread_list,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiThreadingListThreadsConstMeta,
+        argValues: [accountId, limit, lastDate, lastId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiThreadingListThreadsConstMeta =>
+      const TaskConstMeta(
+        debugName: "list_threads",
+        argNames: ["accountId", "limit", "lastDate", "lastId"],
+      );
+
+  @override
+  Future<void> crateApiReaderMarkRead({
+    required PlatformInt64 accountId,
+    required PlatformInt64 messageId,
+    required bool seen,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(accountId, serializer);
+          sse_encode_i_64(messageId, serializer);
+          sse_encode_bool(seen, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 15,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiReaderMarkReadConstMeta,
+        argValues: [accountId, messageId, seen],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReaderMarkReadConstMeta => const TaskConstMeta(
+    debugName: "mark_read",
+    argNames: ["accountId", "messageId", "seen"],
+  );
+
+  @override
   Future<PingInfo> crateApiSystemPing() {
     return handler.executeNormal(
       NormalTask(
@@ -386,7 +697,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 16,
             port: port_,
           );
         },
@@ -416,7 +727,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 17,
             port: port_,
           );
         },
@@ -435,6 +746,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "remove_account", argNames: ["accountId"]);
 
   @override
+  Future<SearchResult> crateApiSearchSearch({
+    required PlatformInt64 accountId,
+    required String query,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(accountId, serializer);
+          sse_encode_String(query, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 18,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_search_result,
+          decodeErrorData: sse_decode_daemon_error,
+        ),
+        constMeta: kCrateApiSearchSearchConstMeta,
+        argValues: [accountId, query],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSearchSearchConstMeta => const TaskConstMeta(
+    debugName: "search",
+    argNames: ["accountId", "query"],
+  );
+
+  @override
   Future<PingInfo> crateApiSystemStartDaemon() {
     return handler.executeNormal(
       NormalTask(
@@ -443,7 +788,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 19,
             port: port_,
           );
         },
@@ -471,7 +816,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 20,
             port: port_,
           );
         },
@@ -501,7 +846,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 21,
             port: port_,
           );
         },
@@ -533,7 +878,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 22,
             port: port_,
           );
         },
@@ -568,7 +913,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 23,
             port: port_,
           );
         },
@@ -671,6 +1016,35 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       default:
         throw Exception("unreachable");
     }
+  }
+
+  @protected
+  AttachmentList dco_decode_attachment_list(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return AttachmentList(
+      attachments: dco_decode_list_attachment_summary(arr[0]),
+      total: dco_decode_i_64(arr[1]),
+    );
+  }
+
+  @protected
+  AttachmentSummary dco_decode_attachment_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return AttachmentSummary(
+      id: dco_decode_i_64(arr[0]),
+      partId: dco_decode_String(arr[1]),
+      filename: dco_decode_opt_String(arr[2]),
+      mimeType: dco_decode_opt_String(arr[3]),
+      sizeBytes: dco_decode_opt_box_autoadd_i_64(arr[4]),
+      contentId: dco_decode_opt_String(arr[5]),
+      blobPath: dco_decode_opt_String(arr[6]),
+    );
   }
 
   @protected
@@ -796,9 +1170,113 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<AttachmentSummary> dco_decode_list_attachment_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_attachment_summary).toList();
+  }
+
+  @protected
+  List<MailboxSummary> dco_decode_list_mailbox_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_mailbox_summary).toList();
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  List<SearchHit> dco_decode_list_search_hit(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_search_hit).toList();
+  }
+
+  @protected
+  List<ThreadMessage> dco_decode_list_thread_message(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_thread_message).toList();
+  }
+
+  @protected
+  List<ThreadSummary> dco_decode_list_thread_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_thread_summary).toList();
+  }
+
+  @protected
+  MailboxList dco_decode_mailbox_list(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return MailboxList(
+      mailboxes: dco_decode_list_mailbox_summary(arr[0]),
+      total: dco_decode_i_64(arr[1]),
+    );
+  }
+
+  @protected
+  MailboxSummary dco_decode_mailbox_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    return MailboxSummary(
+      id: dco_decode_i_64(arr[0]),
+      accountId: dco_decode_i_64(arr[1]),
+      name: dco_decode_String(arr[2]),
+      kind: dco_decode_String(arr[3]),
+      specialUse: dco_decode_opt_String(arr[4]),
+      color: dco_decode_opt_String(arr[5]),
+      sortOrder: dco_decode_i_64(arr[6]),
+      uidvalidity: dco_decode_opt_box_autoadd_i_64(arr[7]),
+      uidnext: dco_decode_opt_box_autoadd_i_64(arr[8]),
+      highestModseq: dco_decode_opt_box_autoadd_i_64(arr[9]),
+      lastSyncedAt: dco_decode_opt_box_autoadd_i_64(arr[10]),
+    );
+  }
+
+  @protected
+  MessageBody dco_decode_message_body(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return MessageBody(
+      messageId: dco_decode_i_64(arr[0]),
+      textBody: dco_decode_opt_String(arr[1]),
+      htmlClean: dco_decode_opt_String(arr[2]),
+    );
+  }
+
+  @protected
+  MessageDetail dco_decode_message_detail(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    return MessageDetail(
+      id: dco_decode_i_64(arr[0]),
+      accountId: dco_decode_i_64(arr[1]),
+      subject: dco_decode_opt_String(arr[2]),
+      fromJson: dco_decode_opt_String(arr[3]),
+      toJson: dco_decode_opt_String(arr[4]),
+      dateUtc: dco_decode_opt_box_autoadd_i_64(arr[5]),
+      snippet: dco_decode_opt_String(arr[6]),
+      hasAttachments: dco_decode_bool(arr[7]),
+      bodyState: dco_decode_String(arr[8]),
+    );
+  }
+
+  @protected
+  MessageResult dco_decode_message_result(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return MessageResult(message: dco_decode_message_detail(arr[0]));
   }
 
   @protected
@@ -828,6 +1306,91 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return PingInfo(
       protocolVersion: dco_decode_u_32(arr[0]),
       daemonVersion: dco_decode_String(arr[1]),
+    );
+  }
+
+  @protected
+  SearchHit dco_decode_search_hit(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return SearchHit(
+      messageId: dco_decode_i_64(arr[0]),
+      accountId: dco_decode_i_64(arr[1]),
+      subject: dco_decode_opt_String(arr[2]),
+      snippet: dco_decode_opt_String(arr[3]),
+    );
+  }
+
+  @protected
+  SearchResult dco_decode_search_result(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return SearchResult(
+      messages: dco_decode_list_search_hit(arr[0]),
+      total: dco_decode_i_64(arr[1]),
+    );
+  }
+
+  @protected
+  ThreadList dco_decode_thread_list(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return ThreadList(
+      threads: dco_decode_list_thread_summary(arr[0]),
+      total: dco_decode_i_64(arr[1]),
+    );
+  }
+
+  @protected
+  ThreadMessage dco_decode_thread_message(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return ThreadMessage(
+      id: dco_decode_i_64(arr[0]),
+      subject: dco_decode_opt_String(arr[1]),
+      fromJson: dco_decode_opt_String(arr[2]),
+      dateUtc: dco_decode_opt_box_autoadd_i_64(arr[3]),
+      snippet: dco_decode_opt_String(arr[4]),
+      hasAttachments: dco_decode_bool(arr[5]),
+      bodyState: dco_decode_String(arr[6]),
+    );
+  }
+
+  @protected
+  ThreadMessageList dco_decode_thread_message_list(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return ThreadMessageList(
+      messages: dco_decode_list_thread_message(arr[0]),
+      total: dco_decode_i_64(arr[1]),
+    );
+  }
+
+  @protected
+  ThreadSummary dco_decode_thread_summary(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    return ThreadSummary(
+      id: dco_decode_i_64(arr[0]),
+      accountId: dco_decode_i_64(arr[1]),
+      subject: dco_decode_opt_String(arr[2]),
+      lastDate: dco_decode_opt_box_autoadd_i_64(arr[3]),
+      messageCount: dco_decode_i_64(arr[4]),
+      unreadCount: dco_decode_i_64(arr[5]),
+      hasAttachments: dco_decode_bool(arr[6]),
+      lastSnippet: dco_decode_opt_String(arr[7]),
     );
   }
 
@@ -961,6 +1524,37 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AttachmentList sse_decode_attachment_list(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_attachments = sse_decode_list_attachment_summary(deserializer);
+    var var_total = sse_decode_i_64(deserializer);
+    return AttachmentList(attachments: var_attachments, total: var_total);
+  }
+
+  @protected
+  AttachmentSummary sse_decode_attachment_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_i_64(deserializer);
+    var var_partId = sse_decode_String(deserializer);
+    var var_filename = sse_decode_opt_String(deserializer);
+    var var_mimeType = sse_decode_opt_String(deserializer);
+    var var_sizeBytes = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_contentId = sse_decode_opt_String(deserializer);
+    var var_blobPath = sse_decode_opt_String(deserializer);
+    return AttachmentSummary(
+      id: var_id,
+      partId: var_partId,
+      filename: var_filename,
+      mimeType: var_mimeType,
+      sizeBytes: var_sizeBytes,
+      contentId: var_contentId,
+      blobPath: var_blobPath,
+    );
+  }
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
@@ -1091,10 +1685,160 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<AttachmentSummary> sse_decode_list_attachment_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <AttachmentSummary>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_attachment_summary(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<MailboxSummary> sse_decode_list_mailbox_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <MailboxSummary>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_mailbox_summary(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  List<SearchHit> sse_decode_list_search_hit(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <SearchHit>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_search_hit(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ThreadMessage> sse_decode_list_thread_message(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ThreadMessage>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_thread_message(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ThreadSummary> sse_decode_list_thread_summary(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ThreadSummary>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_thread_summary(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  MailboxList sse_decode_mailbox_list(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_mailboxes = sse_decode_list_mailbox_summary(deserializer);
+    var var_total = sse_decode_i_64(deserializer);
+    return MailboxList(mailboxes: var_mailboxes, total: var_total);
+  }
+
+  @protected
+  MailboxSummary sse_decode_mailbox_summary(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_i_64(deserializer);
+    var var_accountId = sse_decode_i_64(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_kind = sse_decode_String(deserializer);
+    var var_specialUse = sse_decode_opt_String(deserializer);
+    var var_color = sse_decode_opt_String(deserializer);
+    var var_sortOrder = sse_decode_i_64(deserializer);
+    var var_uidvalidity = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_uidnext = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_highestModseq = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_lastSyncedAt = sse_decode_opt_box_autoadd_i_64(deserializer);
+    return MailboxSummary(
+      id: var_id,
+      accountId: var_accountId,
+      name: var_name,
+      kind: var_kind,
+      specialUse: var_specialUse,
+      color: var_color,
+      sortOrder: var_sortOrder,
+      uidvalidity: var_uidvalidity,
+      uidnext: var_uidnext,
+      highestModseq: var_highestModseq,
+      lastSyncedAt: var_lastSyncedAt,
+    );
+  }
+
+  @protected
+  MessageBody sse_decode_message_body(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_messageId = sse_decode_i_64(deserializer);
+    var var_textBody = sse_decode_opt_String(deserializer);
+    var var_htmlClean = sse_decode_opt_String(deserializer);
+    return MessageBody(
+      messageId: var_messageId,
+      textBody: var_textBody,
+      htmlClean: var_htmlClean,
+    );
+  }
+
+  @protected
+  MessageDetail sse_decode_message_detail(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_i_64(deserializer);
+    var var_accountId = sse_decode_i_64(deserializer);
+    var var_subject = sse_decode_opt_String(deserializer);
+    var var_fromJson = sse_decode_opt_String(deserializer);
+    var var_toJson = sse_decode_opt_String(deserializer);
+    var var_dateUtc = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_snippet = sse_decode_opt_String(deserializer);
+    var var_hasAttachments = sse_decode_bool(deserializer);
+    var var_bodyState = sse_decode_String(deserializer);
+    return MessageDetail(
+      id: var_id,
+      accountId: var_accountId,
+      subject: var_subject,
+      fromJson: var_fromJson,
+      toJson: var_toJson,
+      dateUtc: var_dateUtc,
+      snippet: var_snippet,
+      hasAttachments: var_hasAttachments,
+      bodyState: var_bodyState,
+    );
+  }
+
+  @protected
+  MessageResult sse_decode_message_result(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_message = sse_decode_message_detail(deserializer);
+    return MessageResult(message: var_message);
   }
 
   @protected
@@ -1138,6 +1882,91 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return PingInfo(
       protocolVersion: var_protocolVersion,
       daemonVersion: var_daemonVersion,
+    );
+  }
+
+  @protected
+  SearchHit sse_decode_search_hit(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_messageId = sse_decode_i_64(deserializer);
+    var var_accountId = sse_decode_i_64(deserializer);
+    var var_subject = sse_decode_opt_String(deserializer);
+    var var_snippet = sse_decode_opt_String(deserializer);
+    return SearchHit(
+      messageId: var_messageId,
+      accountId: var_accountId,
+      subject: var_subject,
+      snippet: var_snippet,
+    );
+  }
+
+  @protected
+  SearchResult sse_decode_search_result(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_messages = sse_decode_list_search_hit(deserializer);
+    var var_total = sse_decode_i_64(deserializer);
+    return SearchResult(messages: var_messages, total: var_total);
+  }
+
+  @protected
+  ThreadList sse_decode_thread_list(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_threads = sse_decode_list_thread_summary(deserializer);
+    var var_total = sse_decode_i_64(deserializer);
+    return ThreadList(threads: var_threads, total: var_total);
+  }
+
+  @protected
+  ThreadMessage sse_decode_thread_message(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_i_64(deserializer);
+    var var_subject = sse_decode_opt_String(deserializer);
+    var var_fromJson = sse_decode_opt_String(deserializer);
+    var var_dateUtc = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_snippet = sse_decode_opt_String(deserializer);
+    var var_hasAttachments = sse_decode_bool(deserializer);
+    var var_bodyState = sse_decode_String(deserializer);
+    return ThreadMessage(
+      id: var_id,
+      subject: var_subject,
+      fromJson: var_fromJson,
+      dateUtc: var_dateUtc,
+      snippet: var_snippet,
+      hasAttachments: var_hasAttachments,
+      bodyState: var_bodyState,
+    );
+  }
+
+  @protected
+  ThreadMessageList sse_decode_thread_message_list(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_messages = sse_decode_list_thread_message(deserializer);
+    var var_total = sse_decode_i_64(deserializer);
+    return ThreadMessageList(messages: var_messages, total: var_total);
+  }
+
+  @protected
+  ThreadSummary sse_decode_thread_summary(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_i_64(deserializer);
+    var var_accountId = sse_decode_i_64(deserializer);
+    var var_subject = sse_decode_opt_String(deserializer);
+    var var_lastDate = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_messageCount = sse_decode_i_64(deserializer);
+    var var_unreadCount = sse_decode_i_64(deserializer);
+    var var_hasAttachments = sse_decode_bool(deserializer);
+    var var_lastSnippet = sse_decode_opt_String(deserializer);
+    return ThreadSummary(
+      id: var_id,
+      accountId: var_accountId,
+      subject: var_subject,
+      lastDate: var_lastDate,
+      messageCount: var_messageCount,
+      unreadCount: var_unreadCount,
+      hasAttachments: var_hasAttachments,
+      lastSnippet: var_lastSnippet,
     );
   }
 
@@ -1264,6 +2093,31 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_attachment_list(
+    AttachmentList self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_attachment_summary(self.attachments, serializer);
+    sse_encode_i_64(self.total, serializer);
+  }
+
+  @protected
+  void sse_encode_attachment_summary(
+    AttachmentSummary self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.id, serializer);
+    sse_encode_String(self.partId, serializer);
+    sse_encode_opt_String(self.filename, serializer);
+    sse_encode_opt_String(self.mimeType, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.sizeBytes, serializer);
+    sse_encode_opt_String(self.contentId, serializer);
+    sse_encode_opt_String(self.blobPath, serializer);
+  }
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
@@ -1382,6 +2236,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_attachment_summary(
+    List<AttachmentSummary> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_attachment_summary(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_mailbox_summary(
+    List<MailboxSummary> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_mailbox_summary(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -1389,6 +2267,96 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_list_search_hit(
+    List<SearchHit> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_search_hit(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_thread_message(
+    List<ThreadMessage> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_thread_message(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_thread_summary(
+    List<ThreadSummary> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_thread_summary(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_mailbox_list(MailboxList self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_mailbox_summary(self.mailboxes, serializer);
+    sse_encode_i_64(self.total, serializer);
+  }
+
+  @protected
+  void sse_encode_mailbox_summary(
+    MailboxSummary self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.id, serializer);
+    sse_encode_i_64(self.accountId, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.kind, serializer);
+    sse_encode_opt_String(self.specialUse, serializer);
+    sse_encode_opt_String(self.color, serializer);
+    sse_encode_i_64(self.sortOrder, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.uidvalidity, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.uidnext, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.highestModseq, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.lastSyncedAt, serializer);
+  }
+
+  @protected
+  void sse_encode_message_body(MessageBody self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.messageId, serializer);
+    sse_encode_opt_String(self.textBody, serializer);
+    sse_encode_opt_String(self.htmlClean, serializer);
+  }
+
+  @protected
+  void sse_encode_message_detail(MessageDetail self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.id, serializer);
+    sse_encode_i_64(self.accountId, serializer);
+    sse_encode_opt_String(self.subject, serializer);
+    sse_encode_opt_String(self.fromJson, serializer);
+    sse_encode_opt_String(self.toJson, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.dateUtc, serializer);
+    sse_encode_opt_String(self.snippet, serializer);
+    sse_encode_bool(self.hasAttachments, serializer);
+    sse_encode_String(self.bodyState, serializer);
+  }
+
+  @protected
+  void sse_encode_message_result(MessageResult self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_message_detail(self.message, serializer);
   }
 
   @protected
@@ -1429,6 +2397,64 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_32(self.protocolVersion, serializer);
     sse_encode_String(self.daemonVersion, serializer);
+  }
+
+  @protected
+  void sse_encode_search_hit(SearchHit self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.messageId, serializer);
+    sse_encode_i_64(self.accountId, serializer);
+    sse_encode_opt_String(self.subject, serializer);
+    sse_encode_opt_String(self.snippet, serializer);
+  }
+
+  @protected
+  void sse_encode_search_result(SearchResult self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_search_hit(self.messages, serializer);
+    sse_encode_i_64(self.total, serializer);
+  }
+
+  @protected
+  void sse_encode_thread_list(ThreadList self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_thread_summary(self.threads, serializer);
+    sse_encode_i_64(self.total, serializer);
+  }
+
+  @protected
+  void sse_encode_thread_message(ThreadMessage self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.id, serializer);
+    sse_encode_opt_String(self.subject, serializer);
+    sse_encode_opt_String(self.fromJson, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.dateUtc, serializer);
+    sse_encode_opt_String(self.snippet, serializer);
+    sse_encode_bool(self.hasAttachments, serializer);
+    sse_encode_String(self.bodyState, serializer);
+  }
+
+  @protected
+  void sse_encode_thread_message_list(
+    ThreadMessageList self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_thread_message(self.messages, serializer);
+    sse_encode_i_64(self.total, serializer);
+  }
+
+  @protected
+  void sse_encode_thread_summary(ThreadSummary self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_64(self.id, serializer);
+    sse_encode_i_64(self.accountId, serializer);
+    sse_encode_opt_String(self.subject, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.lastDate, serializer);
+    sse_encode_i_64(self.messageCount, serializer);
+    sse_encode_i_64(self.unreadCount, serializer);
+    sse_encode_bool(self.hasAttachments, serializer);
+    sse_encode_opt_String(self.lastSnippet, serializer);
   }
 
   @protected

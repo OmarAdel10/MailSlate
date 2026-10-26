@@ -4,6 +4,7 @@
 //! §3.1); the daemon injects them at startup. `paths` is pure resolution;
 //! `db` and `keyring` touch the outside world.
 
+pub mod blobs;
 pub mod db;
 #[cfg(unix)]
 pub mod events;
@@ -14,3 +15,4 @@ pub mod keyring;
 pub mod mime;
 pub mod oauth;
 pub mod paths;
+pub mod sanitize;

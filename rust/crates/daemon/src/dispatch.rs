@@ -7,7 +7,12 @@ use mailslate_core::domain::accounts::{
     AccountPatch, AuthKind, ImapAccountDraft, PENDING_ACCOUNT_ID, Security, add_imap_account,
     add_oauth_account, get_account_connections, get_accounts, remove_account, update_account,
 };
+use mailslate_core::domain::mailbox::list_mailboxes;
+use mailslate_core::domain::reader::{get_attachments, get_message, get_message_body, mark_read};
+use mailslate_core::domain::search::search;
+use mailslate_core::domain::threading::{list_thread_messages, list_threads};
 use mailslate_core::infra::db::pool::ReadPool;
+use mailslate_core::infra::db::queries::{MailboxCursor, ThreadCursor};
 use mailslate_core::infra::db::writer::WriterActor;
 use mailslate_core::infra::imap::probe::{ProbeError, probe_imap_login, probe_smtp};
 use mailslate_core::infra::keyring::KeyStore;
@@ -20,6 +25,7 @@ use mailslate_core::infra::oauth::{OAuthError, tokens};
 use mailslate_protocol::message::Event;
 use mailslate_protocol::{BridgeError, ErrorKind, PROTOCOL_VERSION, PingResult, methods};
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -68,6 +74,8 @@ pub struct DispatchCtx {
     pub keystore: Arc<dyn KeyStore>,
     /// Readonly connections for read-only methods.
     pub reader: Arc<ReadPool>,
+    /// Path of the SQLite database, for write-side connections.
+    pub db_path: PathBuf,
     /// Domain events fanned out to connected GUIs.
     pub bus: Arc<EventBus>,
     /// The OAuth session waiting for `complete_oauth_account`.
@@ -112,6 +120,16 @@ pub fn dispatch(
         methods::ABORT_OAUTH_ACCOUNT => abort_oauth_account_dispatch(ctx).map(Dispatched::Reply),
         methods::SYNC_NOW => sync_now_dispatch(ctx, params).map(Dispatched::Reply),
         methods::GET_STATUS => get_status_dispatch(ctx).map(Dispatched::Reply),
+        methods::SEARCH => search_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::GET_THREADS => get_threads_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::GET_THREAD_MESSAGES => {
+            get_thread_messages_dispatch(ctx, params).map(Dispatched::Reply)
+        }
+        methods::GET_MAILBOXES => get_mailboxes_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::GET_MESSAGE => get_message_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::GET_MESSAGE_BODY => get_message_body_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::GET_ATTACHMENTS => get_attachments_dispatch(ctx, params).map(Dispatched::Reply),
+        methods::MARK_READ => mark_read_dispatch(ctx, params).map(Dispatched::Reply),
         other => Err(BridgeError::new(
             ErrorKind::NotFound,
             format!("unknown method: {other}"),
@@ -784,6 +802,225 @@ fn get_status_dispatch(ctx: &DispatchCtx) -> Result<Value, BridgeError> {
     Ok(json!({ "accounts": accounts }))
 }
 
+/// Full-text search across one account's messages: parse the syntax
+/// subset into an FTS5 `MATCH` + `WHERE` clauses, run against the
+/// external-content index, sanitize snippets, reply with hits + total.
+fn search_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let query = string(params, "query")?;
+    let hits = blocking(|| {
+        let conn = ctx
+            .reader
+            .acquire()
+            .map_err(|err| BridgeError::new(ErrorKind::Internal, format!("read pool: {err}")))?;
+        search(&conn, account_id, &query)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("search: {err}")))
+    })?;
+    let messages: Vec<Value> = hits
+        .into_iter()
+        .map(|hit| {
+            json!({
+                "id": hit.message_id,
+                "account_id": hit.account_id,
+                "subject": hit.subject,
+                "snippet": hit.snippet,
+            })
+        })
+        .collect();
+    Ok(json!({ "messages": messages, "total": messages.len() }))
+}
+
+/// Lists one account's threads: parse account_id + optional cursor,
+/// call `list_threads`, reply with threads + total.
+fn get_threads_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let limit = optional_u32(params, "limit")?.unwrap_or(50);
+    let cursor = cursor(params)?;
+    let threads = blocking(|| {
+        list_threads(&ctx.reader, account_id, limit, cursor)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("get_threads: {err}")))
+    })?;
+    let items: Vec<Value> = threads
+        .into_iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "account_id": t.account_id,
+                "subject": t.subject,
+                "last_date": t.last_date,
+                "message_count": t.message_count,
+                "unread_count": t.unread_count,
+                "has_attachments": t.has_attachments,
+                "last_snippet": t.last_snippet,
+            })
+        })
+        .collect();
+    Ok(json!({ "threads": items, "total": items.len() }))
+}
+
+/// Lists one thread's messages: parse thread_id + optional cursor,
+/// call `list_thread_messages`, reply with messages + total.
+fn get_thread_messages_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let thread_id = required(params, "thread_id")?
+        .as_i64()
+        .ok_or_else(|| validation("thread_id must be an integer"))?;
+    let limit = optional_u32(params, "limit")?.unwrap_or(50);
+    let cursor = cursor(params)?;
+    let messages = blocking(|| {
+        list_thread_messages(&ctx.reader, thread_id, limit, cursor).map_err(|err| {
+            BridgeError::new(ErrorKind::Storage, format!("get_thread_messages: {err}"))
+        })
+    })?;
+    let items: Vec<Value> = messages
+        .into_iter()
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "subject": m.subject,
+                "from_json": m.from_json,
+                "date_utc": m.date_utc,
+                "snippet": m.snippet,
+                "has_attachments": m.has_attachments,
+                "body_state": m.body_state,
+            })
+        })
+        .collect();
+    Ok(json!({ "messages": items, "total": items.len() }))
+}
+
+/// Returns one message's headers by id and account.
+fn get_message_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let message_id = required(params, "message_id")?
+        .as_i64()
+        .ok_or_else(|| validation("message_id must be an integer"))?;
+    let detail = blocking(|| {
+        get_message(&ctx.reader, account_id, message_id)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("get_message: {err}")))
+    })?;
+    let detail = match detail {
+        Some(d) => d,
+        None => {
+            return Err(BridgeError::new(
+                ErrorKind::NotFound,
+                format!("message {message_id} not found"),
+            ));
+        }
+    };
+    Ok(json!({
+        "id": detail.id,
+        "account_id": detail.account_id,
+        "subject": detail.subject,
+        "from_json": detail.from_json,
+        "to_json": detail.to_json,
+        "date_utc": detail.date_utc,
+        "snippet": detail.snippet,
+        "has_attachments": detail.has_attachments,
+        "body_state": detail.body_state,
+    }))
+}
+
+/// Returns one message's decoded body by id.
+fn get_message_body_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let message_id = required(params, "message_id")?
+        .as_i64()
+        .ok_or_else(|| validation("message_id must be an integer"))?;
+    let body = blocking(|| {
+        get_message_body(&ctx.reader, message_id)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("get_message_body: {err}")))
+    })?;
+    let body = match body {
+        Some(b) => b,
+        None => {
+            return Err(BridgeError::new(
+                ErrorKind::NotFound,
+                format!("message body {message_id} not found"),
+            ));
+        }
+    };
+    Ok(json!({
+        "message_id": body.message_id,
+        "text_body": body.text_body,
+        "html_clean": body.html_clean,
+    }))
+}
+
+/// Returns one message's attachments by id.
+fn get_attachments_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let message_id = required(params, "message_id")?
+        .as_i64()
+        .ok_or_else(|| validation("message_id must be an integer"))?;
+    let attachments = blocking(|| {
+        get_attachments(&ctx.reader, message_id)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("get_attachments: {err}")))
+    })?;
+    let items: Vec<Value> = attachments
+        .into_iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "part_id": a.part_id,
+                "filename": a.filename,
+                "mime_type": a.mime_type,
+                "size_bytes": a.size_bytes,
+                "content_id": a.content_id,
+                "blob_path": a.blob_path,
+            })
+        })
+        .collect();
+    Ok(json!({ "attachments": items, "total": items.len() }))
+}
+
+/// Marks a message as read or unread (write path).
+fn mark_read_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let message_id = required(params, "message_id")?
+        .as_i64()
+        .ok_or_else(|| validation("message_id must be an integer"))?;
+    let seen = required(params, "seen")?
+        .as_bool()
+        .ok_or_else(|| validation("seen must be a boolean"))?;
+    let db_path = &ctx.db_path;
+    let result = blocking(|| {
+        let conn = mailslate_core::infra::db::open_rw(db_path)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("open rw: {err}")))?;
+        mark_read(&conn, account_id, message_id, seen)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("mark_read: {err}")))
+    })?;
+    Ok(json!({ "ok": true, "updated": result }))
+}
+
+/// Lists one account's mailboxes: parse account_id + optional cursor,
+/// call `list_mailboxes`, reply with mailboxes + total.
+fn get_mailboxes_dispatch(ctx: &DispatchCtx, params: &Value) -> Result<Value, BridgeError> {
+    let account_id = account_id(params)?;
+    let limit = optional_u32(params, "limit")?.unwrap_or(50);
+    let cursor = mailbox_cursor(params)?;
+    let mailboxes = blocking(|| {
+        list_mailboxes(&ctx.reader, account_id, limit, cursor)
+            .map_err(|err| BridgeError::new(ErrorKind::Storage, format!("get_mailboxes: {err}")))
+    })?;
+    let items: Vec<Value> = mailboxes
+        .into_iter()
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "account_id": m.account_id,
+                "name": m.name,
+                "kind": m.kind,
+                "special_use": m.special_use,
+                "color": m.color,
+                "sort_order": m.sort_order,
+                "uidvalidity": m.uidvalidity,
+                "uidnext": m.uidnext,
+                "highest_modseq": m.highest_modseq,
+                "last_synced_at": m.last_synced_at,
+            })
+        })
+        .collect();
+    Ok(json!({ "mailboxes": items, "total": items.len() }))
+}
+
 /// Unix seconds; token expiry arithmetic uses whole seconds only.
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
@@ -850,6 +1087,72 @@ fn account_id(params: &Value) -> Result<i64, BridgeError> {
         .ok_or_else(|| validation("missing account_id"))
 }
 
+/// Optional u32 parameter; None when absent or null.
+fn optional_u32(params: &Value, key: &str) -> Result<Option<u32>, BridgeError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .map(Some)
+            .ok_or_else(|| validation(format!("{key} must be a u32"))),
+        Some(_) => Err(validation(format!("{key} must be a u32"))),
+    }
+}
+
+/// Optional keyset cursor built from `last_date` + `last_id` params.
+fn cursor(params: &Value) -> Result<Option<ThreadCursor>, BridgeError> {
+    let last_date = optional_i64(params, "last_date")?;
+    let last_id = optional_i64(params, "last_id")?;
+    match (last_date, last_id) {
+        (Some(date), Some(id)) => Ok(Some(ThreadCursor {
+            last_date: date,
+            thread_id: id,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(validation("cursor requires both last_date and last_id")),
+    }
+}
+
+/// Optional mailbox keyset cursor built from `last_sort_order` + `last_kind` + `last_name`.
+fn mailbox_cursor(params: &Value) -> Result<Option<MailboxCursor>, BridgeError> {
+    let last_sort_order = optional_i64(params, "last_sort_order")?;
+    let last_kind = optional_str(params, "last_kind")?;
+    let last_name = optional_str(params, "last_name")?;
+    match (last_sort_order, last_kind, last_name) {
+        (Some(sort_order), Some(kind), Some(name)) => Ok(Some(MailboxCursor {
+            sort_order,
+            kind,
+            name,
+        })),
+        (None, None, None) => Ok(None),
+        _ => Err(validation(
+            "mailbox cursor requires last_sort_order, last_kind, and last_name",
+        )),
+    }
+}
+
+/// Optional string parameter; None when absent or null.
+fn optional_str(params: &Value, key: &str) -> Result<Option<String>, BridgeError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(validation(format!("{key} must be a string"))),
+    }
+}
+
+/// Optional i64 parameter; None when absent or null.
+fn optional_i64(params: &Value, key: &str) -> Result<Option<i64>, BridgeError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| validation(format!("{key} must be an i64"))),
+        Some(_) => Err(validation(format!("{key} must be an i64"))),
+    }
+}
+
 /// The `ping` payload: both sides' versions for the handshake.
 pub fn ping_result() -> Value {
     serde_json::to_value(PingResult {
@@ -866,6 +1169,7 @@ mod tests {
     use mailslate_core::infra::db::writer::WriterActor;
     use mailslate_core::infra::db::{DB_FILE_NAME, migrations};
     use mailslate_core::infra::keyring::{FakeKeyStore, KeyStore, KeyStoreError};
+    use rusqlite;
     use std::sync::Arc;
 
     /// A dispatch context over a fresh migrated database in `dir`.
@@ -1158,6 +1462,7 @@ mod tests {
             writer: Arc::new(WriterActor::spawn(&db_path)),
             keystore,
             reader: Arc::new(ReadPool::open(&db_path).unwrap()),
+            db_path: db_path.clone(),
             bus: mailslate_core::domain::events::EventBus::new(),
             oauth: Arc::new(std::sync::Mutex::new(None)),
             token_poster: poster,
@@ -1982,6 +2287,471 @@ mod tests {
                     .contains_key(&account_id),
                 "removing an account must stop its sync actor"
             );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn search_dispatch_returns_hits_for_account() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let account_id = 42;
+            // Seed account, message + FTS rows directly (writer normally keeps these in sync).
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![account_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject, date_utc)
+                 VALUES (?1, ?2, 'msg-1', 'Quarterly report', 1000)",
+                rusqlite::params![1, account_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
+                 VALUES (?1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine')",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                 VALUES (?1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine')",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::SEARCH,
+                &json!({ "account_id": account_id, "query": "budgets" }),
+            )
+            .unwrap() else {
+                panic!("search must reply");
+            };
+            let messages = value["messages"].as_array().expect("messages array");
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["id"], json!(1));
+            assert_eq!(messages[0]["account_id"], json!(42));
+            assert_eq!(messages[0]["subject"], json!("Quarterly report"));
+            assert_eq!(value["total"], json!(1));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn search_dispatch_all_accounts_sentinel_hits_every_account() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            for (account_id, message_id) in [(42, 1), (7, 2)] {
+                conn.execute(
+                    "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                           imap_security, smtp_host, smtp_port, smtp_security,
+                                           auth_type, created_at)
+                     VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                             'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                    rusqlite::params![account_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO messages (id, account_id, dedupe_key, subject, date_utc)
+                     VALUES (?1, ?2, ?3, 'Quarterly report', 1000)",
+                    rusqlite::params![message_id, account_id, format!("msg-{message_id}")],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO messages_fts_content (message_id, subject, from_text, to_text, body)
+                     VALUES (?1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine')",
+                    rusqlite::params![message_id],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO messages_fts (rowid, subject, from_text, to_text, body)
+                     VALUES (?1, 'Quarterly report', 'ana', 'bo', 'the budgets look fine')",
+                    rusqlite::params![message_id],
+                )
+                .unwrap();
+            }
+            drop(conn);
+
+            // The -1 sentinel crosses the IPC boundary intact and the
+            // daemon searches every account.
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::SEARCH,
+                &json!({ "account_id": -1, "query": "budgets" }),
+            )
+            .unwrap() else {
+                panic!("search must reply");
+            };
+            let messages = value["messages"].as_array().expect("messages array");
+            assert_eq!(messages.len(), 2);
+            assert_eq!(value["total"], json!(2));
+            let account_ids: Vec<i64> = messages
+                .iter()
+                .map(|hit| hit["account_id"].as_i64().expect("account id"))
+                .collect();
+            assert!(account_ids.contains(&42));
+            assert!(account_ids.contains(&7));
+        }
+
+        #[test]
+        fn search_dispatch_missing_account_id_is_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = dispatch(&ctx, methods::SEARCH, &json!({ "query": "budgets" })).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+            assert!(err.message.contains("account_id"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn get_threads_dispatch_lists_threads() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let account_id = 42;
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![account_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, account_id, subject_norm, last_date,
+                                      message_count, unread_count, has_attachments, last_snippet)
+                 VALUES (?1, 42, 'Project Alpha', 2000, 2, 1, 0, 'alpha snippet')",
+                rusqlite::params![100],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, account_id, subject_norm, last_date,
+                                      message_count, unread_count, has_attachments, last_snippet)
+                 VALUES (?1, 42, 'Weekly Report', 1000, 1, 0, 0, 'report snippet')",
+                rusqlite::params![101],
+            )
+            .unwrap();
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::GET_THREADS,
+                &json!({ "account_id": account_id, "limit": 50 }),
+            )
+            .unwrap() else {
+                panic!("get_threads must reply");
+            };
+            let threads = value["threads"].as_array().expect("threads array");
+            assert_eq!(threads.len(), 2);
+            assert_eq!(threads[0]["id"], json!(100));
+            assert_eq!(threads[0]["subject"], json!("Project Alpha"));
+            assert_eq!(threads[0]["message_count"], json!(2));
+            assert_eq!(threads[0]["unread_count"], json!(1));
+            assert_eq!(threads[1]["id"], json!(101));
+            assert_eq!(threads[1]["subject"], json!("Weekly Report"));
+            assert_eq!(value["total"], json!(2));
+        }
+
+        #[test]
+        fn get_threads_dispatch_missing_account_id_is_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = dispatch(&ctx, methods::GET_THREADS, &json!({ "limit": 50 })).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+            assert!(err.message.contains("account_id"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn get_thread_messages_dispatch_lists_messages() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let thread_id = 100;
+            let account_id = 42;
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![account_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, account_id, subject_norm, last_date,
+                                      message_count, unread_count, has_attachments, last_snippet)
+                 VALUES (?1, 42, 'Project Alpha', 2000, 2, 1, 0, 'alpha snippet')",
+                rusqlite::params![thread_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject, from_json,
+                                      date_utc, snippet, has_attachments, body_state, thread_id)
+                 VALUES (?1, 42, 'm-1', 'Alpha start',
+                         '[{\"name\":\"Alice\",\"address\":\"alice@example.com\"}]',
+                         2000, 'start snippet', 0, 'headers', 100)",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject, from_json,
+                                      date_utc, snippet, has_attachments, body_state, thread_id)
+                 VALUES (?1, 42, 'm-2', 'Alpha update',
+                         '[{\"name\":\"Bob\",\"address\":\"bob@example.com\"}]',
+                         2001, 'update snippet', 0, 'full', 100)",
+                rusqlite::params![2],
+            )
+            .unwrap();
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::GET_THREAD_MESSAGES,
+                &json!({ "thread_id": thread_id, "limit": 50 }),
+            )
+            .unwrap() else {
+                panic!("get_thread_messages must reply");
+            };
+            let messages = value["messages"].as_array().expect("messages array");
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[0]["id"], json!(2));
+            assert_eq!(messages[0]["subject"], json!("Alpha update"));
+            assert_eq!(messages[1]["id"], json!(1));
+            assert_eq!(messages[1]["subject"], json!("Alpha start"));
+            assert_eq!(value["total"], json!(2));
+        }
+
+        #[test]
+        fn get_thread_messages_dispatch_missing_thread_id_is_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err =
+                dispatch(&ctx, methods::GET_THREAD_MESSAGES, &json!({ "limit": 50 })).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+            assert!(err.message.contains("thread_id"));
+        }
+        #[tokio::test(flavor = "multi_thread")]
+        async fn get_message_dispatch_returns_detail() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 42, 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![42],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, account_id, subject_norm, last_date,
+                                      message_count, unread_count, has_attachments)
+                 VALUES (?1, 42, 'Reader thread', 1000, 1, 0, 0)",
+                rusqlite::params![100],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mailboxes (id, account_id, name, kind, special_use, color,
+                                      sort_order, uidvalidity, uidnext, highest_modseq,
+                                      last_synced_at)
+                 VALUES (?1, 42, 'INBOX', 'inbox', NULL, NULL, 0, NULL, NULL, NULL, NULL)",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject, from_json,
+                                      to_json, date_utc, snippet, has_attachments,
+                                      body_state, thread_id)
+                 VALUES (?1, 42, 'msg-reader', 'Reader subject',
+                         '[{\"name\":\"Alice\",\"address\":\"alice@example.com\"}]',
+                         '[{\"name\":\"Bob\",\"address\":\"bob@example.com\"}]',
+                         1000, 'reader snippet', 0, 'full', 100)",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message_locations (message_id, mailbox_id, uid, seen,
+                                              flagged, answered, draft, deleted,
+                                              keywords_json, modseq)
+                 VALUES (?1, 1, 1, 0, 0, 0, 0, 0, '[]', NULL)",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::GET_MESSAGE,
+                &json!({ "account_id": 42, "message_id": 1 }),
+            )
+            .unwrap() else {
+                panic!("get_message must reply");
+            };
+            assert_eq!(value["id"], json!(1));
+            assert_eq!(value["account_id"], json!(42));
+            assert_eq!(value["subject"], json!("Reader subject"));
+            assert_eq!(value["body_state"], json!("full"));
+            assert!(!value["has_attachments"].as_bool().unwrap());
+        }
+
+        #[test]
+        fn get_message_dispatch_not_found_for_unknown() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = dispatch(
+                &ctx,
+                methods::GET_MESSAGE,
+                &json!({ "account_id": 42, "message_id": 999 }),
+            )
+            .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::NotFound);
+            assert!(err.message.contains("999"));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn mark_read_dispatch_marks_as_read() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 42, 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![42],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO threads (id, account_id, subject_norm, last_date,
+                                      message_count, unread_count, has_attachments)
+                 VALUES (?1, 42, 'Reader thread', 1000, 1, 0, 0)",
+                rusqlite::params![100],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO mailboxes (id, account_id, name, kind, special_use, color,
+                                      sort_order, uidvalidity, uidnext, highest_modseq,
+                                      last_synced_at)
+                 VALUES (?1, 42, 'INBOX', 'inbox', NULL, NULL, 0, NULL, NULL, NULL, NULL)",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (id, account_id, dedupe_key, subject, from_json,
+                                      to_json, date_utc, snippet, has_attachments,
+                                      body_state, thread_id)
+                 VALUES (?1, 42, 'msg-reader', 'Reader subject',
+                         '[{\"name\":\"Alice\",\"address\":\"alice@example.com\"}]',
+                         '[{\"name\":\"Bob\",\"address\":\"bob@example.com\"}]',
+                         1000, 'reader snippet', 0, 'full', 100)",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message_locations (message_id, mailbox_id, uid, seen,
+                                              flagged, answered, draft, deleted,
+                                              keywords_json, modseq)
+                 VALUES (?1, 1, 1, 0, 0, 0, 0, 0, '[]', NULL)",
+                rusqlite::params![1],
+            )
+            .unwrap();
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::MARK_READ,
+                &json!({ "account_id": 42, "message_id": 1, "seen": true }),
+            )
+            .unwrap() else {
+                panic!("mark_read must reply");
+            };
+            assert_eq!(value["ok"], json!(true));
+            assert_eq!(value["updated"], json!(1));
+
+            // Verify the read flag persisted.
+            let conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            let seen: i64 = conn
+                .query_row(
+                    "SELECT seen FROM message_locations WHERE message_id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("query");
+            assert_eq!(seen, 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn get_mailboxes_dispatch_lists_mailboxes() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let account_id = 42;
+            let db_path = dir.path().join(DB_FILE_NAME);
+            let mut conn = mailslate_core::infra::db::open_rw(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO accounts (id, display_name, email, provider, imap_host, imap_port,
+                                       imap_security, smtp_host, smtp_port, smtp_security,
+                                       auth_type, created_at)
+                 VALUES (?1, 'Work', 'work@example.com', 'imap', 'imap.example.com', 993,
+                         'tls', 'smtp.example.com', 465, 'tls', 'password', 0)",
+                rusqlite::params![account_id],
+            )
+            .unwrap();
+            for (i, (name, kind, sort_order)) in [
+                ("INBOX", "inbox", 0),
+                ("Sent", "sent", 10),
+                ("Drafts", "drafts", 20),
+            ]
+            .iter()
+            .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO mailboxes (id, account_id, name, kind, special_use, color,
+                                          sort_order, uidvalidity, uidnext, highest_modseq,
+                                          last_synced_at)
+                     VALUES (?1, 42, ?2, ?3, NULL, NULL, ?4, NULL, NULL, NULL, NULL)",
+                    rusqlite::params![(i + 1) as i64, name, kind, *sort_order as i64],
+                )
+                .unwrap();
+            }
+            drop(conn);
+
+            let Dispatched::Reply(value) = dispatch(
+                &ctx,
+                methods::GET_MAILBOXES,
+                &json!({ "account_id": account_id, "limit": 50 }),
+            )
+            .unwrap() else {
+                panic!("get_mailboxes must reply");
+            };
+            let mailboxes = value["mailboxes"].as_array().expect("mailboxes array");
+            assert_eq!(mailboxes.len(), 3);
+            assert_eq!(mailboxes[0]["name"], json!("INBOX"));
+            assert_eq!(mailboxes[0]["kind"], json!("inbox"));
+            assert_eq!(mailboxes[1]["name"], json!("Sent"));
+            assert_eq!(mailboxes[2]["name"], json!("Drafts"));
+            assert_eq!(value["total"], json!(3));
+        }
+
+        #[test]
+        fn get_mailboxes_dispatch_missing_account_id_is_validation() {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx(&dir);
+            let err = dispatch(&ctx, methods::GET_MAILBOXES, &json!({ "limit": 50 })).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Validation);
+            assert!(err.message.contains("account_id"));
         }
     }
 }

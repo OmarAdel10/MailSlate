@@ -4,7 +4,11 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/accounts.dart';
+import 'api/mailbox.dart';
+import 'api/reader.dart';
+import 'api/search.dart';
 import 'api/system.dart';
+import 'api/threading.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -39,6 +43,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AppEvent dco_decode_app_event(dynamic raw);
+
+  @protected
+  AttachmentList dco_decode_attachment_list(dynamic raw);
+
+  @protected
+  AttachmentSummary dco_decode_attachment_summary(dynamic raw);
 
   @protected
   bool dco_decode_bool(dynamic raw);
@@ -83,7 +93,37 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<AccountSummary> dco_decode_list_account_summary(dynamic raw);
 
   @protected
+  List<AttachmentSummary> dco_decode_list_attachment_summary(dynamic raw);
+
+  @protected
+  List<MailboxSummary> dco_decode_list_mailbox_summary(dynamic raw);
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<SearchHit> dco_decode_list_search_hit(dynamic raw);
+
+  @protected
+  List<ThreadMessage> dco_decode_list_thread_message(dynamic raw);
+
+  @protected
+  List<ThreadSummary> dco_decode_list_thread_summary(dynamic raw);
+
+  @protected
+  MailboxList dco_decode_mailbox_list(dynamic raw);
+
+  @protected
+  MailboxSummary dco_decode_mailbox_summary(dynamic raw);
+
+  @protected
+  MessageBody dco_decode_message_body(dynamic raw);
+
+  @protected
+  MessageDetail dco_decode_message_detail(dynamic raw);
+
+  @protected
+  MessageResult dco_decode_message_result(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
@@ -96,6 +136,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PingInfo dco_decode_ping_info(dynamic raw);
+
+  @protected
+  SearchHit dco_decode_search_hit(dynamic raw);
+
+  @protected
+  SearchResult dco_decode_search_result(dynamic raw);
+
+  @protected
+  ThreadList dco_decode_thread_list(dynamic raw);
+
+  @protected
+  ThreadMessage dco_decode_thread_message(dynamic raw);
+
+  @protected
+  ThreadMessageList dco_decode_thread_message_list(dynamic raw);
+
+  @protected
+  ThreadSummary dco_decode_thread_summary(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -128,6 +186,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   AppEvent sse_decode_app_event(SseDeserializer deserializer);
+
+  @protected
+  AttachmentList sse_decode_attachment_list(SseDeserializer deserializer);
+
+  @protected
+  AttachmentSummary sse_decode_attachment_summary(SseDeserializer deserializer);
 
   @protected
   bool sse_decode_bool(SseDeserializer deserializer);
@@ -176,7 +240,45 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<AttachmentSummary> sse_decode_list_attachment_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<MailboxSummary> sse_decode_list_mailbox_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<SearchHit> sse_decode_list_search_hit(SseDeserializer deserializer);
+
+  @protected
+  List<ThreadMessage> sse_decode_list_thread_message(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ThreadSummary> sse_decode_list_thread_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MailboxList sse_decode_mailbox_list(SseDeserializer deserializer);
+
+  @protected
+  MailboxSummary sse_decode_mailbox_summary(SseDeserializer deserializer);
+
+  @protected
+  MessageBody sse_decode_message_body(SseDeserializer deserializer);
+
+  @protected
+  MessageDetail sse_decode_message_detail(SseDeserializer deserializer);
+
+  @protected
+  MessageResult sse_decode_message_result(SseDeserializer deserializer);
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
@@ -189,6 +291,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PingInfo sse_decode_ping_info(SseDeserializer deserializer);
+
+  @protected
+  SearchHit sse_decode_search_hit(SseDeserializer deserializer);
+
+  @protected
+  SearchResult sse_decode_search_result(SseDeserializer deserializer);
+
+  @protected
+  ThreadList sse_decode_thread_list(SseDeserializer deserializer);
+
+  @protected
+  ThreadMessage sse_decode_thread_message(SseDeserializer deserializer);
+
+  @protected
+  ThreadMessageList sse_decode_thread_message_list(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ThreadSummary sse_decode_thread_summary(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -228,6 +350,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_app_event(AppEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_attachment_list(
+    AttachmentList self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_attachment_summary(
+    AttachmentSummary self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
@@ -290,10 +424,58 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_attachment_summary(
+    List<AttachmentSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_mailbox_summary(
+    List<MailboxSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_list_search_hit(
+    List<SearchHit> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_thread_message(
+    List<ThreadMessage> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_thread_summary(
+    List<ThreadSummary> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_mailbox_list(MailboxList self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_mailbox_summary(
+    MailboxSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_message_body(MessageBody self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message_detail(MessageDetail self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_message_result(MessageResult self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
@@ -309,6 +491,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_ping_info(PingInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_search_hit(SearchHit self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_search_result(SearchResult self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_thread_list(ThreadList self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_thread_message(ThreadMessage self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_thread_message_list(
+    ThreadMessageList self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_thread_summary(ThreadSummary self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_16(int self, SseSerializer serializer);

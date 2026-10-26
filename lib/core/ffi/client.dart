@@ -1,5 +1,6 @@
 import 'package:mailslate/core/failures/failures.dart';
 import 'package:mailslate/src/rust/api/accounts.dart' as rust_accounts;
+import 'package:mailslate/src/rust/api/search.dart' as rust_search;
 import 'package:mailslate/src/rust/api/system.dart' as rust;
 import 'package:mailslate/src/rust/frb_generated.dart';
 
@@ -10,6 +11,8 @@ export 'package:mailslate/src/rust/api/accounts.dart'
         ConnectionStep,
         ConnectionTest,
         ImapDraft;
+export 'package:mailslate/src/rust/api/search.dart'
+    show SearchHit, SearchResult;
 export 'package:mailslate/src/rust/api/system.dart'
     show
         AppEvent,
@@ -86,7 +89,7 @@ class FfiClient {
   Future<String> startOauth({required String provider}) =>
       _guard(() => rust_accounts.startOauth(provider: provider));
 
-  /// Starts an in-place reconnect for [accountId] and returns the
+  /// Starts an in-flight reconnect for [accountId] and returns the
   /// authorize url.
   ///
   /// Used when an account's grant expired: the daemon refreshes the
@@ -146,6 +149,16 @@ class FfiClient {
   }) => _guard(
     () => rust_accounts.testConnection(draft: draft, password: password),
   );
+
+  /// Full-text search across `account_id`'s messages using `query`.
+  ///
+  /// The query may use the syntax subset: `from:`, `to:`, `subject:`,
+  /// `in:`, `tag:`, `is:unread`, `is:starred`, `has:attachment` plus free
+  /// text. Pass `account_id = -1` to search across all accounts.
+  Future<rust_search.SearchResult> search({
+    required int accountId,
+    required String query,
+  }) => _guard(() => rust_search.search(accountId: accountId, query: query));
 
   Future<T> _guard<T>(Future<T> Function() call) async {
     try {
