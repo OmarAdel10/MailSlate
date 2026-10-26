@@ -2,6 +2,11 @@ import 'dart:async';
 
 import 'package:mailslate/core/ffi/client.dart';
 import 'package:mailslate/core/failures/failures.dart';
+// Test-only import of the generated search API: constructs the canned
+// result without touching [RustLib].
+import 'package:mailslate/src/rust/api/search.dart' as rust_search;
+
+const SearchHit _defaultSearchHit = SearchHit(messageId: 1, accountId: 42);
 
 /// Test double for [FfiClient]: never loads Rust, never touches a daemon.
 class FakeFfiClient extends FfiClient {
@@ -32,6 +37,13 @@ class FakeFfiClient extends FfiClient {
     ),
     this.testConnectionFailure,
     this.abortOauthFailure,
+    this.searchResult = const SearchResult(
+      messages: [_defaultSearchHit],
+      total: 1,
+    ),
+    this.searchFailure,
+    this.searchThrow,
+    this.searchGate,
   });
 
   /// Returned by [daemonStatus] when [statusFailure] is null.
@@ -103,6 +115,40 @@ class FakeFfiClient extends FfiClient {
 
   /// When set, [FfiClient.abortOauthAccount] throws it.
   AppFailure? abortOauthFailure;
+
+  /// Returned by [FfiClient.search] when [searchFailure] is null.
+  rust_search.SearchResult searchResult;
+
+  /// When set, [FfiClient.search] throws it.
+  AppFailure? searchFailure;
+
+  /// When set, [FfiClient.search] throws it (any object, for generic
+  /// catches that route to the bloc's fallback message).
+  Object? searchThrow;
+
+  /// When set, [FfiClient.search] parks until the gate completes, so
+  /// widget tests can observe the loading state.
+  Completer<void>? searchGate;
+
+  /// When set, [FfiClient.search] throws it after the [searchGate]
+  /// completes, so tests can fail an in-flight call after a clear.
+  AppFailure? searchFailureAfterGate;
+
+  /// When set, [FfiClient.search] throws it after the [searchGate]
+  /// completes (any object, for the generic catch arm).
+  Object? searchThrowAfterGate;
+
+  /// When non-empty, each [FfiClient.search] call parks on its own
+  /// completer, consumed in call order; lets tests resolve calls in
+  /// inverted completion order. Falls back to [searchGate] when empty.
+  final List<Completer<void>> searchGates = [];
+
+  /// How often [FfiClient.search] was called.
+  int searchCalls = 0;
+
+  /// Captured [FfiClient.search] arguments.
+  int? lastSearchAccountId;
+  String? lastSearchQuery;
 
   /// How often [FfiClient.listAccounts] was called.
   int listAccountsCalls = 0;
@@ -324,5 +370,40 @@ class FakeFfiClient extends FfiClient {
     if (failure != null) {
       throw failure;
     }
+  }
+
+  @override
+  Future<rust_search.SearchResult> search({
+    required int accountId,
+    required String query,
+  }) async {
+    searchCalls += 1;
+    lastSearchAccountId = accountId;
+    lastSearchQuery = query;
+    final thrown = searchThrow;
+    if (thrown != null) {
+      throw thrown;
+    }
+    final failure = searchFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    if (searchGates.isNotEmpty) {
+      await searchGates.removeAt(0).future;
+    } else {
+      final gate = searchGate;
+      if (gate != null) {
+        await gate.future;
+      }
+    }
+    final lateFailure = searchFailureAfterGate;
+    if (lateFailure != null) {
+      throw lateFailure;
+    }
+    final lateThrow = searchThrowAfterGate;
+    if (lateThrow != null) {
+      throw lateThrow;
+    }
+    return searchResult;
   }
 }

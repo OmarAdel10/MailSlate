@@ -151,6 +151,10 @@ project (global `AGENTS.md` §4 and §13).
   handle all four in a search-test pass
   (`lib/features/search/search_bloc.dart:132,148,153`,
   `test/support/fake_ffi_client.dart`).
+  FIXED 2026-10-25 in `test/search-feature-tests` (46 new tests, fake
+  `search()` stub, dead timer removed, mount-time empty queries guarded,
+  epoch-stamped stale-emits guards on the query and filter paths) —
+  close on merge.
 - MAILSLATE-56 — M3: CI rust job red on the `feature/m3-reading-search` tip
   since PR #9/#13: `dispatch::tests::spawn_on_add::search_dispatch_returns_hits_for_account`
   panics at dispatch.rs:2334 (pre-existing; fails every M3 PR run, e.g.
@@ -198,11 +202,25 @@ project (global `AGENTS.md` §4 and §13).
   instead of `ErrorKind::Storage` so a query typo is not
   indistinguishable from a DB failure
   (`rust/crates/daemon/src/dispatch.rs:817`; USER_FLOW states matrix).
+- MAILSLATE-63 — M3: search retry semantics — `Try again` dispatches
+  SearchCleared, so the typed text survives in the controller and the
+  clear affordance stays visible while the placeholder lead shows
+  (`lib/features/search/search_screen.dart:354-355`, pinned by the
+  retry widget test in `test/search_screen_test.dart`) — decide
+  whether retry should re-run the query instead of discarding it, and
+  align the USER_FLOW §7 states-matrix copy.
 - MAILSLATE-67 — search clause semantics gaps surfaced by the round-5 QA:
   (a) the `tag:` clause lacks a `t.account_id = m.account_id` guard, so
   cross-account tag rows could leak hits; (b) `in:`/`tag:` clauses do
   not exclude deleted locations, asymmetric with the `is:` clauses
   (`rust/crates/core/src/domain/search.rs:96-111`).
+- MAILSLATE-68 — M3: search states-matrix copy deviations pinned by tests
+  but untracked until now: the loading state shows a spinner with
+  `Searching "…"` copy while USER_FLOW §7 mandates no skeleton, and
+  every AppFailure renders the error state while the spec says
+  `Search unavailable` only for DB errors — align the copy or amend
+  the spec (`lib/features/search/search_screen.dart`,
+  `specs/USER_FLOW.md:284`).
 
 ## Acknowledged test deferrals
 

@@ -27,17 +27,31 @@ class SearchScreen extends StatefulWidget {
 class _SearchScreenState extends State<SearchScreen> {
   final _controller = TextEditingController();
 
+  /// The text the bloc was last notified about, so controller changes
+  /// that are not text edits (mount-time IME selection updates, cursor
+  /// moves) never re-run the query.
+  String _notifiedText = '';
+
   @override
   void initState() {
     super.initState();
     context.read<SearchBloc>().add(const SearchFocusRequested());
-    _controller.addListener(() {
-      context.read<SearchBloc>().add(SearchQueryChanged(_controller.text));
-    });
+    _controller.addListener(_broadcastQuery);
+  }
+
+  void _broadcastQuery() {
+    final text = _controller.text;
+    if (text == _notifiedText) return;
+    _notifiedText = text;
+    // The search bar reads controller.text while building; rebuild so
+    // the clear affordance tracks the typed text.
+    setState(() {});
+    context.read<SearchBloc>().add(SearchQueryChanged(text));
   }
 
   @override
   void dispose() {
+    _controller.removeListener(_broadcastQuery);
     _controller.dispose();
     super.dispose();
   }
