@@ -25,6 +25,7 @@ pub(crate) struct OutAddress {
 
 /// One staged attachment: its stored bytes travel with the
 /// message; blob digest resolution happens in the compose domain.
+#[derive(Debug)]
 pub(crate) struct OutAttachment {
     pub(crate) filename: String,
     pub(crate) mime_type: String,
@@ -34,6 +35,7 @@ pub(crate) struct OutAttachment {
 /// Everything needed to emit one complete RFC 5322 message.
 /// `message_id` is the bare local@domain id; the wire form gets
 /// angle brackets (PRD F5.7 — stamped locally, dedupes server echo).
+#[derive(Debug)]
 pub(crate) struct OutgoingMessage {
     pub(crate) from: OutAddress,
     pub(crate) to: Vec<OutAddress>,
@@ -85,7 +87,11 @@ pub(crate) fn build_message(msg: &OutgoingMessage) -> Result<Vec<u8>, BuildError
 
     let mut out = String::new();
     push_address_header(&mut out, "From", std::iter::once(&msg.from));
-    push_address_header(&mut out, "To", msg.to.iter());
+    // Bcc-only sends carry no To/Cc headers: an empty address
+    // list is invalid RFC 5322 and trips strict relays.
+    if !msg.to.is_empty() {
+        push_address_header(&mut out, "To", msg.to.iter());
+    }
     if !msg.cc.is_empty() {
         push_address_header(&mut out, "Cc", msg.cc.iter());
     }
@@ -133,7 +139,7 @@ pub(crate) fn build_message(msg: &OutgoingMessage) -> Result<Vec<u8>, BuildError
             out.push_str(&format!("Content-Type: {}\r\n", att.mime_type));
             out.push_str(&format!(
                 "Content-Disposition: attachment; filename=\"{}\"\r\n",
-                unstructured(&att.filename)
+                quoted_string(&att.filename)
             ));
             out.push_str("Content-Transfer-Encoding: base64\r\n");
             out.push_str("\r\n");
@@ -173,10 +179,10 @@ fn guard_injection(msg: &OutgoingMessage) -> Result<(), BuildError> {
         }
     }
     if let Some(parent) = &msg.in_reply_to {
-        clean(parent, "reply header")?;
+        clean(parent, "in-reply-to")?;
     }
     for id in &msg.references {
-        clean(id, "reply header")?;
+        clean(id, "references")?;
     }
     for att in &msg.attachments {
         clean(&att.filename, "attachment filename")?;
@@ -250,6 +256,17 @@ fn unstructured(value: &str) -> String {
     }
 }
 
+/// Quoted-string parameter value (RFC 5322 §3.2.4): keeps the
+/// header block ASCII via an encoded-word when needed, then
+/// escapes the two characters that could otherwise break out of
+/// the surrounding double quotes. Encoded-words contain neither
+/// `"` nor `\`, so the escapes only ever apply to the raw path.
+fn quoted_string(value: &str) -> String {
+    unstructured(value)
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 /// RFC 2047 q-encoded word, utf-8 charset.
 fn encoded_word(input: &str) -> String {
     let mut out = String::from("=?utf-8?q?");
@@ -309,10 +326,16 @@ fn normalize_crlf(body: &str) -> String {
     normalized
 }
 
-/// Returns (encoded body, transfer encoding). ASCII-only bodies go
-/// out verbatim as 7bit; anything else is quoted-printable.
+/// Returns (encoded body, transfer encoding). Bodies confined to
+/// the RFC 2045 7bit ranges — printable ASCII, TAB, and the
+/// CRLF pairs `normalize_crlf` guarantees — ship verbatim;
+/// anything else (control bytes included) is quoted-printable.
 fn encode_body(body: &str) -> (String, &'static str) {
-    if body.is_ascii() {
+    let seven_bit = body
+        .as_bytes()
+        .iter()
+        .all(|&b| matches!(b, b'\t' | b'\r' | b'\n' | 32..=126));
+    if seven_bit {
         (body.to_string(), "7bit")
     } else {
         (quoted_printable(body.as_bytes()), "quoted-printable")
@@ -322,7 +345,9 @@ fn encode_body(body: &str) -> (String, &'static str) {
 /// RFC 2045 quoted-printable: printable ASCII (space included)
 /// stays literal; `=` and non-ASCII bytes become =XX. Trailing
 /// spaces before a (soft or hard) break are encoded. Input is
-/// expected CRLF-normalized.
+/// expected CRLF-normalized. The soft-wrap check fires BEFORE an
+/// encoded byte is pushed, capping every wire line at 76 chars
+/// including the trailing `=` (§6.7(a)).
 fn quoted_printable(bytes: &[u8]) -> String {
     let encode_into = |line: &mut String, byte: u8| {
         if byte == b' ' || ((33..=126).contains(&byte) && byte != b'=') {
@@ -331,10 +356,20 @@ fn quoted_printable(bytes: &[u8]) -> String {
             line.push_str(&format!("={byte:02X}"));
         }
     };
-    let trim_trailing_spaces = |line: &mut String| {
+    let flush_soft = |out: &mut String, line: &mut String| {
         while line.ends_with(' ') {
             line.pop();
             line.push_str("=20");
+        }
+        out.push_str(line);
+        out.push_str("=\r\n");
+        line.clear();
+    };
+    let encoded_len = |byte: u8| {
+        if byte == b' ' || ((33..=126).contains(&byte) && byte != b'=') {
+            1
+        } else {
+            3
         }
     };
 
@@ -344,23 +379,26 @@ fn quoted_printable(bytes: &[u8]) -> String {
         match byte {
             b'\r' => continue,
             b'\n' => {
-                trim_trailing_spaces(&mut line);
+                while line.ends_with(' ') {
+                    line.pop();
+                    line.push_str("=20");
+                }
                 out.push_str(&line);
                 out.push_str("\r\n");
                 line.clear();
             }
             _ => {
-                encode_into(&mut line, byte);
-                if line.len() >= 75 {
-                    trim_trailing_spaces(&mut line);
-                    out.push_str(&line);
-                    out.push_str("=\r\n");
-                    line.clear();
+                if line.len() + encoded_len(byte) > 75 {
+                    flush_soft(&mut out, &mut line);
                 }
+                encode_into(&mut line, byte);
             }
         }
     }
-    trim_trailing_spaces(&mut line);
+    while line.ends_with(' ') {
+        line.pop();
+        line.push_str("=20");
+    }
     out.push_str(&line);
     out
 }
@@ -508,40 +546,178 @@ mod tests {
     }
 
     #[test]
-    fn rejects_header_injection_in_subject() {
-        let mut msg = base_message();
-        msg.subject = "fine\r\nBcc: evil@x".to_string();
+    fn guard_blocks_every_header_landing_field_with_exact_label() {
+        type Injector = Box<dyn Fn(&mut OutgoingMessage)>;
+        let cases: Vec<(&'static str, Injector)> = vec![
+            (
+                "subject",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.subject = "fine\r\nBcc: evil@x".to_string();
+                }),
+            ),
+            (
+                "message id",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.message_id = "bad\r\nBcc: evil@x".to_string();
+                }),
+            ),
+            (
+                "sender address",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.from.address = "bad\r\nBcc: evil@x".to_string();
+                }),
+            ),
+            (
+                "sender display name",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.from = addr(Some("Bad\r\nBcc: evil@x"), "alice@example.com");
+                }),
+            ),
+            (
+                "recipient address",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.to = vec![addr(None, "bad\r\nBcc: evil@x")];
+                }),
+            ),
+            (
+                "recipient display name",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.to = vec![addr(Some("Bad\r\nBcc: evil@x"), "bob@other.org")];
+                }),
+            ),
+            (
+                "in-reply-to",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.in_reply_to = Some("bad\r\nBcc: evil@x".to_string());
+                }),
+            ),
+            (
+                "references",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.references = vec!["bad\r\nBcc: evil@x".to_string()];
+                }),
+            ),
+            (
+                "attachment filename",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.attachments = vec![attachment(
+                        "bad\r\nBcc: evil@x",
+                        "application/pdf",
+                        b"bytes",
+                    )];
+                }),
+            ),
+            (
+                "attachment media type",
+                Box::new(|m: &mut OutgoingMessage| {
+                    m.attachments = vec![attachment(
+                        "ok.pdf",
+                        "application/pdf\r\nBcc: evil@x",
+                        b"bytes",
+                    )];
+                }),
+            ),
+        ];
 
-        assert!(matches!(
-            build_message(&msg),
-            Err(BuildError::HeaderInjection(_))
-        ));
+        for (label, inject) in cases {
+            let mut msg = base_message();
+            inject(&mut msg);
+            match build_message(&msg) {
+                Err(BuildError::HeaderInjection(field)) => assert_eq!(
+                    field, label,
+                    "injection in {label} must name the offending field"
+                ),
+                other => panic!("expected HeaderInjection({label}), got {other:?}"),
+            }
+        }
     }
 
     #[test]
-    fn rejects_header_injection_in_recipient_name() {
+    fn bcc_only_send_omits_to_and_cc_headers() {
         let mut msg = base_message();
-        msg.to = vec![addr(Some("Bob\r\nBcc: evil@x"), "bob@other.org")];
+        msg.to.clear();
+        msg.bcc = vec![addr(Some("Secret"), "secret@hidden.org")];
 
-        assert!(matches!(
-            build_message(&msg),
-            Err(BuildError::HeaderInjection(_))
-        ));
+        let wire = build(&msg);
+
+        assert!(!wire.contains("\r\nTo:"), "no empty To header: {wire}");
+        assert!(!wire.contains("\r\nCc:"));
+        assert!(wire.contains("From: Alice <alice@example.com>\r\n"));
+        assert!(wire.contains("Subject: Hi\r\n"));
+        assert!(!wire.contains("secret@hidden.org"));
     }
 
     #[test]
-    fn rejects_header_injection_in_attachment_filename() {
+    fn control_bytes_force_quoted_printable_not_7bit() {
         let mut msg = base_message();
-        msg.attachments = vec![attachment(
-            "a.pdf\r\nBcc: evil@x",
-            "application/pdf",
-            b"bytes",
-        )];
+        msg.body = "bell\u{7}and nul\u{0}here".to_string();
 
-        assert!(matches!(
-            build_message(&msg),
-            Err(BuildError::HeaderInjection(_))
-        ));
+        let wire = build(&msg);
+
+        assert!(wire.contains("Content-Transfer-Encoding: quoted-printable\r\n"));
+        assert!(wire.contains("=07"));
+        assert!(wire.contains("=00"));
+    }
+
+    #[test]
+    fn quoted_printable_lines_never_exceed_76_chars() {
+        // 74 literals then a multi-byte accent: the overflow check
+        // must fire before the =XX push, not after (RFC 2045 6.7(a)
+        // caps a wire line at 76 characters including the soft `=`).
+        let mut msg = base_message();
+        msg.body = format!("{}\u{e9}{}", "a".repeat(74), "b".repeat(50));
+
+        let wire = build(&msg);
+
+        for line in wire.split("\r\n") {
+            assert!(
+                line.len() <= 76,
+                "wire line is {} chars (limit 76): {line:?}",
+                line.len()
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_printable_encodes_hard_breaks_trailing_spaces_and_equals() {
+        let mut msg = base_message();
+        // ö forces the QP path; the trailing space and `=` exercise
+        // the trim-before-hard-break and =3D branches.
+        msg.body = "wörld \nsecond=half".to_string();
+
+        let wire = build(&msg);
+
+        assert!(
+            wire.contains("w=C3=B6rld=20\r\nsecond=3Dhalf\r\n"),
+            "{wire}"
+        );
+    }
+
+    #[test]
+    fn attachment_filename_with_quote_is_escaped_in_quoted_string() {
+        let mut msg = base_message();
+        msg.attachments = vec![attachment("He said \"hi\".txt", "text/plain", b"x")];
+
+        let wire = build(&msg);
+
+        assert!(
+            wire.contains("filename=\"He said \\\"hi\\\".txt\"\r\n"),
+            "quote must not break the quoted-string: {wire}"
+        );
+    }
+
+    #[test]
+    fn non_ascii_attachment_filename_uses_encoded_word() {
+        let mut msg = base_message();
+        msg.attachments = vec![attachment("résumé.pdf", "application/pdf", b"x")];
+
+        let wire = build(&msg);
+
+        assert!(
+            headers_of(wire.as_bytes()).is_ascii(),
+            "header block must stay ASCII"
+        );
+        assert!(wire.contains("filename=\"=?utf-8?q?r=C3=A9sum=C3=A9=2Epdf?=\"\r\n"));
     }
 
     #[test]
@@ -574,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn boundary_is_unique_per_message_and_absent_from_parts() {
+    fn boundary_is_unique_and_delimits_exactly_n_plus_one_times() {
         let content = b"boundary collision bait: ==mailslate==";
         let mut msg = base_message();
         msg.body = "also bait: ==mailslate==".to_string();
@@ -593,9 +769,61 @@ mod tests {
         let b_one = extract_boundary(&wire_one);
         let b_two = extract_boundary(&wire_two);
         assert_ne!(b_one, b_two, "each build must stamp a fresh boundary");
-        // The boundary token must never occur inside the parts it delimits.
-        assert!(!msg.body.contains(&b_one));
-        assert!(!String::from_utf8_lossy(content).contains(&b_one));
+
+        // Wire scan: one delimiter per part (2) plus the closing
+        // delimiter — no more. A boundary occurring inside body or
+        // attachment content would inflate this count.
+        let delimiter = format!("--{b_one}");
+        assert_eq!(
+            wire_one.matches(&delimiter).count(),
+            3,
+            "boundary may not appear inside part content: {wire_one}"
+        );
+        assert!(wire_one.contains(&format!("{delimiter}--\r\n")));
+    }
+
+    #[test]
+    fn multipart_orders_text_first_and_roundtrips_the_attachment() {
+        use base64::Engine as _;
+
+        let content: Vec<u8> = (0..75u8).collect();
+        let mut msg = base_message();
+        msg.body = "text part".to_string();
+        msg.attachments = vec![attachment("bin.dat", "application/octet-stream", &content)];
+
+        let wire = build(&msg);
+
+        let text_pos = wire.find("Content-Type: text/plain").expect("text part");
+        let att_pos = wire
+            .find("Content-Type: application/octet-stream")
+            .expect("attachment part");
+        assert!(text_pos < att_pos, "text part must precede attachments");
+
+        // 75 bytes -> 100 base64 chars: one 76-char line plus a
+        // 24-char tail, and the pair decodes back to the input.
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
+        let (first, tail) = encoded.split_at(76);
+        assert_eq!(tail.len(), 24);
+        assert!(wire.contains(&format!("\r\n{first}\r\n{tail}\r\n")));
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(format!("{first}{tail}").as_bytes())
+            .expect("valid base64");
+        assert_eq!(decoded, content);
+    }
+
+    #[test]
+    fn base64_of_57_bytes_stays_on_a_single_line() {
+        use base64::Engine as _;
+
+        let content: Vec<u8> = (0..57u8).collect();
+        let mut msg = base_message();
+        msg.attachments = vec![attachment("bin.dat", "application/octet-stream", &content)];
+
+        let wire = build(&msg);
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
+        assert_eq!(encoded.len(), 76);
+        assert!(wire.contains(&format!("\r\n{encoded}\r\n")));
     }
 
     #[test]
@@ -635,5 +863,83 @@ mod tests {
         let wire = build(&msg);
 
         assert!(wire.contains("\r\n\r\nline one\r\nline two\r\n"), "{wire}");
+    }
+
+    #[test]
+    fn built_messages_parse_back_with_mail_parser() {
+        let mut msg = base_message();
+        msg.body = "Héllo wörld\r\nsecond line".to_string();
+        let content: Vec<u8> = (1u8..=9).rev().collect();
+        msg.attachments = vec![attachment("doc.bin", "application/octet-stream", &content)];
+
+        let wire = build(&msg);
+        let parsed = mail_parser::MessageParser::default()
+            .parse(wire.as_bytes())
+            .expect("built message must parse back");
+
+        assert_eq!(
+            parsed.body_text(0).expect("text body").trim_end(),
+            "Héllo wörld\r\nsecond line"
+        );
+        let attachment = parsed.attachment(0).expect("attachment part");
+        assert_eq!(attachment.contents(), content.as_slice());
+    }
+
+    #[test]
+    fn formats_negative_epoch_as_1969() {
+        assert_eq!(
+            format_rfc5322_date(-86_400),
+            "Wed, 31 Dec 1969 00:00:00 +0000"
+        );
+    }
+
+    #[test]
+    fn formats_leap_day_and_nonzero_clock() {
+        assert_eq!(
+            format_rfc5322_date(1_709_164_800),
+            "Thu, 29 Feb 2024 00:00:00 +0000"
+        );
+        assert_eq!(
+            format_rfc5322_date(86_399),
+            "Thu, 01 Jan 1970 23:59:59 +0000"
+        );
+    }
+
+    #[test]
+    fn encoded_word_escapes_exactly() {
+        assert_eq!(encoded_word(" "), "=?utf-8?q?_?=");
+        assert_eq!(encoded_word("=?"), "=?utf-8?q?=3D=3F?=");
+        assert_eq!(encoded_word("a_b"), "=?utf-8?q?a=5Fb?=");
+        assert_eq!(
+            encoded_word("Ünal Şimşek"),
+            "=?utf-8?q?=C3=9Cnal_=C5=9Eim=C5=9Fek?="
+        );
+    }
+
+    #[test]
+    fn raw_name_safe_rejects_list_breakers() {
+        assert!(raw_name_safe("O'Brien"));
+        assert!(!raw_name_safe("Smith, John"), "comma splits address lists");
+        assert!(!raw_name_safe("He said \"hi\""), "quote breaks the name");
+        assert!(!raw_name_safe(""), "empty name must be encoded, not raw");
+    }
+
+    #[test]
+    fn normalize_crlf_handles_edge_bodies() {
+        assert_eq!(normalize_crlf(""), "\r\n");
+        assert_eq!(normalize_crlf("done\r\n"), "done\r\n");
+        assert_eq!(normalize_crlf("a\nb\r\nc"), "a\r\nb\r\nc\r\n");
+    }
+
+    #[test]
+    fn build_error_display_strings() {
+        assert_eq!(
+            BuildError::HeaderInjection("subject").to_string(),
+            "header injection blocked in subject"
+        );
+        assert_eq!(
+            BuildError::NoRecipient.to_string(),
+            "message has no recipient"
+        );
     }
 }

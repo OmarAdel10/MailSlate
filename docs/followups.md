@@ -234,6 +234,35 @@ project (global `AGENTS.md` §4 and §13).
   verify the sanitizer's remote-image blocking and add the banner or
   scope it in the spec (`lib/features/shell/shell_screen.dart`,
   `rust/crates/core/src/domain/reader.rs`, `specs/PRD.md:103`).
+- MAILSLATE-71 — M4: outgoing headers are not folded — long
+  Subjects, address lists, or References can exceed the RFC 5322
+  998-char line limit and trip MTAs; add FWS folding + encoded-word
+  splitting (`rust/crates/core/src/infra/mime_out.rs`,
+  `specs/ARCHITECTURE.md` compose slice).
+- MAILSLATE-72 — M4: addresses carry no addr-spec syntax validation
+  in the builder (CR/LF guard only) — a single-line injection like
+  a malformed addr-spec can smuggle an extra recipient; primary
+  defense belongs in the compose domain's send-time validation
+  (PRD F5.2) — implement there when ST3 lands
+  (`rust/crates/core/src/infra/mime_out.rs`).
+- MAILSLATE-73 — M4: attachment media types are guarded for CR/LF
+  only, not RFC 6838 token grammar — a semicolon could smuggle
+  Content-Type parameters; internal sniffer supplies the value
+  today (`rust/crates/core/src/infra/mime_out.rs`).
+- MAILSLATE-74 — M4: message/reply ids are not checked for angle
+  brackets before stamping — a pre-bracketed id renders a malformed
+  msg-id; ids will be internally stamped by the compose domain
+  (`rust/crates/core/src/infra/mime_out.rs`).
+- MAILSLATE-75 — M4: `clippy::bool_comparison` in a threading test
+  assertion breaks `cargo clippy --all-targets -D warnings` locally,
+  and CI's clippy step omits `--all-targets` so it never catches
+  test-target lints — fix the assertion and add the flag to CI
+  (`rust/crates/core/src/domain/threading.rs:217`,
+  `.github/workflows/ci.yml`).
+- MAILSLATE-76 — M4: per-byte `format!` allocations in the
+  encoded-word and quoted-printable loops — replace with a static
+  hex table if profiling ever marks the send path hot
+  (`rust/crates/core/src/infra/mime_out.rs`).
 
 ## Acknowledged test deferrals
 
