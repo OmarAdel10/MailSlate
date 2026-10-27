@@ -1,7 +1,9 @@
 //! Real-server SMTP integration against a local GreenMail JVM.
 //!
 //! Feature-gated exactly like the IMAP harness (`imap/greenmail_tests.rs`):
-//! never enabled in CI, no Docker. Run locally with
+//! CI enables the feature (`.github/workflows/ci.yml` runs
+//! `cargo test -p mailslate-core --features greenmail`), no Docker. Run
+//! locally with
 //!
 //! ```text
 //! cargo test -p mailslate-core --features greenmail --lib greenmail_tests
