@@ -207,13 +207,15 @@ fn push_address_header<'a>(
 /// `Display Name <addr>` / `addr`. Display names either match the
 /// raw-safe set (no comma, quote, or non-ASCII bytes — anything
 /// else would break address-list parsing) or become encoded-words.
-/// An empty name renders as a bare address.
+/// Empty or whitespace-only names render as bare addresses.
 fn render_address(address: &OutAddress) -> String {
     match &address.name {
-        Some(name) if !name.is_empty() && raw_name_safe(name) => {
+        Some(name) if !name.trim().is_empty() && raw_name_safe(name) => {
             format!("{name} <{}>", address.address)
         }
-        Some(name) if !name.is_empty() => format!("{} <{}>", encoded_word(name), address.address),
+        Some(name) if !name.trim().is_empty() => {
+            format!("{} <{}>", encoded_word(name), address.address)
+        }
         _ => address.address.clone(),
     }
 }
@@ -1057,6 +1059,19 @@ mod tests {
 
         assert!(wire.contains("To: bare@other.org\r\n"), "{wire}");
         assert!(!wire.contains("=?utf-8?q??="));
+
+        // Whitespace-only names are just as empty: an obs-phrase of
+        // blanks must degrade to the bare address too.
+        let mut spaces = base_message();
+        spaces.to = vec![addr(Some("   "), "bare@other.org")];
+
+        let spaces_wire = build(&spaces);
+
+        assert!(
+            spaces_wire.contains("To: bare@other.org\r\n"),
+            "{spaces_wire}"
+        );
+        assert!(!spaces_wire.contains("<bare@other.org>"));
     }
 
     #[test]
@@ -1067,6 +1082,29 @@ mod tests {
         let wire = build(&msg);
 
         assert!(wire.contains("filename=\"a\\\\b.txt\"\r\n"), "{wire}");
+
+        // Combined sequence pins the replacement ORDER: the
+        // backslash must double before the quote is escaped.
+        let mut combo = base_message();
+        combo.attachments = vec![attachment("a\\\"b.txt", "text/plain", b"x")];
+
+        let combo_wire = build(&combo);
+
+        assert!(
+            combo_wire.contains(r##"filename="a\\\"b.txt""##),
+            "{combo_wire}"
+        );
+    }
+
+    #[test]
+    fn seven_bit_boundary_pins_the_998_char_line_limit() {
+        let mut legal = base_message();
+        legal.body = "a".repeat(998);
+        assert!(build(&legal).contains("Content-Transfer-Encoding: 7bit\r\n"));
+
+        let mut over = base_message();
+        over.body = "a".repeat(999);
+        assert!(build(&over).contains("Content-Transfer-Encoding: quoted-printable\r\n"));
     }
 
     #[test]
