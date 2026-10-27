@@ -13,6 +13,7 @@ pub mod imap;
 pub mod ipc;
 pub mod keyring;
 pub mod mime;
+pub mod mime_out;
 pub mod oauth;
 pub mod paths;
 pub mod sanitize;
