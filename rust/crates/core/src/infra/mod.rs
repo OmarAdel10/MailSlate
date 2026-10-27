@@ -17,3 +17,4 @@ pub mod mime_out;
 pub mod oauth;
 pub mod paths;
 pub mod sanitize;
+pub mod smtp;
