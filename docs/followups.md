@@ -234,35 +234,50 @@ project (global `AGENTS.md` §4 and §13).
   verify the sanitizer's remote-image blocking and add the banner or
   scope it in the spec (`lib/features/shell/shell_screen.dart`,
   `rust/crates/core/src/domain/reader.rs`, `specs/PRD.md:103`).
-- MAILSLATE-71 — M4: outgoing headers are not folded — long
+- MAILSLATE-72 — M4: outgoing headers are not folded — long
   Subjects, address lists, or References can exceed the RFC 5322
   998-char line limit and trip MTAs; add FWS folding + encoded-word
   splitting (`rust/crates/core/src/infra/mime_out.rs`,
   `specs/ARCHITECTURE.md` compose slice).
-- MAILSLATE-72 — M4: addresses carry no addr-spec syntax validation
+- MAILSLATE-73 — M4: addresses carry no addr-spec syntax validation
   in the builder (CR/LF guard only) — a single-line injection like
   a malformed addr-spec can smuggle an extra recipient; primary
   defense belongs in the compose domain's send-time validation
   (PRD F5.2) — implement there when ST3 lands
   (`rust/crates/core/src/infra/mime_out.rs`).
-- MAILSLATE-73 — M4: attachment media types are guarded for CR/LF
+- MAILSLATE-74 — M4: attachment media types are guarded for CR/LF
   only, not RFC 6838 token grammar — a semicolon could smuggle
   Content-Type parameters; internal sniffer supplies the value
   today (`rust/crates/core/src/infra/mime_out.rs`).
-- MAILSLATE-74 — M4: message/reply ids are not checked for angle
+- MAILSLATE-75 — M4: message/reply ids are not checked for angle
   brackets before stamping — a pre-bracketed id renders a malformed
   msg-id; ids will be internally stamped by the compose domain
   (`rust/crates/core/src/infra/mime_out.rs`).
-- MAILSLATE-75 — M4: `clippy::bool_comparison` in a threading test
+- MAILSLATE-76 — M4: `clippy::bool_comparison` in a threading test
   assertion breaks `cargo clippy --all-targets -D warnings` locally,
   and CI's clippy step omits `--all-targets` so it never catches
   test-target lints — fix the assertion and add the flag to CI
   (`rust/crates/core/src/domain/threading.rs:217`,
   `.github/workflows/ci.yml`).
-- MAILSLATE-76 — M4: per-byte `format!` allocations in the
+- MAILSLATE-77 — M4: per-byte `format!` allocations in the
   encoded-word and quoted-printable loops — replace with a static
   hex table if profiling ever marks the send path hot
   (`rust/crates/core/src/infra/mime_out.rs`).
+- MAILSLATE-78 — M4: `build_message` buffers the whole wire
+  (raw attachment + base64 + output copies ≈ 3-4x attachment
+  size peak) while PRD:109 demands 50 MB attachments without
+  memory spikes and PRD:117 says sends are streamed — decide
+  between an emit-to-writer/chunked API in the compose slice or
+  recording an accepted ceiling with a measured 50 MB profile
+  before F5 exits (`rust/crates/core/src/infra/mime_out.rs`,
+  `specs/PRD.md:109`, `specs/PRD.md:117`).
+- MAILSLATE-79 — M4: non-ASCII attachment filenames ship as an
+  RFC 2047 encoded-word inside the Content-Disposition
+  quoted-string — the de-facto convention every MUA reads, but
+  the standards-track form is RFC 2231 `filename*`; decide the
+  emission form when the compose slice wires attachments
+  (`rust/crates/core/src/infra/mime_out.rs`,
+  `rust/crates/core/src/infra/mime.rs:678`).
 
 ## Acknowledged test deferrals
 

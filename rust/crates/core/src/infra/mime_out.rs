@@ -53,23 +53,17 @@ pub(crate) struct OutgoingMessage {
 }
 
 /// Build failures that must block a send.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum BuildError {
     /// A caller-supplied field carries CR/LF (SMTP header injection).
-    HeaderInjection(&'static str),
+    #[error("header injection blocked in {field}")]
+    HeaderInjection {
+        /// The offending field, for send-time error reporting.
+        field: &'static str,
+    },
     /// To, Cc, and Bcc are all empty — nothing to send to.
+    #[error("message has no recipient")]
     NoRecipient,
-}
-
-impl std::fmt::Display for BuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BuildError::HeaderInjection(field) => {
-                write!(f, "header injection blocked in {field}")
-            }
-            BuildError::NoRecipient => write!(f, "message has no recipient"),
-        }
-    }
 }
 
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -158,7 +152,7 @@ pub(crate) fn build_message(msg: &OutgoingMessage) -> Result<Vec<u8>, BuildError
 fn guard_injection(msg: &OutgoingMessage) -> Result<(), BuildError> {
     fn clean(value: &str, field: &'static str) -> Result<(), BuildError> {
         if value.contains(['\r', '\n']) {
-            Err(BuildError::HeaderInjection(field))
+            Err(BuildError::HeaderInjection { field })
         } else {
             Ok(())
         }
@@ -213,11 +207,14 @@ fn push_address_header<'a>(
 /// `Display Name <addr>` / `addr`. Display names either match the
 /// raw-safe set (no comma, quote, or non-ASCII bytes — anything
 /// else would break address-list parsing) or become encoded-words.
+/// An empty name renders as a bare address.
 fn render_address(address: &OutAddress) -> String {
     match &address.name {
-        Some(name) if raw_name_safe(name) => format!("{name} <{}>", address.address),
-        Some(name) => format!("{} <{}>", encoded_word(name), address.address),
-        None => address.address.clone(),
+        Some(name) if !name.is_empty() && raw_name_safe(name) => {
+            format!("{name} <{}>", address.address)
+        }
+        Some(name) if !name.is_empty() => format!("{} <{}>", encoded_word(name), address.address),
+        _ => address.address.clone(),
     }
 }
 
@@ -245,11 +242,14 @@ fn raw_name_safe(name: &str) -> bool {
         })
 }
 
-/// Unstructured header value (Subject, filename): raw when pure
-/// ASCII, otherwise a utf-8 q-encoded word keeps the header block
-/// 7-bit clean.
+/// Unstructured header value (Subject, filename): raw only when
+/// every byte is printable ASCII and the text contains no `=?`
+/// (which would self-decode as an encoded-word in conformant
+/// MUAs); anything else — control bytes included — becomes a
+/// utf-8 q-encoded word, keeping the header block 7-bit clean.
 fn unstructured(value: &str) -> String {
-    if value.is_ascii() {
+    let printable = value.bytes().all(|b| (32..=126).contains(&b));
+    if printable && !value.contains("=?") {
         value.to_string()
     } else {
         encoded_word(value)
@@ -316,10 +316,13 @@ fn format_rfc5322_date(epoch: i64) -> String {
     )
 }
 
-/// Bare LF and CRLF variants both settle to CRLF, and the body
-/// always ends with exactly one line break.
+/// Bare CR, bare LF, and CRLF variants all settle to CRLF, and
+/// the body always ends with exactly one line break.
 fn normalize_crlf(body: &str) -> String {
-    let mut normalized = body.replace("\r\n", "\n").replace('\n', "\r\n");
+    let mut normalized = body
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n");
     if !normalized.ends_with("\r\n") {
         normalized.push_str("\r\n");
     }
@@ -327,14 +330,28 @@ fn normalize_crlf(body: &str) -> String {
 }
 
 /// Returns (encoded body, transfer encoding). Bodies confined to
-/// the RFC 2045 7bit ranges — printable ASCII, TAB, and the
-/// CRLF pairs `normalize_crlf` guarantees — ship verbatim;
-/// anything else (control bytes included) is quoted-printable.
+/// the RFC 2045 7bit ranges — printable ASCII, TAB, and the CRLF
+/// pairs `normalize_crlf` guarantees — and to the 998-char line
+/// limit ship verbatim; anything else (control bytes, overlong
+/// lines) is quoted-printable.
 fn encode_body(body: &str) -> (String, &'static str) {
-    let seven_bit = body
-        .as_bytes()
-        .iter()
-        .all(|&b| matches!(b, b'\t' | b'\r' | b'\n' | 32..=126));
+    let mut seven_bit = true;
+    let mut line_len = 0usize;
+    for &byte in body.as_bytes() {
+        match byte {
+            b'\r' => {}
+            b'\n' => line_len = 0,
+            _ => {
+                if !matches!(byte, b'\t' | 32..=126) || {
+                    line_len += 1;
+                    line_len > 998
+                } {
+                    seven_bit = false;
+                    break;
+                }
+            }
+        }
+    }
     if seven_bit {
         (body.to_string(), "7bit")
     } else {
@@ -344,10 +361,12 @@ fn encode_body(body: &str) -> (String, &'static str) {
 
 /// RFC 2045 quoted-printable: printable ASCII (space included)
 /// stays literal; `=` and non-ASCII bytes become =XX. Trailing
-/// spaces before a (soft or hard) break are encoded. Input is
-/// expected CRLF-normalized. The soft-wrap check fires BEFORE an
-/// encoded byte is pushed, capping every wire line at 76 chars
-/// including the trailing `=` (§6.7(a)).
+/// spaces before a (soft or hard) break are all encoded. Input is
+/// expected CRLF-normalized and to end with a line break, so no
+/// final flush is needed. Admission budgets a space at its =20
+/// worst case — including the whole trailing run — so a line
+/// flushed at the 75-char budget can never exceed §6.7(a)'s
+/// 76-char wire cap after spaces expand.
 fn quoted_printable(bytes: &[u8]) -> String {
     let encode_into = |line: &mut String, byte: u8| {
         if byte == b' ' || ((33..=126).contains(&byte) && byte != b'=') {
@@ -356,50 +375,50 @@ fn quoted_printable(bytes: &[u8]) -> String {
             line.push_str(&format!("={byte:02X}"));
         }
     };
-    let flush_soft = |out: &mut String, line: &mut String| {
-        while line.ends_with(' ') {
+    let encode_trailing_spaces = |line: &mut String, run: &mut usize| {
+        for _ in 0..*run {
             line.pop();
+        }
+        for _ in 0..*run {
             line.push_str("=20");
         }
-        out.push_str(line);
-        out.push_str("=\r\n");
-        line.clear();
-    };
-    let encoded_len = |byte: u8| {
-        if byte == b' ' || ((33..=126).contains(&byte) && byte != b'=') {
-            1
-        } else {
-            3
-        }
+        *run = 0;
     };
 
     let mut out = String::new();
     let mut line = String::new();
+    let mut trailing_spaces = 0usize;
     for &byte in bytes {
         match byte {
             b'\r' => continue,
             b'\n' => {
-                while line.ends_with(' ') {
-                    line.pop();
-                    line.push_str("=20");
-                }
+                encode_trailing_spaces(&mut line, &mut trailing_spaces);
                 out.push_str(&line);
                 out.push_str("\r\n");
                 line.clear();
             }
             _ => {
-                if line.len() + encoded_len(byte) > 75 {
-                    flush_soft(&mut out, &mut line);
+                let is_space = byte == b' ';
+                let literal = is_space || ((33..=126).contains(&byte) && byte != b'=');
+                let mut new_run = if is_space { trailing_spaces + 1 } else { 0 };
+                let worst_case = if literal {
+                    line.len() + 1 + 2 * new_run
+                } else {
+                    line.len() + 3
+                };
+                if worst_case > 75 {
+                    encode_trailing_spaces(&mut line, &mut trailing_spaces);
+                    out.push_str(&line);
+                    out.push_str("=\r\n");
+                    line.clear();
+                    // The line restarts empty: recompute the run.
+                    new_run = if is_space { 1 } else { 0 };
                 }
                 encode_into(&mut line, byte);
+                trailing_spaces = new_run;
             }
         }
     }
-    while line.ends_with(' ') {
-        line.pop();
-        line.push_str("=20");
-    }
-    out.push_str(&line);
     out
 }
 
@@ -469,6 +488,13 @@ mod tests {
 
     fn build(msg: &OutgoingMessage) -> String {
         String::from_utf8(build_message(msg).expect("build succeeds")).expect("wire bytes utf-8")
+    }
+
+    fn extract_boundary(wire: &str) -> String {
+        let marker = "boundary=\"";
+        let start = wire.find(marker).expect("boundary param") + marker.len();
+        let end = wire[start..].find('"').expect("closing quote") + start;
+        wire[start..end].to_string()
     }
 
     #[test]
@@ -623,7 +649,7 @@ mod tests {
             let mut msg = base_message();
             inject(&mut msg);
             match build_message(&msg) {
-                Err(BuildError::HeaderInjection(field)) => assert_eq!(
+                Err(BuildError::HeaderInjection { field }) => assert_eq!(
                     field, label,
                     "injection in {label} must name the offending field"
                 ),
@@ -758,13 +784,6 @@ mod tests {
 
         let wire_one = build(&msg);
         let wire_two = build(&msg);
-
-        let extract_boundary = |wire: &str| -> String {
-            let marker = "boundary=\"";
-            let start = wire.find(marker).expect("boundary param") + marker.len();
-            let end = wire[start..].find('"').expect("closing quote") + start;
-            wire[start..end].to_string()
-        };
 
         let b_one = extract_boundary(&wire_one);
         let b_two = extract_boundary(&wire_two);
@@ -934,12 +953,210 @@ mod tests {
     #[test]
     fn build_error_display_strings() {
         assert_eq!(
-            BuildError::HeaderInjection("subject").to_string(),
+            BuildError::HeaderInjection { field: "subject" }.to_string(),
             "header injection blocked in subject"
         );
         assert_eq!(
             BuildError::NoRecipient.to_string(),
             "message has no recipient"
+        );
+    }
+
+    #[test]
+    fn qp_trailing_spaces_never_break_the_76_char_cap() {
+        // Round-2 finding: a space admitted near the 75-char budget
+        // re-inflates to =20 at flush time (and multi-space runs
+        // only had their last space encoded). Pin exact wires.
+        let cases = [
+            // é (6 chars) + 68 literals ends at the cap; the space
+            // must soft-wrap BEFORE it is admitted.
+            (
+                format!("{}{}", "é", "a".repeat(68)) + " \nb",
+                format!("=C3=A9{}=\r\n=20\r\nb\r\n", "a".repeat(68)),
+            ),
+            // The 76-char boundary itself stays legal.
+            (
+                "a".repeat(72) + "é \nb",
+                format!("{}=C3=\r\n=A9=20\r\nb\r\n", "a".repeat(72)),
+            ),
+            // A space run expands every trailing space, never
+            // leaving a raw space before a break (ü keeps this
+            // body on the quoted-printable path).
+            (
+                "a".repeat(70) + "   \nb ü",
+                format!("{}=20=\r\n=20=20\r\nb =C3=BC\r\n", "a".repeat(70)),
+            ),
+        ];
+        for (body, expected_body) in cases {
+            let mut msg = base_message();
+            msg.body = body;
+
+            let wire = build(&msg);
+            let (_, wire_body) = wire.split_once("\r\n\r\n").expect("body");
+            assert_eq!(wire_body, expected_body);
+            for line in wire.split("\r\n") {
+                assert!(
+                    line.len() <= 76,
+                    "wire line is {} chars (limit 76): {line:?}",
+                    line.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normalizes_bare_cr_to_crlf() {
+        let mut msg = base_message();
+        msg.body = "a\rb ü".to_string();
+
+        let wire = build(&msg);
+
+        // Lone CR settles to a hard CRLF break in the 7bit view,
+        // and the QP path (forced by ü) must not swallow it.
+        assert!(wire.contains("Content-Transfer-Encoding: quoted-printable\r\n"));
+        assert!(wire.contains("a\r\nb =C3=BC\r\n"), "{wire}");
+    }
+
+    #[test]
+    fn subject_control_bytes_and_lookalike_encoded_words_are_encoded() {
+        let mut msg = base_message();
+        msg.subject = "\u{1}flag".to_string();
+        assert!(
+            build(&msg).contains("Subject: =?utf-8?q?=01flag?=\r\n"),
+            "control bytes must not ship raw in headers"
+        );
+
+        let mut lookalike = base_message();
+        lookalike.subject = "a =?utf-8?q?x?= b".to_string();
+        let lookalike_wire = build(&lookalike);
+        assert!(
+            lookalike_wire.contains("Subject: =?utf-8?q?a_=3D=3Futf-8=3Fq=3Fx=3F=3D_b?=\r\n"),
+            "an encoded-word lookalike must not self-decode in MUAs; actual: {lookalike_wire}"
+        );
+    }
+
+    #[test]
+    fn overlong_ascii_lines_force_quoted_printable() {
+        let mut msg = base_message();
+        msg.body = "a".repeat(1_200);
+
+        let wire = build(&msg);
+
+        assert!(wire.contains("Content-Transfer-Encoding: quoted-printable\r\n"));
+        for line in wire.split("\r\n") {
+            assert!(line.len() <= 76, "line {} chars", line.len());
+        }
+    }
+
+    #[test]
+    fn empty_display_name_renders_bare_address() {
+        let mut msg = base_message();
+        msg.to = vec![addr(Some(""), "bare@other.org")];
+
+        let wire = build(&msg);
+
+        assert!(wire.contains("To: bare@other.org\r\n"), "{wire}");
+        assert!(!wire.contains("=?utf-8?q??="));
+    }
+
+    #[test]
+    fn quoted_string_escapes_backslash_then_quote() {
+        let mut msg = base_message();
+        msg.attachments = vec![attachment("a\\b.txt", "text/plain", b"x")];
+
+        let wire = build(&msg);
+
+        assert!(wire.contains("filename=\"a\\\\b.txt\"\r\n"), "{wire}");
+    }
+
+    #[test]
+    fn two_attachments_each_get_a_part() {
+        let first: Vec<u8> = vec![1, 2, 3];
+        let second: Vec<u8> = vec![4, 5, 6, 7];
+        let mut msg = base_message();
+        msg.attachments = vec![
+            attachment("one.bin", "application/octet-stream", &first),
+            attachment("two.bin", "application/octet-stream", &second),
+        ];
+
+        let wire = build(&msg);
+        let boundary = extract_boundary(&wire);
+
+        assert_eq!(wire.matches(&format!("--{boundary}")).count(), 4);
+        assert!(wire.contains("filename=\"one.bin\"\r\n"));
+        assert!(wire.contains("filename=\"two.bin\"\r\n"));
+
+        let parsed = mail_parser::MessageParser::default()
+            .parse(wire.as_bytes())
+            .expect("parses");
+        assert_eq!(
+            parsed.attachment(0).expect("first").contents(),
+            first.as_slice()
+        );
+        assert_eq!(
+            parsed.attachment(1).expect("second").contents(),
+            second.as_slice()
+        );
+    }
+
+    #[test]
+    fn base64_wraps_three_times_beyond_two_lines() {
+        use base64::Engine as _;
+
+        let content: Vec<u8> = (0..200u8).collect();
+        let mut msg = base_message();
+        msg.attachments = vec![attachment("bin.dat", "application/octet-stream", &content)];
+
+        let wire = build(&msg);
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
+        assert_eq!(encoded.len(), 268);
+        let expected = format!(
+            "\r\n{}\r\n{}\r\n{}\r\n{}\r\n",
+            &encoded[..76],
+            &encoded[76..152],
+            &encoded[152..228],
+            &encoded[228..]
+        );
+        assert!(wire.contains(&expected));
+    }
+
+    #[test]
+    fn tab_survives_7bit_and_encodes_under_qp() {
+        let mut seven_bit = base_message();
+        seven_bit.body = "k\tv".to_string();
+        assert!(build(&seven_bit).contains("Content-Transfer-Encoding: 7bit\r\n"));
+        assert!(build(&seven_bit).contains("\r\n\r\nk\tv\r\n"));
+
+        let mut quoted = base_message();
+        quoted.body = "k\tv ü".to_string();
+        assert!(build(&quoted).contains("k=09v =C3=BC\r\n"));
+    }
+
+    #[test]
+    fn non_ascii_filename_roundtrips_through_mail_parser() {
+        use mail_parser::MimeHeaders;
+
+        let content = b"roundtrip payload";
+        let mut msg = base_message();
+        msg.attachments = vec![attachment("résumé.pdf", "application/pdf", content)];
+
+        let wire = build(&msg);
+        let parsed = mail_parser::MessageParser::default()
+            .parse(wire.as_bytes())
+            .expect("parses");
+
+        let attachment = parsed.attachment(0).expect("attachment part");
+        assert_eq!(attachment.contents(), content.as_slice());
+        // RFC 2047-in-quoted-string is the de-facto filename
+        // convention (RFC 2231 emission is parked in MAILSLATE-79);
+        // pin whatever the parser resolves so drift is visible.
+        let filename = attachment
+            .attachment_name()
+            .expect("filename param decodes");
+        assert!(
+            filename == "résumé.pdf" || filename == "=?utf-8?q?r=C3=A9sum=C3=A9=2Epdf?=",
+            "unexpected filename resolution: {filename}"
         );
     }
 }
