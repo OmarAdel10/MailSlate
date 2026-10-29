@@ -349,6 +349,7 @@ mod tests {
     /// secret in the key store — the secret must never touch the DB.
     #[test]
     fn add_imap_account_stores_secret_and_row() {
+        let _guard = NEXT_ID_LOCK.lock().expect("next id lock");
         let (_dir, path) = seeded_db();
         let keystore = FakeKeyStore::new();
         let writer = WriterActor::spawn(&path);
@@ -412,6 +413,7 @@ mod tests {
     /// fields, including schema defaults (no color, one-year window).
     #[test]
     fn get_accounts_lists_every_account_with_defaults() {
+        let _guard = NEXT_ID_LOCK.lock().expect("next id lock");
         let (_dir, path) = seeded_db();
         let keystore = FakeKeyStore::new();
         let writer = WriterActor::spawn(&path);
@@ -473,6 +475,7 @@ mod tests {
     /// scrubs both keyring keys best-effort.
     #[test]
     fn remove_account_deletes_row_and_keyring_entries() {
+        let _guard = NEXT_ID_LOCK.lock().expect("next id lock");
         let (_dir, path) = seeded_db();
         let keystore = FakeKeyStore::new();
         let writer = WriterActor::spawn(&path);
@@ -522,6 +525,7 @@ mod tests {
     /// clears the color.
     #[test]
     fn update_account_patches_only_given_fields() {
+        let _guard = NEXT_ID_LOCK.lock().expect("next id lock");
         let (_dir, path) = seeded_db();
         let keystore = FakeKeyStore::new();
         let writer = WriterActor::spawn(&path);
@@ -580,6 +584,7 @@ mod tests {
         use crate::infra::keyring::oauth_key;
         use crate::infra::oauth::tokens::{self, TokenSnapshot};
 
+        let _guard = NEXT_ID_LOCK.lock().expect("next id lock");
         let (_dir, path) = seeded_db();
         let keystore = FakeKeyStore::new();
         let writer = WriterActor::spawn(&path);
@@ -640,6 +645,7 @@ mod tests {
 
     #[test]
     fn account_connections_carry_sync_inputs() {
+        let _guard = NEXT_ID_LOCK.lock().expect("next id lock");
         let (_dir, path) = seeded_db();
         let keystore = FakeKeyStore::new();
         let writer = WriterActor::spawn(&path);

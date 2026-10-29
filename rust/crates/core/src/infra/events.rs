@@ -309,12 +309,14 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("bind");
         tokio::spawn(serve_single_connection(
             listener,
-            // Drop the connection after 120 ms without a request, and
-            // only publish the event at 300 ms — surviving proves the
-            // 30 ms heartbeats landed.
-            Duration::from_millis(120),
+            // Drop the connection after 500 ms without a request, and
+            // only publish the event at 900 ms — surviving proves the
+            // 30 ms heartbeats landed. The windows are wide so a busy
+            // test scheduler cannot starve a heartbeat for half a
+            // second.
+            Duration::from_millis(500),
             vec![(
-                Duration::from_millis(300),
+                Duration::from_millis(900),
                 Event::new("sync_progress", json!({"done": 3, "total": 10})),
             )],
         ));
@@ -326,7 +328,7 @@ mod tests {
                 ..EventStreamOptions::default()
             },
         );
-        let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        let event = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
             .await
             .expect("event arrives within the timeout")
             .expect("stream alive");
