@@ -18,8 +18,9 @@
 //!   transient auth failure. No message was offered; safe to retry.
 //! - [`SendError::Transient`] — the server answered `4xx`. It
 //!   explicitly refused the message; safe to retry.
-//! - [`SendError::Rejected`] — the server answered `5xx`, whether at
-//!   greeting, auth, envelope, or DATA. Permanent; never auto-retry.
+//! - [`SendError::Rejected`] — the server answered `5xx` at a stage
+//!   where the status is visible in the error chain (auth, envelope,
+//!   or DATA). Permanent; never auto-retry.
 //! - [`SendError::Ambiguous`] — the connection failed after the
 //!   transaction started without a final reply (timeout, reset,
 //!   parse failure). The message may or may not have been accepted,
@@ -28,11 +29,17 @@
 //!
 //! A cheap [`AsyncSmtpTransport::test_connection`] probe runs before
 //! submission so connect/TLS/auth failures are classified as
-//! pre-data instead of ambiguous. The probe and the submission each
-//! take a pooled connection: the first message may use two, and a
-//! send burst then reuses the parked connections instead of
-//! handshaking per message. Idle connections close after
-//! [`POOL_IDLE_TIMEOUT`] (PERFORMANCE_GUIDELINES).
+//! pre-data instead of ambiguous. The probe only answers a boolean:
+//! a server that refuses NOOP — for any reason, including a
+//! permanent `5xx` — reports unhealthy, and that refusal is
+//! classified as pre-data stage `greeting` (dup-safe: nothing was
+//! offered yet). Statuses that stay visible in a probe error chain
+//! (e.g. an AUTH `535`) are classified by [`classify_probe_error`]
+//! instead. The probe and the submission each take a pooled
+//! connection: the first message may use two, and a send burst then
+//! reuses the parked connections instead of handshaking per
+//! message. Idle connections close after [`POOL_IDLE_TIMEOUT`]
+//! (PERFORMANCE_GUIDELINES).
 //!
 //! ## Transport safety
 //!
@@ -70,6 +77,15 @@ use crate::domain::accounts::Security;
 /// A stuck server must surface as a failure the outbox can retry,
 /// not a hang.
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Total deadline for one submission (probe + message send), on top
+/// of the per-command [`SEND_TIMEOUT`] budgets above: a byte-
+/// trickling server could otherwise keep one outbox operation alive
+/// forever with a stream of partial replies. Elapse maps to
+/// [`SendError::Ambiguous`] — the state of the exchange is unknown
+/// by then, so the outbox must check the Sent mailbox before
+/// resending (ARCHITECTURE §9.6).
+const SEND_TOTAL: Duration = Duration::from_secs(90);
 
 /// Idle lifetime of a pooled submission connection
 /// (PERFORMANCE_GUIDELINES: close after 30 s idle).
@@ -160,6 +176,10 @@ impl SendError {
 pub(crate) struct SmtpSender {
     transport: AsyncSmtpTransport<Tokio1Executor>,
     security: Security,
+    /// Whole-operation deadline for [`SmtpSender::send`], covering
+    /// probe and submission. [`SEND_TOTAL`] by default; overridable
+    /// in tests to a short value.
+    total_timeout: Duration,
 }
 
 impl SmtpSender {
@@ -189,6 +209,7 @@ impl SmtpSender {
         Ok(Self {
             transport,
             security: config.security,
+            total_timeout: SEND_TOTAL,
         })
     }
 
@@ -209,26 +230,36 @@ impl SmtpSender {
         let wire = wire.strip_suffix(&b"\r\n"[..]).unwrap_or(wire);
 
         // Phase probe: everything that can fail here happens before
-        // the message is offered. A permanent 5xx (bad credentials,
-        // blocked IP, greeting rejection) is not retryable; every
-        // other probe failure is.
-        let healthy = self
-            .transport
-            .test_connection()
-            .await
-            .map_err(|error| classify_probe_error(error, self.security))?;
-        if !healthy {
-            return Err(SendError::PreData {
-                stage: "greeting",
-                detail: "server did not accept NOOP".to_string(),
-            });
-        }
+        // the message is offered. Refusals that carry a server
+        // status are classified from it (a permanent `5xx` is not
+        // retryable); a NOOP refusal is collapsed by lettre into
+        // `Ok(false)` and maps to the pre-data `greeting` stage,
+        // which is retriable but cannot duplicate anything.
+        let op = async {
+            let healthy = self
+                .transport
+                .test_connection()
+                .await
+                .map_err(|error| classify_probe_error(error, self.security))?;
+            if !healthy {
+                return Err(SendError::PreData {
+                    stage: "greeting",
+                    detail: "server did not accept NOOP".to_string(),
+                });
+            }
 
-        self.transport
-            .send_raw(&envelope, wire)
+            self.transport
+                .send_raw(&envelope, wire)
+                .await
+                .map(|_response| ())
+                .map_err(classify_send_error)
+        };
+
+        tokio::time::timeout(self.total_timeout, op)
             .await
-            .map(|_response| ())
-            .map_err(classify_send_error)
+            .map_err(|_elapsed| SendError::Ambiguous {
+                detail: "send deadline exceeded".to_string(),
+            })?
     }
 }
 
@@ -243,9 +274,12 @@ pub(crate) async fn send(
     SmtpSender::new(config, auth)?.send(envelope, wire).await
 }
 
-/// A probe failure means nothing was offered to the server. A
-/// permanent `5xx` (auth, greeting, policy block) must never be
-/// retried; a transient `4xx`, TLS, or network failure may be.
+/// A probe failure that carries a server status (statuses surface in
+/// the error chain, e.g. an AUTH refusal) is classified from its
+/// code: a permanent `5xx` must never be retried, a transient `4xx`
+/// may be. Every other probe failure — including a NOOP refusal,
+/// which lettre collapses into `Ok(false)` without a status — is
+/// pre-data: the message was not offered, so it is retry-safe.
 fn classify_probe_error(error: lettre::transport::smtp::Error, security: Security) -> SendError {
     match (error.is_permanent(), error.status()) {
         (true, Some(code)) => SendError::Rejected {
@@ -319,9 +353,9 @@ fn tls_parameters(host: &str) -> Result<TlsParameters, SendError> {
     })
 }
 
-/// Loopback, private, and link-local hosts only: plaintext SMTP is
-/// accepted for local relays and the GreenMail test harness, never
-/// for a remote provider.
+/// Loopback, private, and link-local hosts only (both address
+/// families): plaintext SMTP is accepted for local relays and the
+/// GreenMail test harness, never for a remote provider.
 fn is_local_host(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
@@ -330,7 +364,9 @@ fn is_local_host(host: &str) -> bool {
         Ok(IpAddr::V4(address)) => {
             address.is_loopback() || address.is_private() || address.is_link_local()
         }
-        Ok(IpAddr::V6(address)) => address.is_loopback() || address.is_unique_local(),
+        Ok(IpAddr::V6(address)) => {
+            address.is_loopback() || address.is_unique_local() || address.is_unicast_link_local()
+        }
         Err(_) => false,
     }
 }
