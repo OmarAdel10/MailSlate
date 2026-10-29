@@ -80,7 +80,7 @@ fn start_greenmail() -> ServerGuard {
     guard
 }
 
-/// A minimal well-formed RFC 5322 message; the builder is ST1's job and
+/// A minimal well-formed RFC 5322 message; the pool mechanism is ST2's job and
 /// already has its own round-trip suite.
 fn wire_message() -> Vec<u8> {
     concat!(
