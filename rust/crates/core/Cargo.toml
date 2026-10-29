@@ -34,15 +34,16 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "
 tokio-rustls = "0.26"
 uuid = { version = "1", features = ["v4"] }
 webpki-roots = "0.26"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "pool", "tokio1", "tokio1-rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 
 [features]
-# Gates the GreenMail integration tests (src/infra/imap/greenmail_tests.rs,
-# compiled as a module so the adapter keeps its pub(crate) surface closed);
-# they need the pinned standalone jar under .tools/ and a local JVM, so CI
-# never enables it. Run locally with:
+# Gates the GreenMail integration tests (src/infra/imap/greenmail_tests.rs and
+# src/infra/smtp/greenmail_tests.rs, compiled as modules so the adapters keep
+# their pub(crate) surface closed); they need the pinned standalone jar under
+# .tools/ and a local JVM. CI runs them with the feature enabled. Run locally:
 #   cargo test -p mailslate-core --features greenmail --lib greenmail_tests
 greenmail = []

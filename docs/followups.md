@@ -278,6 +278,12 @@ project (global `AGENTS.md` §4 and §13).
   emission form when the compose slice wires attachments
   (`rust/crates/core/src/infra/mime_out.rs`,
   `rust/crates/core/src/infra/mime.rs:678`).
+- MAILSLATE-81 — M4: repo-root hygiene debt found while gating
+  ST2 — `rust/*.profraw` coverage artifacts and stray session
+  report markdown files (`qa_report_part*.md`,
+  `coverage_analysis_report_m2*.md`, `QA_REPORT_M2_ROUND3.md`)
+  sit untracked; add a `.gitignore` pattern and archive or
+  remove the reports (`rust/`, repo root).
 
 ## Acknowledged test deferrals
 
