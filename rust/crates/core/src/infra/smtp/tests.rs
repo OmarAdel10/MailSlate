@@ -3,10 +3,22 @@
 //! Every test runs against an in-process fake SMTP server, so the
 //! protocol conversation, the envelope, and the failure taxonomy are
 //! observable without a network or a real MTA.
+//!
+//! Accepted deferrals (recorded here, not testable cheaply):
+//! - the `connect timeout` pre-data stage (mod.rs `pre_data_stage`):
+//!   needs a black-hole socket held for [`SEND_TIMEOUT`];
+//! - the pooled connection's idle close at [`POOL_IDLE_TIMEOUT`]:
+//!   lettre-owned pool behavior at a 30 s idle window;
+//! - `pre_data_stage`'s `has_rustls_source` arm against a real
+//!   lettre error: lettre's `smtp::Error` is not constructible
+//!   outside the lettre crate, so [`error_contains_rustls`] is
+//!   pinned directly and the TLS stage resolution rides the
+//!   implicit-TLS test instead.
 
 use super::*;
 use crate::domain::accounts::Security;
 use base64::Engine as _;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,6 +33,8 @@ const LONG_REPLY: &str = "550 5.7.1 this reply is intentionally much longer than
 enum AuthReply {
     Accept,
     Reject,
+    /// A custom `4xx` refusal reply (e.g. `454 4.7.0 try later`).
+    Transient(&'static str),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,15 +43,22 @@ enum DataReply {
     Reply(&'static str),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Script {
     auth: AuthReply,
+    /// Shared counter: the first N AUTH attempts across ALL connections
+    /// answer with [`Script::auth`]'s verdict; every later attempt
+    /// accepts, so a retry after a transient refusal succeeds.
+    auth_transients_before_accept: Arc<AtomicUsize>,
     auth_mechanisms: &'static str,
     mail_from: &'static str,
     rcpt: &'static str,
     rcpt_fail_on: Option<usize>,
     data: DataReply,
     data_drop_on: Option<usize>,
+    /// Never answer the DATA terminator: the client read pends until
+    /// the adapter's total deadline fires.
+    data_stall: bool,
     noop: &'static str,
     close_after_noop: Option<usize>,
 }
@@ -46,12 +67,14 @@ impl Default for Script {
     fn default() -> Self {
         Self {
             auth: AuthReply::Accept,
+            auth_transients_before_accept: Arc::new(AtomicUsize::new(0)),
             auth_mechanisms: "PLAIN LOGIN XOAUTH2",
             mail_from: OK_MAIL,
             rcpt: OK_RCPT,
             rcpt_fail_on: None,
             data: DataReply::Accept,
             data_drop_on: None,
+            data_stall: false,
             noop: "250 2.0.0 ok",
             close_after_noop: None,
         }
@@ -104,7 +127,7 @@ async fn start_fake(script: Script) -> FakeSmtp {
                 let mut captured = sink.lock().expect("capture lock");
                 captured.connections += 1;
             }
-            tokio::spawn(handle(stream, script, Arc::clone(&sink)));
+            tokio::spawn(handle(stream, script.clone(), Arc::clone(&sink)));
         }
     });
     FakeSmtp { port, captured }
@@ -138,6 +161,12 @@ async fn handle(stream: TcpStream, script: Script, captured: Arc<Mutex<Captured>
                     captured.data_attempts
                 };
                 if script.data_drop_on == Some(attempt) {
+                    return;
+                }
+                if script.data_stall {
+                    // Never answer: the client read pends until the
+                    // adapter's total deadline fires.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
                     return;
                 }
                 {
@@ -204,9 +233,18 @@ async fn handle(stream: TcpStream, script: Script, captured: Arc<Mutex<Captured>
                     .auth_responses
                     .push(String::from_utf8_lossy(&response).trim().to_string());
             }
-            Some(match script.auth {
+            let attempt = script
+                .auth_transients_before_accept
+                .fetch_add(1, Ordering::Relaxed);
+            let verdict = if attempt == 0 {
+                script.auth
+            } else {
+                AuthReply::Accept
+            };
+            Some(match verdict {
                 AuthReply::Accept => "235 2.7.0 accepted".to_string(),
                 AuthReply::Reject => "535 5.7.8 bad credentials".to_string(),
+                AuthReply::Transient(reply) => reply.to_string(),
             })
         } else if upper.starts_with("MAIL FROM") {
             {
@@ -315,6 +353,30 @@ fn tls_mode_maps_each_security_level() {
     assert!(matches!(
         tls_mode(Security::Plaintext, "192.168.1.10"),
         Ok(Tls::None)
+    ));
+    // Link-local and unique-local IPv6 are trusted with the same
+    // verdict as their IPv4 counterparts.
+    assert!(matches!(
+        tls_mode(Security::Plaintext, "fe80::1"),
+        Ok(Tls::None)
+    ));
+    assert!(matches!(
+        tls_mode(Security::Plaintext, "::1"),
+        Ok(Tls::None)
+    ));
+    assert!(matches!(
+        tls_mode(Security::Plaintext, "fd00::1"),
+        Ok(Tls::None)
+    ));
+    assert!(matches!(
+        tls_mode(Security::Plaintext, "169.254.1.1"),
+        Ok(Tls::None)
+    ));
+    // An unparseable host is not a local address: plaintext is
+    // refused even when the port happens to belong to a test relay.
+    assert!(matches!(
+        tls_mode(Security::Plaintext, "smtp.example.invalid"),
+        Err(SendError::InsecureTransport { .. })
     ));
     assert!(matches!(
         tls_mode(Security::Plaintext, "smtp.example.com"),
@@ -663,6 +725,11 @@ async fn auth_rejection_is_permanent() {
 
 #[tokio::test]
 async fn noop_rejected_by_probe_is_pre_data_greeting() {
+    // The probe is lettre's `test_connection()`, which answers a
+    // boolean: it collapses every NOOP refusal (4xx or 5xx) into
+    // `Ok(false)` with no visible status, so the refusal surfaces as
+    // the retry-safe `greeting` stage. That is dup-safe by
+    // construction — the message was never offered.
     let server = start_fake(Script {
         noop: "421 4.3.2 shutting down",
         ..Script::default()
@@ -984,4 +1051,357 @@ async fn pooled_sender_reuses_connections_for_a_burst() {
         captured.auth_lines
     );
     assert_eq!(captured.message, b"three\r\n");
+}
+
+#[tokio::test]
+async fn noop_5xx_refusal_is_pre_data_greeting() {
+    // Even a permanent 5xx NOOP refusal is collapsed by lettre's
+    // boolean probe into `Ok(false)`: no status reaches the error
+    // chain, so the failure lands on the retry-safe greeting stage.
+    // Dup-safe by construction — nothing was offered.
+    let server = start_fake(Script {
+        noop: "550 5.7.0 policy refused",
+        ..Script::default()
+    })
+    .await;
+
+    let error = send(&server.config(), &password_auth(), &outgoing(), b"wire\r\n")
+        .await
+        .expect_err("NOOP refusal must fail the probe");
+
+    assert!(error.retry_safe(), "{error:?}");
+    assert!(!error.needs_sent_check(), "{error:?}");
+    match &error {
+        SendError::PreData { stage, .. } => assert_eq!(*stage, "greeting"),
+        other => panic!("expected PreData, got {other:?}"),
+    }
+    let captured = server.captured();
+    assert!(captured.mail_from.is_empty());
+    assert!(captured.message.is_empty());
+}
+
+#[tokio::test]
+async fn transient_auth_refusal_is_pre_data_and_retry_safe() {
+    let server = start_fake(Script {
+        auth: AuthReply::Transient("454 4.7.0 try later"),
+        ..Script::default()
+    })
+    .await;
+
+    let error = send(&server.config(), &password_auth(), &outgoing(), b"wire\r\n")
+        .await
+        .expect_err("4xx auth must fail");
+
+    assert!(error.retry_safe(), "{error:?}");
+    assert!(!error.needs_sent_check(), "{error:?}");
+    match &error {
+        SendError::PreData { stage, .. } => assert_eq!(*stage, "pre-data"),
+        other => panic!("expected PreData, got {other:?}"),
+    }
+    assert!(
+        server.captured().mail_from.is_empty(),
+        "no mail transaction after a transient auth failure"
+    );
+}
+
+#[tokio::test]
+async fn send_recovers_after_a_transient_auth_refusal() {
+    // First send: probe OK, AUTH transient (454) -> PreData retry-safe.
+    // Second send: fresh transport (no pool reuse across calls), probe OK,
+    // AUTH accept -> success. The shared atomic counter ensures the
+    // first AUTH across ALL connections is transient, the second is accept.
+    let counter = Arc::new(AtomicUsize::new(0));
+    let server = start_fake(Script {
+        auth: AuthReply::Transient("454 4.7.0 try later"),
+        auth_transients_before_accept: counter,
+        ..Script::default()
+    })
+    .await;
+
+    let first = send(&server.config(), &password_auth(), &outgoing(), b"one\r\n")
+        .await
+        .expect_err("first attempt is refused");
+    assert!(first.retry_safe(), "{first:?}");
+    match &first {
+        SendError::PreData { stage, .. } => assert_eq!(*stage, "pre-data"),
+        other => panic!("expected PreData, got {other:?}"),
+    }
+    assert!(
+        server.captured().mail_from.is_empty(),
+        "no mail transaction after transient auth failure"
+    );
+
+    let second = send(&server.config(), &password_auth(), &outgoing(), b"two\r\n")
+        .await
+        .expect("the retried send succeeds");
+    assert_eq!(second, ());
+
+    let captured = server.captured();
+    assert_eq!(captured.message, b"two\r\n");
+    assert!(
+        captured
+            .mail_from
+            .iter()
+            .any(|line| line.contains("alice@example.com")),
+        "the retry must run a mail transaction: {:?}",
+        captured.mail_from
+    );
+}
+
+#[test]
+fn error_contains_rustls_walks_the_source_chain() {
+    #[derive(Debug)]
+    struct WrapsRustlsInSource(rustls::Error);
+
+    impl std::fmt::Display for WrapsRustlsInSource {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("wrapping rustls")
+        }
+    }
+
+    impl std::error::Error for WrapsRustlsInSource {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    let rustls_error = rustls::Error::General("handshake failure".to_string());
+
+    // A plain io error carries no rustls: false.
+    let plain = std::io::Error::other("plain io failure");
+    assert!(
+        !error_contains_rustls(&plain),
+        "plain io error must not be classified as rustls"
+    );
+
+    // Direct hit: true.
+    let direct = rustls::Error::General("direct".to_string());
+    assert!(error_contains_rustls(&direct));
+
+    // An io error wrapping rustls: reached through `get_ref`.
+    let wrapped = std::io::Error::other(rustls_error.clone());
+    assert!(error_contains_rustls(&wrapped));
+
+    // A deep chain: io wrapping io wrapping rustls, and a source()
+    // chain ending in rustls.
+    let deep = std::io::Error::other(wrapped);
+    assert!(error_contains_rustls(&deep));
+    assert!(error_contains_rustls(&WrapsRustlsInSource(rustls_error)));
+}
+
+#[tokio::test]
+async fn non_ascii_addresses_surface_as_ambiguous_not_invalid_envelope() {
+    // lettre does not pre-validate non-ASCII addresses; it attempts
+    // to send and the client returns an internal error with no
+    // server status. The adapter classifies this as Ambiguous, which
+    // requires a Sent check but is not retry-safe — wrong outbox
+    // policy. This is a known divergence from the ideal
+    // InvalidEnvelope path; tracked for the compose slice.
+    let server = start_fake(Script::default()).await;
+    let config = server.config();
+    let auth = password_auth();
+
+    let mut bad_local_part = outgoing();
+    bad_local_part.to = vec!["j\u{f6}rge@other.org".to_string()];
+    bad_local_part.cc.clear();
+    bad_local_part.bcc.clear();
+    let error = send(&config, &auth, &bad_local_part, b"wire\r\n")
+        .await
+        .expect_err("non-ASCII local part must fail");
+    assert!(
+        matches!(error, SendError::Ambiguous { .. }),
+        "non-ASCII currently yields Ambiguous (no server status): {error:?}"
+    );
+    assert!(error.needs_sent_check(), "{error:?}");
+    assert!(!error.retry_safe(), "{error:?}");
+
+    let mut bad_domain = outgoing();
+    bad_domain.from = "alice@ex\u{e4}mple.test".to_string();
+    let error = send(&config, &auth, &bad_domain, b"wire\r\n")
+        .await
+        .expect_err("non-ASCII domain must fail");
+    assert!(
+        matches!(error, SendError::Ambiguous { .. }),
+        "non-ASCII currently yields Ambiguous (no server status): {error:?}"
+    );
+    assert!(error.needs_sent_check(), "{error:?}");
+    assert!(!error.retry_safe(), "{error:?}");
+
+    // Connections are opened because envelope validation passes;
+    // the failure occurs at the lettre client level during send.
+    // This is the documented divergence from ideal InvalidEnvelope.
+    assert!(
+        server.captured().connections > 0,
+        "connections opened before client-level failure: {}",
+        server.captured().connections
+    );
+}
+
+#[tokio::test]
+async fn multi_line_refusal_detail_is_joined_then_truncated() {
+    // lettre joins all server reply lines with newlines, then the
+    // adapter takes the first line of that joined string (which is
+    // the first server line followed by embedded newlines from the
+    // joined remainder). The effective "first line" visible to us
+    // contains the start of the second server line.
+    let server = start_fake(Script {
+        rcpt: "550-5.1.1 first line\r\n550 5.1.1 second line",
+        ..Script::default()
+    })
+    .await;
+
+    let error = send(&server.config(), &password_auth(), &outgoing(), b"wire\r\n")
+        .await
+        .expect_err("multi-line refusal must fail");
+
+    match &error {
+        SendError::Rejected { detail, .. } => {
+            // The joined response starts with "550-5.1.1 first line" then
+            // the embedded "\r\n" from lettre's join, then "550 5.1.1 second line".
+            // Our `error_detail` takes the first *character line* of that.
+            assert!(
+                detail.contains("first line"),
+                "detail must contain the first server line: {detail}"
+            );
+            assert!(
+                detail.contains("second line"),
+                "joined response makes the second server line visible in the first line: {detail}"
+            );
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn detail_of_exactly_the_limit_is_not_marked_truncated() {
+    // lettre's Display prefixes the reply with `permanent error
+    // (550): ` (23 chars); padding the reply so the whole first line
+    // is exactly [`DETAIL_LIMIT`] chars must not gain an ellipsis.
+    let first_line = Box::leak(
+        format!(
+            "550 5.7.1 {}",
+            "x".repeat(DETAIL_LIMIT - "permanent error (550): ".len() - "550 5.7.1 ".len() + 4)
+        )
+        .into_boxed_str(),
+    );
+    let server = start_fake(Script {
+        rcpt: first_line,
+        ..Script::default()
+    })
+    .await;
+
+    let error = send(&server.config(), &password_auth(), &outgoing(), b"wire\r\n")
+        .await
+        .expect_err("boundary refusal must fail");
+
+    match &error {
+        SendError::Rejected { detail, .. } => {
+            assert_eq!(detail.chars().count(), DETAIL_LIMIT, "{detail}");
+            assert!(
+                !detail.ends_with('…'),
+                "a line at the limit is not truncated: {detail}"
+            );
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn mail_from_550_is_rejected() {
+    let server = start_fake(Script {
+        mail_from: "550 5.1.0 envelope blocked",
+        ..Script::default()
+    })
+    .await;
+
+    let error = send(&server.config(), &password_auth(), &outgoing(), b"wire\r\n")
+        .await
+        .expect_err("MAIL FROM 5xx must fail");
+
+    assert!(!error.retry_safe(), "{error:?}");
+    assert!(!error.needs_sent_check(), "{error:?}");
+    match &error {
+        SendError::Rejected { code, .. } => assert_eq!(*code, 550),
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn xoauth2_rejection_is_permanent() {
+    let server = start_fake(Script {
+        auth: AuthReply::Reject,
+        ..Script::default()
+    })
+    .await;
+
+    let error = send(&server.config(), &xoauth2_auth(), &outgoing(), b"wire\r\n")
+        .await
+        .expect_err("XOAUTH2 rejection must fail");
+
+    assert!(!error.retry_safe(), "{error:?}");
+    match &error {
+        SendError::Rejected { code, .. } => assert_eq!(*code, 535),
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+    assert!(server.captured().mail_from.is_empty());
+}
+
+#[tokio::test]
+async fn server_drop_after_noop_probe_recovers_on_a_fresh_connection() {
+    // The probe connection dies right after answering its NOOP. The
+    // pool's liveness check discards that dead parked connection on
+    // the next acquire, so the submission still runs on a fresh,
+    // working connection.
+    let server = start_fake(Script {
+        close_after_noop: Some(1),
+        ..Script::default()
+    })
+    .await;
+    let sender = SmtpSender::new(&server.config(), &password_auth()).expect("build sender");
+
+    sender
+        .send(&outgoing(), b"wire\r\n")
+        .await
+        .expect("the send must recover after the dropped probe connection");
+
+    settle().await;
+    let captured = server.captured();
+    assert_eq!(captured.message, b"wire\r\n");
+    assert!(
+        captured.connections <= 2,
+        "the dead probe connection must be replaced by at most one \
+         fresh connection, opened {}",
+        captured.connections
+    );
+}
+
+#[tokio::test]
+async fn total_send_deadline_elapses_as_ambiguous() {
+    // The server accepts the probe and the DATA conversation but
+    // never answers the terminator: the per-command budget is far
+    // away, so only the total deadline can break the hang.
+    let server = start_fake(Script {
+        data_stall: true,
+        ..Script::default()
+    })
+    .await;
+    let mut sender = SmtpSender::new(&server.config(), &password_auth()).expect("build sender");
+    sender.total_timeout = Duration::from_millis(400);
+
+    let started = std::time::Instant::now();
+    let error = sender
+        .send(&outgoing(), b"wire\r\n")
+        .await
+        .expect_err("a stalled server must hit the total deadline");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the total deadline, not the per-command budget, must fire"
+    );
+    assert!(error.needs_sent_check(), "{error:?}");
+    assert!(!error.retry_safe(), "{error:?}");
+    match &error {
+        SendError::Ambiguous { detail } => assert_eq!(detail, "send deadline exceeded"),
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
 }
